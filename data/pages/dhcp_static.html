@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dhcp">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Static Bindings — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dhcp_static.title">Static Bindings</h1>
+
+        <div class="card">
+            <p data-i18n="dhcp.mac_example" style="color:var(--text-secondary);font-size:0.85rem;">e.g. 24:0A:C4:01:23:45</p>
+            <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th data-i18n="dhcp.binding_enabled">On</th>
+                        <th data-i18n="dhcp.mac">MAC Address</th>
+                        <th data-i18n="dhcp.ip">IP Address</th>
+                        <th data-i18n="dhcp.gateway">Gateway</th>
+                        <th data-i18n="dhcp.binding_dns">DNS</th>
+                        <th data-i18n="dhcp.name">Name</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="static-bindings-body"></tbody>
+            </table>
+            </div>
+            <button class="btn btn-success" onclick="addStaticBinding()" data-i18n="dhcp.add">Add</button>
+            <button class="btn btn-primary" onclick="saveStaticBindings()" data-i18n="dhcp.save">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        async function loadStaticBindings() {
+            const data = await fetchJSON('/api/dhcp/static-bindings');
+            renderStaticBindings(data.bindings || []);
+        }
+
+        function renderStaticBindings(bindings) {
+            const tbody = document.getElementById('static-bindings-body');
+            tbody.innerHTML = '';
+            bindings.forEach((b, i) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>
+                        <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                            <input type="checkbox" class="binding-enabled" data-idx="${i}" style="width:auto;flex:none;padding:0;margin:0;" ${b.enabled !== false ? 'checked' : ''}>
+                        </div>
+                    </td>
+                    <td><input type="text" value="${b.mac || ''}" data-idx="${i}" class="binding-mac" placeholder="24:0A:C4:01:23:45"></td>
+                    <td><input type="text" value="${b.ip || ''}" data-idx="${i}" class="binding-ip"></td>
+                    <td>
+                        <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                            <input type="checkbox" class="binding-use-gw" data-idx="${i}" style="width:auto;flex:none;padding:0;margin:0;" ${b.use_gateway !== false ? 'checked' : ''}>
+                        </div>
+                    </td>
+                    <td>
+                        <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                            <input type="checkbox" class="binding-use-dns" data-idx="${i}" style="width:auto;flex:none;padding:0;margin:0;" ${b.use_dns !== false ? 'checked' : ''}>
+                        </div>
+                    </td>
+                    <td><input type="text" value="${b.name || ''}" data-idx="${i}" class="binding-name"></td>
+                    <td><button class="btn btn-danger" onclick="removeBinding(${i})" data-i18n="dhcp.remove">Remove</button></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function addStaticBinding() {
+            const tbody = document.getElementById('static-bindings-body');
+            const idx = tbody.children.length;
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>
+                    <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                        <input type="checkbox" class="binding-enabled" data-idx="${idx}" style="width:auto;flex:none;padding:0;margin:0;" checked>
+                    </div>
+                </td>
+                <td><input type="text" value="" data-idx="${idx}" class="binding-mac" placeholder="24:0A:C4:01:23:45"></td>
+                <td><input type="text" value="" data-idx="${idx}" class="binding-ip"></td>
+                <td>
+                    <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                        <input type="checkbox" class="binding-use-gw" data-idx="${idx}" style="width:auto;flex:none;padding:0;margin:0;" checked>
+                    </div>
+                </td>
+                <td>
+                    <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                        <input type="checkbox" class="binding-use-dns" data-idx="${idx}" style="width:auto;flex:none;padding:0;margin:0;" checked>
+                    </div>
+                </td>
+                <td><input type="text" value="" data-idx="${idx}" class="binding-name"></td>
+                <td><button class="btn btn-danger" onclick="this.closest('tr').remove()" data-i18n="dhcp.remove">Remove</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function removeBinding(idx) {
+            document.querySelector(`.binding-mac[data-idx="${idx}"]`)?.closest('tr')?.remove();
+        }
+
+        async function saveStaticBindings() {
+            const bindings = [];
+            document.querySelectorAll('#static-bindings-body tr').forEach(tr => {
+                const mac = tr.querySelector('.binding-mac')?.value?.trim();
+                const ip = tr.querySelector('.binding-ip')?.value?.trim();
+                const useGw = tr.querySelector('.binding-use-gw')?.checked;
+                const useDns = tr.querySelector('.binding-use-dns')?.checked;
+                const name = tr.querySelector('.binding-name')?.value?.trim();
+                const enabled = tr.querySelector('.binding-enabled')?.checked;
+                if (mac && ip) bindings.push({ mac, ip, use_gateway: !!useGw, use_dns: useDns !== false, name, enabled: enabled !== false });
+            });
+            const result = await postJSON('/api/dhcp/static-bindings', { bindings });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+            } else {
+                alert('Static bindings saved!');
+                loadStaticBindings();
+            }
+        }
+
+        loadStaticBindings();
+    </script>
+</body>
+</html>

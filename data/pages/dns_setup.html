@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dns.title">DNS Setup</h1>
+
+        <div class="card" id="dns-status-card">
+            <strong data-i18n="dns.server_status">Server Status:</strong>
+            <span id="dns-server-state" class="status-badge status-stopped">--</span>
+            <span id="dns-query-count" style="margin-left:1rem;color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="dns.enable_disable">Enable/Disable</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-enabled" onchange="toggleDnsEnable()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="dns.external_dns">External DNS Server</label>
+            <input type="text" id="dns-external" placeholder="192.168.1.1">
+            <button class="btn btn-primary" onclick="saveDnsSettings()" data-i18n="dns.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // DNS General page — owns only {enabled, external_dns}. The logging /
+        // cache / local-hosts sub-pages own the rest of the settings object;
+        // every save merges with the current server state via saveDnsPartial().
+        function readDnsForm() {
+            return {
+                enabled: document.getElementById('dns-enabled').checked,
+                external_dns: document.getElementById('dns-external').value,
+            };
+        }
+
+        async function loadDnsSettings() {
+            const data = await fetchJSON('/api/dns/settings');
+            document.getElementById('dns-enabled').checked = data.enabled !== false;
+            document.getElementById('dns-external').value = data.external_dns || '';
+            updateDnsServerStatus(data);
+        }
+
+        function updateDnsServerStatus(data) {
+            const el = document.getElementById('dns-server-state');
+            if (!el) return;
+            const state = data.server_state || 'unknown';
+            const labels = { running: tr('status.running'), stopped: tr('status.stopped'), error: tr('status.error'), unknown: tr('status.unknown') };
+            const classes = { running: 'status-ok', stopped: 'status-stopped', error: 'status-err', unknown: '' };
+            el.textContent = labels[state] || state;
+            el.className = 'status-badge ' + (classes[state] || '');
+            const qEl = document.getElementById('dns-query-count');
+            if (qEl) {
+                qEl.textContent = state === 'running' ? tr('status.queries') + (data.query_count || 0) : '';
+            }
+        }
+
+        async function toggleDnsEnable() {
+            const checked = document.getElementById('dns-enabled').checked;
+            const result = await saveDnsPartial({ enabled: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-enabled').checked = !checked;
+            } else {
+                const fresh = await fetchJSON('/api/dns/settings');
+                updateDnsServerStatus(fresh);
+            }
+        }
+
+        async function saveDnsSettings() {
+            const result = await saveDnsPartial(readDnsForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadDnsSettings();
+            alert('DNS settings saved!');
+        }
+
+        loadDnsSettings();
+
+        // Periodic refresh of server status (every 5s)
+        setInterval(async () => {
+            try {
+                const data = await fetchJSON('/api/dns/settings');
+                updateDnsServerStatus(data);
+            } catch (e) { /* ignore */ }
+        }, 5000);
+    </script>
+</body>
+</html>

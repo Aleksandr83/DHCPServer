@@ -1,0 +1,170 @@
+{
+  "app": {
+    "title": "DHCPServer",
+    "subtitle": "DHCP и Кэширующий DNS Сервер",
+    "wifi_status": "Статус сети:",
+    "dhcp_status": "DHCP Сервер:",
+    "dns_status": "DNS Сервер:",
+    "cpu_load": "Нагрузка CPU:",
+    "free_ram": "ОЗУ:",
+    "static_bindings": "Статические привязки DHCP:",
+    "local_hosts": "Локальные хосты DNS:",
+    "footer": "ESP32 DHCP и DNS Сервер"
+  },
+  "status": {
+    "connected": "Подключено",
+    "disconnected": "Отключено",
+    "running": "Работает",
+    "stopped": "Остановлен",
+    "error": "Ошибка",
+    "unknown": "--",
+    "leases": "Аренд: ",
+    "queries": "Запросов: "
+  },
+  "nav": {
+    "home": "Главная",
+    "dhcp": "DHCP",
+    "dhcp_general": "Общее",
+    "dhcp_logging": "Логирование",
+    "dhcp_dns": "DNS",
+    "dhcp_static": "Статические привязки",
+    "dns": "DNS",
+    "dns_general": "Общее",
+    "dns_logging": "Логирование",
+    "dns_cache": "Кэш",
+    "dns_local_hosts": "Локальные хосты",
+    "security": "Безопасность",
+    "help": "Справка",
+    "version": "Версия"
+  },
+  "login": {
+    "title": "DHCPServer",
+    "username": "Имя пользователя",
+    "password": "Пароль",
+    "login": "Войти",
+    "error": "Неверные учетные данные"
+  },
+  "auth": {
+    "login_prompt": "Введите пароль:"
+  },
+  "dhcp": {
+    "title": "Настройка DHCP",
+    "enabled": "Включён",
+    "binding_enabled": "Вкл",
+    "binding_dns": "DNS",
+    "disabled": "Выключен",
+    "start_ip": "Начальный IP",
+    "end_ip": "Конечный IP",
+    "subnet": "Маска подсети",
+    "gateway": "Шлюз",
+    "server_ip": "IP сервера",
+    "server_ip_desc": "IP адрес этого устройства в сети",
+    "lease_time": "Время аренды (с)",
+    "static_bindings": "Статические привязки",
+    "mac": "MAC адрес",
+    "ip": "IP адрес",
+    "gateway": "Шлюз",
+    "name": "Имя",
+    "add": "Добавить",
+    "remove": "Удалить",
+    "save": "Сохранить",
+    "mac_example": "например: 24:0A:C4:01:23:45",
+    "enable_disable": "Вкл/Выкл",
+    "log_terminal": "Логировать в терминал",
+    "log_rest": "Логировать во внешний REST",
+    "log_url": "URL логирования (REST)",
+    "log_auth": "Требуется авторизация",
+    "log_auth_user": "Логин",
+    "log_auth_pass": "Пароль",
+    "test_connection": "Проверить подключение",
+    "test_no_url": "Введите URL",
+    "test_checking": "Проверка...",
+    "test_ok": "Подключение OK",
+    "test_fail": "Ошибка подключения",
+    "test_not_saved": "Логин/пароль не сохранены",
+    "server_status": "Статус сервера:",
+    "range": "Диапазон адресов",
+    "dns": "DNS сервер",
+    "dns_status_label": "Встроенный DNS сервер:",
+    "dns_mode": "Режим DNS",
+    "dns_mode_auto": "Авто",
+    "dns_mode_manual": "Вручную",
+    "dns_address": "Адрес DNS сервера",
+    "dns_auto_hint": "Авто: используется встроенный DNS сервер, если он включён, иначе роутер."
+  },
+  "dhcp_logging": {
+    "title": "Логирование DHCP"
+  },
+  "dhcp_dns": {
+    "title": "DNS (DHCP)"
+  },
+  "dhcp_static": {
+    "title": "Статические привязки"
+  },
+  "dns": {
+    "title": "Настройка DNS",
+    "server_status": "Статус сервера:",
+    "enable_disable": "Вкл/Выкл",
+    "external_dns": "Внешний DNS сервер",
+    "log_terminal": "Логировать в терминал",
+    "log_forwarded": "Пересланные (forward)",
+    "log_local": "Назначенные пользователем",
+    "log_cache": "Из кэша",
+    "log_rest_sent": "Отправлены в REST",
+    "log_rest": "Логировать во внешний REST",
+    "cache_rest": "Внешний кэш (REST)",
+    "cache_read": "Читать из кэша",
+    "cache_write": "Записывать в кэш",
+    "cache_url": "URL внешнего кэша (REST)",
+    "log_url": "URL логирования (REST)",
+    "log_auth": "Требуется авторизация",
+    "log_auth_user": "Логин",
+    "log_auth_pass": "Пароль",
+    "cache_auth": "Требуется авторизация",
+    "cache_auth_user": "Логин",
+    "cache_auth_pass": "Пароль",
+    "test_connection": "Проверить подключение",
+    "test_no_url": "Введите URL",
+    "test_checking": "Проверка...",
+    "test_ok": "Подключение OK",
+    "test_fail": "Ошибка подключения",
+    "test_not_saved": "Логин/пароль не сохранены",
+    "local_hosts": "Локальные хосты",
+    "local_hosts_desc": "Пользовательские сопоставления домен → IP.",
+    "local_enabled": "Вкл",
+    "local_name": "Имя хоста",
+    "local_ip4": "IPv4 адрес",
+    "local_ip6": "IPv6 адрес",
+    "add": "Добавить",
+    "remove": "Удалить",
+    "save": "Сохранить"
+  },
+  "dns_logging": {
+    "title": "Логирование DNS"
+  },
+  "dns_cache": {
+    "title": "Кэш DNS"
+  },
+  "dns_local_hosts": {
+    "title": "Локальные хосты"
+  },
+  "security": {
+    "title": "Настройки безопасности",
+    "username": "Имя пользователя",
+    "password": "Пароль",
+    "max_attempts": "Макс. попыток",
+    "lockout_period": "Блокировка (сек)",
+    "save": "Сохранить"
+  },
+  "version": {
+    "title": "Версия прошивки",
+    "label": "Версия"
+  },
+  "update": {
+    "title": "Обновление прошивки",
+    "select": "Выберите файл .bin",
+    "upload": "Загрузить",
+    "uploading": "Загрузка...",
+    "success": "Обновление успешно! Устройство перезагружается..."
+  }
+}

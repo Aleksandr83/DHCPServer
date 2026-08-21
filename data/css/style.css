@@ -1,0 +1,791 @@
+/* ─── DHCPServer Dark Theme ─────────────────────────── */
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-card: #1c2333;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --danger: #f85149;
+    --success: #3fb950;
+    --border: #30363d;
+    --input-bg: #0d1117;
+    --emoji-opacity: 0.15;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    min-height: 100vh;
+    position: relative;
+    overflow-x: hidden;
+}
+
+/* ─── Floating Emojis ──────────────────────────────── */
+
+.emoji-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 0;
+}
+
+.emoji {
+    position: absolute;
+    font-size: 2rem;
+    opacity: var(--emoji-opacity);
+    animation: floatEmoji linear infinite;
+    will-change: transform;
+}
+
+@keyframes floatEmoji {
+    0% {
+        transform: translateY(100vh) rotate(0deg);
+        opacity: 0;
+    }
+    10% {
+        opacity: var(--emoji-opacity);
+    }
+    90% {
+        opacity: var(--emoji-opacity);
+    }
+    100% {
+        transform: translateY(-10vh) rotate(720deg);
+        opacity: 0;
+    }
+}
+
+/* ─── Container ────────────────────────────────────── */
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 1rem;
+    position: relative;
+    z-index: 1;
+}
+
+/* ─── Navbar ───────────────────────────────────────── */
+
+.navbar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 0.75rem 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.navbar .container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.logo {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.nav-links {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.nav-links a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: color 0.2s;
+}
+
+.nav-links a:hover {
+    color: var(--accent);
+}
+
+/* Navbar dropdown (e.g. Help menu) */
+.nav-dropdown {
+    position: relative;
+    /* Normalize font-size to the nav-link size (0.9rem) so the wrapper's
+       line box (strut) matches the links and the button stays vertically
+       aligned with them; center the button inside the wrapper. */
+    display: flex;
+    align-items: center;
+    font-size: 0.9rem;
+}
+
+.nav-dropdown-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-family: inherit;
+    line-height: inherit;
+    padding: 0;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.nav-dropdown-toggle::after {
+    content: ' ▾';
+    font-size: 0.75rem;
+}
+
+.nav-dropdown-toggle:hover,
+.nav-dropdown.open .nav-dropdown-toggle {
+    color: var(--accent);
+}
+
+.nav-dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    min-width: 170px;
+    /* Size to the widest item instead of being capped by the narrow
+       dropdown wrapper's containing block (which made long items like
+       "Локальные хосты" wrap onto two lines). */
+    width: max-content;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.35rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 110;
+}
+
+.nav-dropdown.open .nav-dropdown-menu {
+    display: block;
+}
+
+.nav-dropdown-menu a {
+    display: block;
+    padding: 0.45rem 0.7rem;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.nav-dropdown-menu a:hover {
+    background: var(--bg-secondary);
+    color: var(--accent);
+}
+
+.lang-switch button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.lang-switch button:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.lang-switch button:first-child {
+    border-radius: 4px 0 0 4px;
+}
+
+.lang-switch button:last-child {
+    border-radius: 0 4px 4px 0;
+    border-left: none;
+}
+
+/* Hamburger toggle (mobile) */
+.nav-toggle {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 0.3rem 0.6rem;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.nav-menu {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+/* ─── Main Content ─────────────────────────────────── */
+
+main {
+    padding: 2rem 0;
+    min-height: calc(100vh - 120px);
+}
+
+h1 {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5rem;
+    margin: 1.5rem 0 0.75rem;
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.1rem;
+    margin: 1rem 0 0.5rem;
+    color: var(--text-primary);
+}
+
+/* ─── Cards ────────────────────────────────────────── */
+
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 1.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.card h2 {
+    margin-top: 0.2rem;
+}
+
+.card h3 {
+    margin-top: 0.2rem;
+}
+
+/* ─── Forms ────────────────────────────────────────── */
+
+/* Horizontal divider inside a card: visible gradient line with a glowing
+   accent dot (light enough to stand out on the dark card background) */
+.card-separator {
+    border: 0;
+    height: 2px;
+    margin: 1.1rem 0;
+    background: linear-gradient(90deg, transparent,
+                                var(--text-secondary) 25%,
+                                var(--text-secondary) 75%,
+                                transparent);
+    border-radius: 2px;
+    position: relative;
+}
+
+.card-separator::after {
+    content: "\2022"; /* bullet */
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-card);
+    color: var(--accent);
+    padding: 0 0.7rem;
+    font-size: 1rem;
+    line-height: 1;
+    text-shadow: 0 0 6px var(--accent);
+}
+
+label {
+    display: block;
+    margin: 0.75rem 0 0.25rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+input, select, textarea {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    transition: border-color 0.2s;
+}
+
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* ─── Buttons ──────────────────────────────────────── */
+
+.btn {
+    display: inline-block;
+    padding: 0.6rem 1.2rem;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    margin: 0.5rem 0.25rem 0.25rem;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover);
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: #fff;
+}
+
+.btn-danger:hover {
+    opacity: 0.9;
+}
+
+.btn-success {
+    background: var(--success);
+    color: #fff;
+}
+
+.btn-success:hover {
+    opacity: 0.9;
+}
+
+/* ─── Toggle Switch ──────────────────────────────── */
+
+.dns-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.dns-filter-row input[type="checkbox"] {
+    width: auto;
+    padding: 0;
+}
+
+.dns-filter-row.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.dns-filter-row.disabled input[type="checkbox"] {
+    cursor: not-allowed;
+}
+
+.toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.toggle-switch {
+    position: relative;
+    width: 52px;
+    height: 28px;
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border);
+    border-radius: 28px;
+    transition: background 0.3s;
+}
+
+.toggle-slider::before {
+    content: "";
+    position: absolute;
+    left: 3px;
+    bottom: 3px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--text-primary);
+    transition: transform 0.3s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(24px);
+}
+
+/* ─── Auth fields (REST) ──────────────────────────── */
+
+.auth-fields {
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+}
+
+/* ─── REST connection test button ─────────────────── */
+
+.test-conn-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.test-conn-result {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.test-conn-ok {
+    color: var(--success);
+    font-weight: 600;
+}
+
+.test-conn-fail {
+    color: var(--danger);
+    font-weight: 600;
+}
+
+.test-conn-warn {
+    color: #d29922;
+    font-weight: 600;
+}
+
+/* Login + Password side by side on one row */
+.auth-pair {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.auth-pair .auth-field {
+    flex: 1;
+    min-width: 140px;
+}
+
+/* ─── Status Messages ──────────────────────────────── */
+
+.status-ok {
+    color: var(--success);
+}
+
+.status-err {
+    color: var(--danger);
+}
+
+.status-stopped {
+    color: var(--text-secondary);
+}
+
+.status-badge {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+/* ─── Status Rows (Task-Manager style) ─────────────── */
+
+.status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.55rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.status-row:last-child {
+    border-bottom: none;
+}
+
+.status-label {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.status-value {
+    font-weight: 600;
+    text-align: right;
+    min-width: 0;
+}
+
+/* CPU / RAM meters — animated bars like Task Manager */
+.cpu-meter {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex: 1;
+    max-width: 260px;
+}
+
+.ram-meter {
+    display: flex;
+    flex: 1;
+    max-width: 260px;
+}
+
+/* The nested .core-meter must stretch to fill the RAM row, otherwise the
+   track collapses to ~0px and the bar becomes invisible. */
+.ram-meter .core-meter {
+    flex: 1;
+}
+
+/* RAM value column — total on top, free below, both the same small numeric
+   font; the meter bar stays in place (right side, same size). */
+.ram-values {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.1rem;
+    min-width: 4.6rem;
+    flex-shrink: 0;
+}
+.ram-num {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.core-meter {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.core-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    width: 1.4rem;
+    flex-shrink: 0;
+}
+
+.core-pct {
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    width: 4.6rem;
+    text-align: right;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.meter-track {
+    flex: 1;
+    height: 14px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+    position: relative;
+}
+
+.meter-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 7px;
+    background: linear-gradient(90deg, #3fb950, #58a6ff);
+    transition: width 0.5s ease;
+    position: relative;
+}
+
+/* shimmering animation on the fill (like Task Manager) */
+.meter-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 255, 255, 0.18) 50%,
+        rgba(255, 255, 255, 0) 100%);
+    background-size: 200% 100%;
+    animation: meterShimmer 1.8s linear infinite;
+}
+
+/* RAM uses the same .core-meter layout as CPU, just a different color */
+.meter-fill.ram-fill {
+    background: linear-gradient(90deg, #d29922, #f0883e);
+}
+
+@keyframes meterShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ─── Table ────────────────────────────────────────── */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+}
+
+th, td {
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    text-align: left;
+}
+
+th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+/* Horizontal scroll for wide tables (mobile) */
+.table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.table-wrap table {
+    width: 100%;
+}
+
+.table-wrap th,
+.table-wrap td {
+    white-space: nowrap;
+}
+
+/* ─── Footer ───────────────────────────────────────── */
+
+.footer {
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    padding: 1rem 0;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+/* ─── Responsive ───────────────────────────────────── */
+
+@media (max-width: 640px) {
+    .navbar .container {
+        flex-wrap: wrap;
+    }
+    .nav-toggle {
+        display: block;
+    }
+    .nav-menu {
+        display: none;
+        width: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+        padding-top: 0.6rem;
+        margin-top: 0.4rem;
+        border-top: 1px solid var(--border);
+    }
+    .navbar.nav-open .nav-menu {
+        display: flex;
+    }
+    .nav-links {
+        flex-direction: column;
+        width: 100%;
+        gap: 0.35rem;
+    }
+    .nav-links a {
+        font-size: 1rem;
+        padding: 0.3rem 0;
+    }
+    .nav-dropdown {
+        width: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .nav-dropdown-toggle {
+        display: block;
+        font-size: 1rem;
+        padding: 0.3rem 0;
+    }
+    .nav-dropdown-menu {
+        position: static;
+        min-width: 0;
+        border: none;
+        box-shadow: none;
+        padding: 0 0 0 0.75rem;
+    }
+    .nav-dropdown-menu a {
+        font-size: 1rem;
+        padding: 0.3rem 0;
+    }
+
+    .container {
+        padding: 0 0.75rem;
+    }
+    main {
+        padding: 1.25rem 0;
+    }
+    h1 {
+        font-size: 1.6rem;
+    }
+    .card {
+        padding: 0.6rem 1rem;
+    }
+    input, select, textarea {
+        padding: 0.75rem;
+        font-size: 1rem;
+    }
+    .btn {
+        padding: 0.75rem 1.25rem;
+        font-size: 1rem;
+    }
+    th, td {
+        padding: 0.5rem 0.6rem;
+    }
+    .table-wrap table {
+        min-width: 620px;
+    }
+    /* Status rows on mobile — stack label on top, bar below */
+    .status-row {
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        padding: 0.7rem 0;
+    }
+    .status-label {
+        width: 100%;
+    }
+    .status-value {
+        width: 100%;
+        text-align: left;
+    }
+    .cpu-meter,
+    .ram-meter {
+        max-width: none;
+    }
+    .meter-track {
+        height: 16px;
+    }
+}

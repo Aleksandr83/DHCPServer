@@ -1,0 +1,170 @@
+{
+  "app": {
+    "title": "DHCPServer",
+    "subtitle": "DHCP & Caching DNS Server",
+    "wifi_status": "WiFi Status:",
+    "dhcp_status": "DHCP Server:",
+    "dns_status": "DNS Server:",
+    "cpu_load": "CPU Load:",
+    "free_ram": "RAM:",
+    "static_bindings": "Static Bindings DHCP:",
+    "local_hosts": "Local DNS Hosts:",
+    "footer": "ESP32 DHCP & DNS Server"
+  },
+  "status": {
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "running": "Running",
+    "stopped": "Stopped",
+    "error": "Error",
+    "unknown": "--",
+    "leases": "Leases: ",
+    "queries": "Queries: "
+  },
+  "nav": {
+    "home": "Home",
+    "dhcp": "DHCP",
+    "dhcp_general": "General",
+    "dhcp_logging": "Logging",
+    "dhcp_dns": "DNS",
+    "dhcp_static": "Static Bindings",
+    "dns": "DNS",
+    "dns_general": "General",
+    "dns_logging": "Logging",
+    "dns_cache": "Cache",
+    "dns_local_hosts": "Local Hosts",
+    "security": "Security",
+    "help": "Help",
+    "version": "Version"
+  },
+  "login": {
+    "title": "DHCPServer",
+    "username": "Username",
+    "password": "Password",
+    "login": "Login",
+    "error": "Invalid credentials"
+  },
+  "auth": {
+    "login_prompt": "Enter password:"
+  },
+  "dhcp": {
+    "title": "DHCP Setup",
+    "enabled": "Enabled",
+    "binding_enabled": "On",
+    "binding_dns": "DNS",
+    "disabled": "Disabled",
+    "start_ip": "Start IP",
+    "end_ip": "End IP",
+    "subnet": "Subnet Mask",
+    "gateway": "Gateway",
+    "server_ip": "Server IP",
+    "server_ip_desc": "IP address of this device on the network",
+    "lease_time": "Lease Time (s)",
+    "static_bindings": "Static Bindings",
+    "mac": "MAC Address",
+    "ip": "IP Address",
+    "gateway": "Gateway",
+    "name": "Name",
+    "add": "Add",
+    "remove": "Remove",
+    "save": "Save",
+    "mac_example": "e.g. 24:0A:C4:01:23:45",
+    "enable_disable": "Enable/Disable",
+    "log_terminal": "Log to Terminal",
+    "log_rest": "Log to External REST",
+    "log_url": "Logging URL (REST)",
+    "log_auth": "Authorization required",
+    "log_auth_user": "Login",
+    "log_auth_pass": "Password",
+    "test_connection": "Test connection",
+    "test_no_url": "Enter URL",
+    "test_checking": "Checking...",
+    "test_ok": "Connection OK",
+    "test_fail": "Connection failed",
+    "test_not_saved": "Login/password not saved",
+    "server_status": "Server Status:",
+    "range": "Address Range",
+    "dns": "DNS Server",
+    "dns_status_label": "Built-in DNS server:",
+    "dns_mode": "DNS Mode",
+    "dns_mode_auto": "Auto",
+    "dns_mode_manual": "Manual",
+    "dns_address": "DNS Server Address",
+    "dns_auto_hint": "Auto: uses the built-in DNS server if it is enabled, otherwise the router."
+  },
+  "dhcp_logging": {
+    "title": "DHCP Logging"
+  },
+  "dhcp_dns": {
+    "title": "DHCP DNS"
+  },
+  "dhcp_static": {
+    "title": "Static Bindings"
+  },
+  "dns": {
+    "title": "DNS Setup",
+    "server_status": "Server Status:",
+    "enable_disable": "Enable/Disable",
+    "external_dns": "External DNS Server",
+    "log_terminal": "Log to Terminal",
+    "log_forwarded": "Forwarded",
+    "log_local": "User-assigned",
+    "log_cache": "From cache",
+    "log_rest_sent": "Sent to REST",
+    "log_rest": "Log to External REST",
+    "cache_rest": "External cache (REST)",
+    "cache_read": "Read from cache",
+    "cache_write": "Write to cache",
+    "cache_url": "External Cache URL (REST)",
+    "log_url": "Logging URL (REST)",
+    "log_auth": "Authorization required",
+    "log_auth_user": "Login",
+    "log_auth_pass": "Password",
+    "cache_auth": "Authorization required",
+    "cache_auth_user": "Login",
+    "cache_auth_pass": "Password",
+    "test_connection": "Test connection",
+    "test_no_url": "Enter URL",
+    "test_checking": "Checking...",
+    "test_ok": "Connection OK",
+    "test_fail": "Connection failed",
+    "test_not_saved": "Login/password not saved",
+    "local_hosts": "Local Hosts",
+    "local_hosts_desc": "Custom domain → IP mappings resolved by this DNS server.",
+    "local_enabled": "On",
+    "local_name": "Hostname",
+    "local_ip4": "IPv4 Address",
+    "local_ip6": "IPv6 Address",
+    "add": "Add",
+    "remove": "Remove",
+    "save": "Save"
+  },
+  "dns_logging": {
+    "title": "DNS Logging"
+  },
+  "dns_cache": {
+    "title": "DNS Cache"
+  },
+  "dns_local_hosts": {
+    "title": "Local Hosts"
+  },
+  "security": {
+    "title": "Security Settings",
+    "username": "Username",
+    "password": "Password",
+    "max_attempts": "Max Attempts",
+    "lockout_period": "Lockout Period (s)",
+    "save": "Save"
+  },
+  "version": {
+    "title": "Firmware Version",
+    "label": "Version"
+  },
+  "update": {
+    "title": "Firmware Update",
+    "select": "Select .bin file",
+    "upload": "Upload",
+    "uploading": "Uploading...",
+    "success": "Update successful! Device is rebooting..."
+  }
+}

@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 500" font-family="'Segoe UI', Arial, sans-serif">
+  <!-- Background -->
+  <rect width="920" height="500" fill="#fafafa"/>
+
+  <!-- Title -->
+  <text x="460" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">ESP32-WROOM-32 + ENC28J60 — Wiring Diagram</text>
+  <text x="460" y="56" text-anchor="middle" font-size="13" fill="#64748b">SPI Host 2 · SCK GPIO18 · MOSI GPIO23 · MISO GPIO19 · CS GPIO5 · INT GPIO4 · RST GPIO16</text>
+
+  <!-- Wires -->
+  <line x1="370" y1="140" x2="570" y2="140" stroke="#dc2626" stroke-width="3"/>
+  <text x="470" y="133" text-anchor="middle" font-size="11" font-weight="600" fill="#dc2626">3.3V</text>
+
+  <line x1="370" y1="182" x2="570" y2="182" stroke="#475569" stroke-width="3"/>
+  <text x="470" y="175" text-anchor="middle" font-size="11" font-weight="600" fill="#475569">GND</text>
+
+  <line x1="370" y1="224" x2="570" y2="224" stroke="#d97706" stroke-width="3"/>
+  <text x="470" y="217" text-anchor="middle" font-size="11" font-weight="600" fill="#d97706">MOSI (SI)</text>
+
+  <line x1="370" y1="266" x2="570" y2="266" stroke="#2563eb" stroke-width="3"/>
+  <text x="470" y="259" text-anchor="middle" font-size="11" font-weight="600" fill="#2563eb">MISO (SO)</text>
+
+  <line x1="370" y1="308" x2="570" y2="308" stroke="#16a34a" stroke-width="3"/>
+  <text x="470" y="301" text-anchor="middle" font-size="11" font-weight="600" fill="#16a34a">SCK</text>
+
+  <line x1="370" y1="350" x2="570" y2="350" stroke="#7c3aed" stroke-width="3"/>
+  <text x="470" y="343" text-anchor="middle" font-size="11" font-weight="600" fill="#7c3aed">CS</text>
+
+  <line x1="370" y1="392" x2="570" y2="392" stroke="#ea580c" stroke-width="3"/>
+  <text x="470" y="385" text-anchor="middle" font-size="11" font-weight="600" fill="#ea580c">INT</text>
+
+  <line x1="370" y1="434" x2="570" y2="434" stroke="#0891b2" stroke-width="3"/>
+  <text x="470" y="427" text-anchor="middle" font-size="11" font-weight="600" fill="#0891b2">RST</text>
+
+  <!-- ESP32-WROOM-32 board -->
+  <rect x="60" y="70" width="310" height="392" rx="12" fill="#ffffff" stroke="#2d7dd2" stroke-width="2"/>
+  <text x="215" y="100" text-anchor="middle" font-size="15" font-weight="bold" fill="#2d7dd2">ESP32-WROOM-32</text>
+  <text x="215" y="118" text-anchor="middle" font-size="11" fill="#94a3b8">(ESP32-D0WDQ6)</text>
+
+  <!-- ESP32 pin labels -->
+  <text x="350" y="144" text-anchor="end" font-size="12" font-weight="600" fill="#334155">3.3V</text>
+  <text x="350" y="186" text-anchor="end" font-size="12" font-weight="600" fill="#334155">GND</text>
+  <text x="350" y="228" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D23 (MOSI)</text>
+  <text x="350" y="270" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D19 (MISO)</text>
+  <text x="350" y="312" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D18 (SCK)</text>
+  <text x="350" y="354" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D5 (CS)</text>
+  <text x="350" y="396" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D4 (INT)</text>
+  <text x="350" y="438" text-anchor="end" font-size="12" font-weight="600" fill="#334155">D16 (RST)</text>
+
+  <!-- ESP32 pin dots -->
+  <circle cx="370" cy="140" r="6" fill="#dc2626" stroke="#7f1d1d" stroke-width="1"/>
+  <circle cx="370" cy="182" r="6" fill="#475569" stroke="#1e293b" stroke-width="1"/>
+  <circle cx="370" cy="224" r="6" fill="#d97706" stroke="#78350f" stroke-width="1"/>
+  <circle cx="370" cy="266" r="6" fill="#2563eb" stroke="#1e3a8a" stroke-width="1"/>
+  <circle cx="370" cy="308" r="6" fill="#16a34a" stroke="#14532d" stroke-width="1"/>
+  <circle cx="370" cy="350" r="6" fill="#7c3aed" stroke="#4c1d95" stroke-width="1"/>
+  <circle cx="370" cy="392" r="6" fill="#ea580c" stroke="#7c2d12" stroke-width="1"/>
+  <circle cx="370" cy="434" r="6" fill="#0891b2" stroke="#164e63" stroke-width="1"/>
+
+  <!-- ENC28J60 board -->
+  <rect x="570" y="70" width="290" height="392" rx="12" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+  <text x="715" y="100" text-anchor="middle" font-size="15" font-weight="bold" fill="#16a34a">ENC28J60</text>
+  <text x="715" y="118" text-anchor="middle" font-size="11" fill="#94a3b8">Ethernet Module (SPI)</text>
+
+  <!-- ENC28J60 pin labels -->
+  <text x="588" y="144" text-anchor="start" font-size="12" font-weight="600" fill="#334155">VCC</text>
+  <text x="588" y="186" text-anchor="start" font-size="12" font-weight="600" fill="#334155">GND</text>
+  <text x="588" y="228" text-anchor="start" font-size="12" font-weight="600" fill="#334155">MOSI (SI)</text>
+  <text x="588" y="270" text-anchor="start" font-size="12" font-weight="600" fill="#334155">MISO (SO)</text>
+  <text x="588" y="312" text-anchor="start" font-size="12" font-weight="600" fill="#334155">SCK</text>
+  <text x="588" y="354" text-anchor="start" font-size="12" font-weight="600" fill="#334155">CS</text>
+  <text x="588" y="396" text-anchor="start" font-size="12" font-weight="600" fill="#334155">INT</text>
+  <text x="588" y="438" text-anchor="start" font-size="12" font-weight="600" fill="#334155">RST</text>
+
+  <!-- ENC28J60 pin dots -->
+  <circle cx="570" cy="140" r="6" fill="#dc2626" stroke="#7f1d1d" stroke-width="1"/>
+  <circle cx="570" cy="182" r="6" fill="#475569" stroke="#1e293b" stroke-width="1"/>
+  <circle cx="570" cy="224" r="6" fill="#d97706" stroke="#78350f" stroke-width="1"/>
+  <circle cx="570" cy="266" r="6" fill="#2563eb" stroke="#1e3a8a" stroke-width="1"/>
+  <circle cx="570" cy="308" r="6" fill="#16a34a" stroke="#14532d" stroke-width="1"/>
+  <circle cx="570" cy="350" r="6" fill="#7c3aed" stroke="#4c1d95" stroke-width="1"/>
+  <circle cx="570" cy="392" r="6" fill="#ea580c" stroke="#7c2d12" stroke-width="1"/>
+  <circle cx="570" cy="434" r="6" fill="#0891b2" stroke="#164e63" stroke-width="1"/>
+</svg>

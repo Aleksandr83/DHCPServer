@@ -1,0 +1,40 @@
+<header class="navbar">
+    <div class="container">
+        <a href="/index.html" class="logo">DHCPServer</a>
+        <button class="nav-toggle" onclick="toggleNav()" aria-label="Menu">☰</button>
+        <div class="nav-menu">
+            <nav class="nav-links">
+                <a href="/index.html" data-i18n="nav.home">Home</a>
+                <div class="nav-dropdown">
+                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.dhcp">DHCP</button>
+                    <div class="nav-dropdown-menu">
+                        <a href="/pages/dhcp_setup.html" data-i18n="nav.dhcp_general">General</a>
+                        <a href="/pages/dhcp_logging.html" data-i18n="nav.dhcp_logging">Logging</a>
+                        <a href="/pages/dhcp_dns.html" data-i18n="nav.dhcp_dns">DNS</a>
+                        <a href="/pages/dhcp_static.html" data-i18n="nav.dhcp_static">Static Bindings</a>
+                    </div>
+                </div>
+                <div class="nav-dropdown">
+                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.dns">DNS</button>
+                    <div class="nav-dropdown-menu">
+                        <a href="/pages/dns_setup.html" data-i18n="nav.dns_general">General</a>
+                        <a href="/pages/dns_cache.html" data-i18n="nav.dns_cache">Cache</a>
+                        <a href="/pages/dns_local_hosts.html" data-i18n="nav.dns_local_hosts">Local Hosts</a>
+                        <a href="/pages/dns_logging.html" data-i18n="nav.dns_logging">Logging</a>
+                    </div>
+                </div>
+                <a href="/pages/security.html" data-i18n="nav.security">Security</a>
+                <div class="nav-dropdown">
+                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.help">Help</button>
+                    <div class="nav-dropdown-menu">
+                        <a href="/pages/version.html" data-i18n="nav.version">Version</a>
+                    </div>
+                </div>
+            </nav>
+            <div class="lang-switch">
+                <button onclick="setLanguage('ru')">RU</button>
+                <button onclick="setLanguage('en')">EN</button>
+            </div>
+        </div>
+    </div>
+</header>

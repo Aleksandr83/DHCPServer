@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS Local Hosts — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dns_local_hosts.title">Local Hosts</h1>
+
+        <div class="card">
+            <p style="margin:0 0 0.5rem 0;color:var(--text-secondary);font-size:0.85rem;" data-i18n="dns.local_hosts_desc">Custom domain → IP mappings resolved by this DNS server.</p>
+            <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th data-i18n="dns.local_enabled">On</th>
+                        <th data-i18n="dns.local_name">Hostname</th>
+                        <th data-i18n="dns.local_ip4">IPv4 Address</th>
+                        <th data-i18n="dns.local_ip6">IPv6 Address</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="local-hosts-body"></tbody>
+            </table>
+            </div>
+            <button class="btn btn-success" onclick="addLocalHostRow()" data-i18n="dns.add">Add</button>
+            <button class="btn btn-primary" onclick="saveLocalHosts()" data-i18n="dns.save">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        async function loadLocalHosts() {
+            const data = await fetchJSON('/api/dns/local-hosts');
+            renderLocalHosts(data.hosts || []);
+        }
+
+        function renderLocalHosts(hosts) {
+            const tbody = document.getElementById('local-hosts-body');
+            tbody.innerHTML = '';
+            hosts.forEach((h, i) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><input type="checkbox" class="host-enabled" data-idx="${i}" ${h.enabled !== false ? 'checked' : ''}></td>
+                    <td><input type="text" value="${h.name || ''}" data-idx="${i}" class="host-name" placeholder="mydevice.local"></td>
+                    <td><input type="text" value="${h.ip4 || ''}" data-idx="${i}" class="host-ip4" placeholder="192.168.1.50"></td>
+                    <td><input type="text" value="${h.ip6 || ''}" data-idx="${i}" class="host-ip6" placeholder="fd00::1"></td>
+                    <td><button class="btn btn-danger" onclick="removeLocalHostRow(${i})" data-i18n="dns.remove">Remove</button></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function addLocalHostRow() {
+            const tbody = document.getElementById('local-hosts-body');
+            const idx = tbody.children.length;
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><input type="checkbox" class="host-enabled" data-idx="${idx}" checked></td>
+                <td><input type="text" value="" data-idx="${idx}" class="host-name" placeholder="mydevice.local"></td>
+                <td><input type="text" value="" data-idx="${idx}" class="host-ip4" placeholder="192.168.1.50"></td>
+                <td><input type="text" value="" data-idx="${idx}" class="host-ip6" placeholder="fd00::1"></td>
+                <td><button class="btn btn-danger" onclick="this.closest('tr').remove()" data-i18n="dns.remove">Remove</button></td>
+            `;
+            tbody.appendChild(tr);
+        }
+
+        function removeLocalHostRow(idx) {
+            document.querySelector(`.host-name[data-idx="${idx}"]`)?.closest('tr')?.remove();
+        }
+
+        async function saveLocalHosts() {
+            const hosts = [];
+            document.querySelectorAll('#local-hosts-body tr').forEach((tr) => {
+                const enabled = tr.querySelector('.host-enabled').checked;
+                const name = tr.querySelector('.host-name').value.trim();
+                const ip4 = tr.querySelector('.host-ip4').value.trim();
+                const ip6 = tr.querySelector('.host-ip6').value.trim();
+                if (name && (ip4 || ip6)) hosts.push({ name, ip4, ip6, enabled });
+            });
+            const result = await postJSON('/api/dns/local-hosts', { hosts });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+            } else {
+                alert('Local hosts saved!');
+                loadLocalHosts();
+            }
+        }
+
+        loadLocalHosts();
+    </script>
+</body>
+</html>

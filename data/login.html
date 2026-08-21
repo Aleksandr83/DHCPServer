@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login — DHCPServer</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        .login-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        .login-card h1 {
+            text-align: center;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            color: var(--accent);
+        }
+        .login-card label {
+            display: block;
+            margin: 1rem 0 0.3rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        .login-card input {
+            width: 100%;
+            padding: 0.7rem 0.8rem;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        .login-card input:focus {
+            border-color: var(--accent);
+            outline: none;
+        }
+        .login-card .btn {
+            width: 100%;
+            margin-top: 1.5rem;
+            padding: 0.75rem;
+            font-size: 1rem;
+        }
+        .login-error {
+            color: var(--danger);
+            font-size: 0.85rem;
+            text-align: center;
+            margin-top: 0.75rem;
+            display: none;
+        }
+        .lang-switch-login {
+            text-align: center;
+            margin-top: 1rem;
+        }
+        .lang-switch-login button {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 0.25rem 0.6rem;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .lang-switch-login button:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+        .lang-switch-login button:first-child {
+            border-radius: 4px 0 0 4px;
+        }
+        .lang-switch-login button:last-child {
+            border-radius: 0 4px 4px 0;
+            border-left: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-wrapper">
+        <div class="login-card">
+            <form id="login-form" onsubmit="return doLogin(event)">
+                <label for="username" data-i18n="login.username">Username</label>
+                <input type="text" id="username" value="admin" autocomplete="username">
+
+                <label for="password" data-i18n="login.password">Password</label>
+                <input type="password" id="password" autocomplete="current-password">
+
+                <button type="submit" class="btn btn-primary" data-i18n="login.login">Login</button>
+
+                <div class="login-error" id="login-error" data-i18n="login.error">Invalid credentials</div>
+            </form>
+            <div class="lang-switch-login">
+                <button onclick="setLanguage('ru')">RU</button>
+                <button onclick="setLanguage('en')">EN</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // If already authenticated, go to main page
+        const saved = sessionStorage.getItem('dhcp_auth');
+        if (saved) {
+            const { user, pass } = JSON.parse(saved);
+            setAuth(user, pass);
+            // Verify auth is still valid
+            apiFetch('/api/version').then(r => {
+                if (r.status === 401) {
+                    sessionStorage.removeItem('dhcp_auth');
+                } else {
+                    window.location.href = 'index.html';
+                }
+            }).catch(() => {});
+        }
+
+        async function doLogin(e) {
+            e.preventDefault();
+            const user = document.getElementById('username').value.trim();
+            const pass = document.getElementById('password').value;
+            const errorEl = document.getElementById('login-error');
+
+            if (!user || !pass) {
+                errorEl.textContent = 'Please fill all fields';
+                errorEl.style.display = 'block';
+                return false;
+            }
+
+            setAuth(user, pass);
+            try {
+                const resp = await apiFetch('/api/version');
+                if (resp.status === 200 || resp.ok) {
+                    // Save to session storage
+                    sessionStorage.setItem('dhcp_auth', JSON.stringify({ user, pass }));
+                    window.location.href = 'index.html';
+                } else {
+                    throw new Error('Auth failed');
+                }
+            } catch (err) {
+                errorEl.textContent = translations?.login?.error || 'Invalid credentials';
+                errorEl.style.display = 'block';
+                sessionStorage.removeItem('dhcp_auth');
+                CONFIG.AUTH = null;
+            }
+            return false;
+        }
+
+        // Override setLanguage to also translate login page
+        const origSetLang = setLanguage;
+        setLanguage = function(lang) {
+            origSetLang(lang);
+            const errEl = document.getElementById('login-error');
+            if (errEl && translations?.login?.error) {
+                errEl.textContent = translations.login.error;
+            }
+        };
+    </script>
+</body>
+</html>

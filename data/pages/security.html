@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="security">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="security.title">Security Settings</h1>
+
+        <div class="card">
+            <label data-i18n="security.username">Username</label>
+            <input type="text" id="auth-username" placeholder="admin">
+
+            <label data-i18n="security.password">Password</label>
+            <input type="password" id="auth-password" placeholder="password">
+
+            <label data-i18n="security.max_attempts">Max Attempts</label>
+            <input type="number" id="auth-max-attempts" placeholder="5" min="1" max="100">
+
+            <label data-i18n="security.lockout_period">Lockout Period (s)</label>
+            <input type="number" id="auth-lockout-period" placeholder="300" min="1">
+
+            <button class="btn btn-primary" onclick="saveSecuritySettings()" data-i18n="security.save">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        async function loadSecuritySettings() {
+            const data = await fetchJSON('/api/security/settings');
+            document.getElementById('auth-username').value = data.username || '';
+            document.getElementById('auth-password').value = '';
+            document.getElementById('auth-max-attempts').value = data.max_attempts || 5;
+            document.getElementById('auth-lockout-period').value = data.lockout_period || 300;
+        }
+
+        async function saveSecuritySettings() {
+            const payload = {
+                username: document.getElementById('auth-username').value,
+                max_attempts: parseInt(document.getElementById('auth-max-attempts').value) || 5,
+                lockout_period: parseInt(document.getElementById('auth-lockout-period').value) || 300,
+            };
+            const pass = document.getElementById('auth-password').value;
+            if (pass) payload.password = pass;
+
+            await postJSON('/api/security/settings', payload);
+            alert('Security settings saved!');
+        }
+
+        // Load settings on page load
+        loadSecuritySettings();
+    </script>
+</body>
+</html>

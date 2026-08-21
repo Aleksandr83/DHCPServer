@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dhcp">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DHCP — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dhcp.title">DHCP Setup</h1>
+
+        <div class="card" id="dhcp-status-card">
+            <strong data-i18n="dhcp.server_status">Server Status:</strong>
+            <span id="dhcp-server-state" class="status-badge status-stopped">--</span>
+            <span id="dhcp-lease-count" style="margin-left:1rem;color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+
+        <div class="card">
+            <h2 data-i18n="dhcp.server_ip">Server IP</h2>
+            <label data-i18n="dhcp.server_ip_desc">IP адрес этого устройства в сети</label>
+            <input type="text" id="dhcp-server-ip" placeholder="192.168.1.201">
+            <br>
+            <button class="btn btn-primary" onclick="saveServerIp()" data-i18n="dhcp.save">Save</button>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="dhcp.enable_disable">Enable/Disable</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dhcp-enabled" onchange="toggleEnable()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <h2 data-i18n="dhcp.range">Address Range</h2>
+            <label data-i18n="dhcp.start_ip">Start IP</label>
+            <input type="text" id="dhcp-start" placeholder="192.168.1.100">
+
+            <label data-i18n="dhcp.end_ip">End IP</label>
+            <input type="text" id="dhcp-end" placeholder="192.168.1.200">
+
+            <label data-i18n="dhcp.subnet">Subnet Mask</label>
+            <input type="text" id="dhcp-subnet" placeholder="255.255.255.0">
+
+            <label data-i18n="dhcp.gateway">Gateway</label>
+            <input type="text" id="dhcp-gateway" placeholder="192.168.1.1">
+
+            <label data-i18n="dhcp.lease_time">Lease Time (s)</label>
+            <input type="number" id="dhcp-lease" placeholder="86400">
+
+            <br>
+            <button class="btn btn-primary" onclick="saveDhcpSettings()" data-i18n="dhcp.save">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // DHCP General page — owns {enabled, server_ip, start_ip, end_ip,
+        // subnet, gateway, lease_time}. The logging / dns / static-bindings
+        // sub-pages own the rest; every save merges with the current server
+        // state via saveDhcpPartial().
+        function readDhcpForm() {
+            return {
+                enabled: document.getElementById('dhcp-enabled').checked,
+                server_ip: document.getElementById('dhcp-server-ip').value,
+                start_ip: document.getElementById('dhcp-start').value,
+                end_ip: document.getElementById('dhcp-end').value,
+                subnet: document.getElementById('dhcp-subnet').value,
+                gateway: document.getElementById('dhcp-gateway').value,
+                lease_time: parseInt(document.getElementById('dhcp-lease').value) || 86400,
+            };
+        }
+
+        async function loadDhcpSettings() {
+            const data = await fetchJSON('/api/dhcp/settings');
+            document.getElementById('dhcp-enabled').checked = !!data.enabled;
+            document.getElementById('dhcp-server-ip').value = data.server_ip || '';
+            document.getElementById('dhcp-start').value = data.start_ip || '';
+            document.getElementById('dhcp-end').value = data.end_ip || '';
+            document.getElementById('dhcp-subnet').value = data.subnet || '';
+            document.getElementById('dhcp-gateway').value = data.gateway || '';
+            document.getElementById('dhcp-lease').value = data.lease_time || '';
+            updateServerStatus(data);
+        }
+
+        function updateServerStatus(data) {
+            const el = document.getElementById('dhcp-server-state');
+            const countEl = document.getElementById('dhcp-lease-count');
+            if (!el) return;
+            const state = data.server_state || 'unknown';
+            const labels = { running: tr('status.running'), stopped: tr('status.stopped'), error: tr('status.error'), unknown: tr('status.unknown') };
+            const classes = { running: 'status-ok', stopped: 'status-stopped', error: 'status-err', unknown: '' };
+            el.textContent = labels[state] || state;
+            el.className = 'status-badge ' + (classes[state] || '');
+            if (countEl) {
+                countEl.textContent = state === 'running' ? tr('status.leases') + (data.lease_count || 0) : '';
+            }
+        }
+
+        async function toggleEnable() {
+            const checked = document.getElementById('dhcp-enabled').checked;
+            const result = await saveDhcpPartial({ enabled: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dhcp-enabled').checked = !checked;
+            } else {
+                const fresh = await fetchJSON('/api/dhcp/settings');
+                updateServerStatus(fresh);
+            }
+        }
+
+        async function saveDhcpSettings() {
+            const result = await saveDhcpPartial(readDhcpForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadDhcpSettings();
+        }
+
+        async function saveServerIp() {
+            const ip = document.getElementById('dhcp-server-ip').value.trim();
+            if (!ip) return alert('Enter a valid IP address');
+            const result = await saveDhcpPartial({ server_ip: ip });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            alert('Server IP saved! Device will use this IP after reboot.');
+        }
+
+        loadDhcpSettings();
+
+        // Periodic refresh of server status (every 5s)
+        setInterval(async () => {
+            try {
+                const data = await fetchJSON('/api/dhcp/settings');
+                updateServerStatus(data);
+            } catch (e) { /* ignore */ }
+        }, 5000);
+    </script>
+</body>
+</html>

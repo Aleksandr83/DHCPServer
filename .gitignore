@@ -1,0 +1,49 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.pioide/
+.clang_complete
+.gcc-flags.json
+
+# Build artifacts
+sdkconfig
+sdkconfig.old
+build/
+*.o
+*.elf
+*.bin
+*.map
+*.hex
+*.a
+
+# Local build log captures (pio output redirection)
+b_out.txt
+b_err.txt
+build_log.txt
+
+# IDE
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+
+# SPIFFS image
+spiffs.bin
+spiffs.img
+
+# Test output
+test/build/

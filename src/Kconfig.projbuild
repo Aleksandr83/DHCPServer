@@ -1,0 +1,37 @@
+menu "Firmware version"
+
+    config FW_VER_GLOBAL
+        int "Global version number (aa, 00-99)"
+        range 0 99
+        default 1
+
+    config FW_VER_DEVICE
+        int "Device/Product code (bb, 00-99)"
+        range 0 99
+        default 2
+
+    config FW_VER_RELEASE
+        int "Release number (xxx, 000-999)"
+        range 0 999
+        default 2
+
+    config FW_VER_SUBRELEASE
+        int "Sub-release number (cc, 00-99)"
+        range 0 99
+        default 0
+
+    config FW_VER_YEAR
+        int "Year (YY, 00-99)"
+        range 0 99
+        default 26
+
+    config FW_VER_MONTH
+        int "Month (MM, 01-12)"
+        range 1 12
+        default 7
+
+    config FW_VER_REGION
+        string "Region (RR, 2 chars)"
+        default "RU"
+
+endmenu

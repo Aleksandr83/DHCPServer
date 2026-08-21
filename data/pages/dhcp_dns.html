@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dhcp">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DHCP DNS — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dhcp_dns.title">DHCP DNS</h1>
+
+        <div class="card">
+            <p style="margin:0 0 0.6rem 0;color:var(--text-secondary);font-size:0.85rem;">
+                <span data-i18n="dhcp.dns_status_label">Built-in DNS server:</span>
+                <span id="dhcp-dns-status" class="status-badge status-stopped">--</span>
+            </p>
+
+            <label data-i18n="dhcp.dns_mode">DNS Mode</label>
+            <select id="dhcp-dns-mode" onchange="updateDnsModeVisibility()">
+                <option value="auto" data-i18n="dhcp.dns_mode_auto">Auto</option>
+                <option value="manual" data-i18n="dhcp.dns_mode_manual">Manual</option>
+            </select>
+
+            <div id="dhcp-dns-manual-block" style="display:none;">
+                <label data-i18n="dhcp.dns_address">DNS Server Address</label>
+                <input type="text" id="dhcp-dns-address" placeholder="8.8.8.8">
+            </div>
+
+            <p id="dhcp-dns-auto-hint" style="margin:0.5rem 0 0.15rem 0;color:var(--text-secondary);font-size:0.85rem;" data-i18n="dhcp.dns_auto_hint">Auto: uses the built-in DNS server if it is enabled, otherwise the router.</p>
+            <button class="btn btn-primary" style="margin:0.15rem 0 0.25rem 0;" onclick="saveDnsDhcpSettings()" data-i18n="dhcp.save">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Only the fields this page owns (DHCP DNS mode/address). Every save
+        // merges with the current server state via saveDhcpPartial().
+        function readDhcpForm() {
+            return {
+                dns_mode: document.getElementById('dhcp-dns-mode').value,
+                dns_address: document.getElementById('dhcp-dns-address').value.trim(),
+            };
+        }
+
+        async function loadDhcpSettings() {
+            const data = await fetchJSON('/api/dhcp/settings');
+            document.getElementById('dhcp-dns-mode').value = data.dns_mode || 'auto';
+            document.getElementById('dhcp-dns-address').value = data.dns_address || '';
+            updateDnsModeVisibility();
+            updateDnsServerStatus(data.dns_running);
+        }
+
+        function updateDnsModeVisibility() {
+            const mode = document.getElementById('dhcp-dns-mode').value;
+            const manualBlock = document.getElementById('dhcp-dns-manual-block');
+            const hint = document.getElementById('dhcp-dns-auto-hint');
+            if (manualBlock) manualBlock.style.display = mode === 'manual' ? 'block' : 'none';
+            if (hint) hint.style.display = mode === 'auto' ? 'block' : 'none';
+        }
+
+        function updateDnsServerStatus(running) {
+            const el = document.getElementById('dhcp-dns-status');
+            if (!el) return;
+            el.textContent = running ? tr('status.running') : tr('status.stopped');
+            el.className = 'status-badge ' + (running ? 'status-ok' : 'status-stopped');
+        }
+
+        async function saveDnsDhcpSettings() {
+            const result = await saveDhcpPartial(readDhcpForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            alert('DNS settings saved!');
+            await loadDhcpSettings();
+        }
+
+        loadDhcpSettings();
+    </script>
+</body>
+</html>

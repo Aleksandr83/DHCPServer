@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS Logging — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dns_logging.title">DNS Logging</h1>
+
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="dns.log_terminal">Log to Terminal</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dns-log-terminal" onchange="toggleDnsLogTerminal()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div style="margin-top:0.6rem;display:flex;flex-direction:column;gap:0.4rem;">
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-log-forwarded" onchange="toggleDnsLogForwarded()">
+                    <span data-i18n="dns.log_forwarded">Forwarded</span>
+                </label>
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-log-local" onchange="toggleDnsLogLocal()">
+                    <span data-i18n="dns.log_local">User-assigned</span>
+                </label>
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-log-cache" onchange="toggleDnsLogCache()">
+                    <span data-i18n="dns.log_cache">From cache</span>
+                </label>
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-log-rest-sent" onchange="toggleDnsLogRestSent()" disabled>
+                    <span data-i18n="dns.log_rest_sent">Sent to REST</span>
+                </label>
+            </div>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="dns.log_rest">Log to External REST</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-log-rest" onchange="toggleDnsLogRest()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="dns.log_url">Logging URL (REST)</label>
+            <input type="text" id="dns-log-url" placeholder="https://dhcpserverweb/api/v1/dns/log">
+
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="dns.log_auth">Authorization required</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dns-log-auth" onchange="toggleDnsLogAuth()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div id="dns-log-auth-fields" class="auth-fields" style="display:none;">
+                <div class="auth-pair">
+                    <div class="auth-field">
+                        <label data-i18n="dns.log_auth_user">Login</label>
+                        <input type="text" id="dns-log-auth-user" autocomplete="off">
+                    </div>
+                    <div class="auth-field">
+                        <label data-i18n="dns.log_auth_pass">Password</label>
+                        <input type="password" id="dns-log-auth-pass" autocomplete="new-password">
+                    </div>
+                </div>
+            </div>
+
+            <div class="test-conn-row">
+                <button class="btn btn-primary" onclick="testDnsLogConnection()" data-i18n="dns.test_connection">Test connection</button>
+                <span id="dns-log-test-result" class="test-conn-result"></span>
+            </div>
+
+            <button class="btn btn-primary" onclick="saveDnsSettings()" data-i18n="dns.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Last-saved (NVS) value of the DNS log REST settings — the "Test
+        // connection" button must test these, NOT the (possibly unsaved) form.
+        let savedDnsLog = null;
+
+        // Only the fields this page owns (DNS logging). Every save merges with
+        // the current server state via saveDnsPartial().
+        function readDnsForm() {
+            return {
+                log_terminal: document.getElementById('dns-log-terminal').checked,
+                log_forwarded: document.getElementById('dns-log-forwarded').checked,
+                log_local: document.getElementById('dns-log-local').checked,
+                log_cache: document.getElementById('dns-log-cache').checked,
+                log_rest_sent: document.getElementById('dns-log-rest-sent').checked,
+                log_rest: document.getElementById('dns-log-rest').checked,
+                log_url: document.getElementById('dns-log-url').value,
+                log_auth: document.getElementById('dns-log-auth').checked,
+                log_auth_user: document.getElementById('dns-log-auth-user').value,
+                log_auth_password: document.getElementById('dns-log-auth-pass').value,
+            };
+        }
+
+        async function loadDnsSettings() {
+            const data = await fetchJSON('/api/dns/settings');
+            document.getElementById('dns-log-terminal').checked = data.log_terminal || false;
+            document.getElementById('dns-log-forwarded').checked = data.log_forwarded !== false;
+            document.getElementById('dns-log-local').checked = data.log_local !== false;
+            document.getElementById('dns-log-cache').checked = data.log_cache !== false;
+            document.getElementById('dns-log-rest-sent').checked = data.log_rest_sent || false;
+            document.getElementById('dns-log-rest').checked = data.log_rest || false;
+            document.getElementById('dns-log-url').value = data.log_url || '';
+            document.getElementById('dns-log-auth').checked = data.log_auth || false;
+            document.getElementById('dns-log-auth-user').value = data.log_auth_user || '';
+            document.getElementById('dns-log-auth-pass').value = data.log_auth_password || '';
+            savedDnsLog = {
+                url: data.log_url || '',
+                auth: data.log_auth || false,
+                user: data.log_auth_user || '',
+                pass: data.log_auth_password || ''
+            };
+            updateDnsLogAuthVisibility();
+            updateRestSentDisabled();
+        }
+
+        function updateDnsLogAuthVisibility() {
+            const fields = document.getElementById('dns-log-auth-fields');
+            if (fields) {
+                fields.style.display = document.getElementById('dns-log-auth').checked ? 'flex' : 'none';
+            }
+        }
+
+        // "Sent to REST" only makes sense when REST logging is on.
+        function updateRestSentDisabled() {
+            const restOn = document.getElementById('dns-log-rest').checked;
+            const chk = document.getElementById('dns-log-rest-sent');
+            if (!chk) return;
+            chk.disabled = !restOn;
+            const row = chk.closest('label');
+            if (row) row.classList.toggle('disabled', !restOn);
+        }
+
+        // Generic single-toggle saver (DRY): flips one boolean field in the
+        // settings object and reverts the checkbox on error.
+        async function toggleField(key, elId) {
+            const el = document.getElementById(elId);
+            const checked = el.checked;
+            const result = await saveDnsPartial({ [key]: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                el.checked = !checked;
+            }
+        }
+
+        async function toggleDnsLogTerminal() { await toggleField('log_terminal', 'dns-log-terminal'); }
+        async function toggleDnsLogForwarded() { await toggleField('log_forwarded', 'dns-log-forwarded'); }
+        async function toggleDnsLogLocal() { await toggleField('log_local', 'dns-log-local'); }
+        async function toggleDnsLogCache() { await toggleField('log_cache', 'dns-log-cache'); }
+        async function toggleDnsLogRestSent() { await toggleField('log_rest_sent', 'dns-log-rest-sent'); }
+
+        async function toggleDnsLogRest() {
+            const checked = document.getElementById('dns-log-rest').checked;
+            const result = await saveDnsPartial({ log_rest: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-log-rest').checked = !checked;
+            }
+            updateRestSentDisabled();
+        }
+
+        async function toggleDnsLogAuth() {
+            const checked = document.getElementById('dns-log-auth').checked;
+            const result = await saveDnsPartial({
+                log_auth: checked,
+                log_auth_user: document.getElementById('dns-log-auth-user').value,
+                log_auth_password: document.getElementById('dns-log-auth-pass').value
+            });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-log-auth').checked = !checked;
+            }
+            updateDnsLogAuthVisibility();
+        }
+
+        async function testDnsLogConnection() {
+            const form = {
+                url: document.getElementById('dns-log-url').value,
+                auth: document.getElementById('dns-log-auth').checked,
+                user: document.getElementById('dns-log-auth-user').value,
+                pass: document.getElementById('dns-log-auth-pass').value
+            };
+            await testConnection('dns-log-test-result', 'dns_log', savedDnsLog, form, 'dns');
+        }
+
+        async function saveDnsSettings() {
+            const result = await saveDnsPartial(readDnsForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadDnsSettings();
+            alert('DNS settings saved!');
+        }
+
+        loadDnsSettings();
+    </script>
+</body>
+</html>

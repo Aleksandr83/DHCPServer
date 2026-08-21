@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="index">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DHCPServer</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="app.title">DHCPServer</h1>
+        <p data-i18n="app.subtitle">DHCP &amp; Caching DNS Server</p>
+        <div id="status">
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.wifi_status">WiFi Status:</span>
+                <span id="wifi-status" class="status-value">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.dhcp_status">DHCP Server:</span>
+                <span id="dhcp-status" class="status-value">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.dns_status">DNS Server:</span>
+                <span id="dns-status" class="status-value">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.cpu_load">CPU Load:</span>
+                <div class="status-value cpu-meter">
+                    <div class="core-meter">
+                        <span class="core-label">C0</span>
+                        <div class="meter-track"><div class="meter-fill" id="cpu-bar0"></div></div>
+                        <span class="core-pct" id="cpu-pct0">0%</span>
+                    </div>
+                    <div class="core-meter">
+                        <span class="core-label">C1</span>
+                        <div class="meter-track"><div class="meter-fill" id="cpu-bar1"></div></div>
+                        <span class="core-pct" id="cpu-pct1">0%</span>
+                    </div>
+                </div>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.free_ram">RAM:</span>
+                <div class="status-value ram-meter">
+                    <div class="core-meter">
+                        <span class="core-label">RAM</span>
+                        <div class="meter-track"><div class="meter-fill ram-fill" id="ram-bar"></div></div>
+                        <div class="ram-values">
+                            <span class="ram-num" id="ram-total">--</span>
+                            <span class="ram-num" id="free-ram">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.static_bindings">Static Bindings:</span>
+                <span class="status-value" id="static-bindings-usage">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.local_hosts">Local DNS Hosts:</span>
+                <span class="status-value" id="local-hosts-usage">--</span>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <div id="footer-placeholder"></div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

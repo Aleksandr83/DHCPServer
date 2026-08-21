@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNS Cache — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dns_cache.title">DNS Cache</h1>
+
+        <div class="card toggle-row">
+            <span data-i18n="dns.cache_rest">External cache (REST)</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-cache-rest" onchange="toggleDnsCacheRest()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="dns.cache_url">External Cache URL (REST)</label>
+            <input type="text" id="dns-cache-url" placeholder="https://dhcpserverweb/api/v1/dns/cache">
+
+            <div id="dns-cache-options" style="display:none; margin-top:0.6rem;">
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-cache-read" onchange="toggleDnsCacheRead()">
+                    <span data-i18n="dns.cache_read">Read from cache</span>
+                </label>
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-cache-write" onchange="toggleDnsCacheWrite()">
+                    <span data-i18n="dns.cache_write">Write to cache</span>
+                </label>
+            </div>
+
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="dns.cache_auth">Authorization required</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dns-cache-auth" onchange="toggleDnsCacheAuth()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div id="dns-cache-auth-fields" class="auth-fields" style="display:none;">
+                <div class="auth-pair">
+                    <div class="auth-field">
+                        <label data-i18n="dns.cache_auth_user">Login</label>
+                        <input type="text" id="dns-cache-auth-user" autocomplete="off">
+                    </div>
+                    <div class="auth-field">
+                        <label data-i18n="dns.cache_auth_pass">Password</label>
+                        <input type="password" id="dns-cache-auth-pass" autocomplete="new-password">
+                    </div>
+                </div>
+            </div>
+
+            <div class="test-conn-row">
+                <button class="btn btn-primary" onclick="testDnsCacheConnection()" data-i18n="dns.test_connection">Test connection</button>
+                <span id="dns-cache-test-result" class="test-conn-result"></span>
+            </div>
+
+            <button class="btn btn-primary" onclick="saveDnsSettings()" data-i18n="dns.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Last-saved (NVS) value of the DNS cache REST settings — the "Test
+        // connection" button must test these, NOT the (possibly unsaved) form.
+        let savedDnsCache = null;
+
+        // Only the fields this page owns (DNS cache). Every save merges with
+        // the current server state via saveDnsPartial().
+        function readDnsForm() {
+            return {
+                cache_rest: document.getElementById('dns-cache-rest').checked,
+                cache_url: document.getElementById('dns-cache-url').value,
+                cache_rest_read: document.getElementById('dns-cache-read').checked,
+                cache_rest_write: document.getElementById('dns-cache-write').checked,
+                cache_auth: document.getElementById('dns-cache-auth').checked,
+                cache_auth_user: document.getElementById('dns-cache-auth-user').value,
+                cache_auth_password: document.getElementById('dns-cache-auth-pass').value,
+            };
+        }
+
+        async function loadDnsSettings() {
+            const data = await fetchJSON('/api/dns/settings');
+            document.getElementById('dns-cache-rest').checked = data.cache_rest || false;
+            document.getElementById('dns-cache-url').value = data.cache_url || '';
+            document.getElementById('dns-cache-read').checked = data.cache_rest_read !== false;
+            document.getElementById('dns-cache-write').checked = data.cache_rest_write !== false;
+            document.getElementById('dns-cache-auth').checked = data.cache_auth || false;
+            document.getElementById('dns-cache-auth-user').value = data.cache_auth_user || '';
+            document.getElementById('dns-cache-auth-pass').value = data.cache_auth_password || '';
+            savedDnsCache = {
+                url: data.cache_url || '',
+                auth: data.cache_auth || false,
+                user: data.cache_auth_user || '',
+                pass: data.cache_auth_password || ''
+            };
+            updateCacheOptionsVisibility();
+            updateDnsCacheAuthVisibility();
+        }
+
+        function updateCacheOptionsVisibility() {
+            const opt = document.getElementById('dns-cache-options');
+            if (opt) {
+                opt.style.display = document.getElementById('dns-cache-rest').checked ? 'block' : 'none';
+            }
+        }
+
+        function updateDnsCacheAuthVisibility() {
+            const fields = document.getElementById('dns-cache-auth-fields');
+            if (fields) {
+                fields.style.display = document.getElementById('dns-cache-auth').checked ? 'flex' : 'none';
+            }
+        }
+
+        async function toggleDnsCacheRest() {
+            const checked = document.getElementById('dns-cache-rest').checked;
+            const result = await saveDnsPartial({ cache_rest: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-cache-rest').checked = !checked;
+            }
+            updateCacheOptionsVisibility();
+        }
+
+        async function toggleDnsCacheRead() {
+            const checked = document.getElementById('dns-cache-read').checked;
+            const result = await saveDnsPartial({ cache_rest_read: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-cache-read').checked = !checked;
+            }
+        }
+
+        async function toggleDnsCacheWrite() {
+            const checked = document.getElementById('dns-cache-write').checked;
+            const result = await saveDnsPartial({ cache_rest_write: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-cache-write').checked = !checked;
+            }
+        }
+
+        async function toggleDnsCacheAuth() {
+            const checked = document.getElementById('dns-cache-auth').checked;
+            const result = await saveDnsPartial({
+                cache_auth: checked,
+                cache_auth_user: document.getElementById('dns-cache-auth-user').value,
+                cache_auth_password: document.getElementById('dns-cache-auth-pass').value
+            });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-cache-auth').checked = !checked;
+            }
+            updateDnsCacheAuthVisibility();
+        }
+
+        async function testDnsCacheConnection() {
+            const form = {
+                url: document.getElementById('dns-cache-url').value,
+                auth: document.getElementById('dns-cache-auth').checked,
+                user: document.getElementById('dns-cache-auth-user').value,
+                pass: document.getElementById('dns-cache-auth-pass').value
+            };
+            await testConnection('dns-cache-test-result', 'dns_cache', savedDnsCache, form, 'dns');
+        }
+
+        async function saveDnsSettings() {
+            const result = await saveDnsPartial(readDnsForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadDnsSettings();
+            alert('DNS settings saved!');
+        }
+
+        loadDnsSettings();
+    </script>
+</body>
+</html>

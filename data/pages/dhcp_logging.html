@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dhcp">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DHCP Logging — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dhcp_logging.title">DHCP Logging</h1>
+
+        <div class="card toggle-row">
+            <span data-i18n="dhcp.log_terminal">Log to Terminal</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dhcp-log-terminal" onchange="toggleLogTerminal()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="dhcp.log_rest">Log to External REST</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dhcp-log-rest" onchange="toggleLogRest()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="dhcp.log_url">Logging URL (REST)</label>
+            <input type="text" id="dhcp-log-url" placeholder="https://dhcpserverweb/api/v1/dhcp/log">
+
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="dhcp.log_auth">Authorization required</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dhcp-log-auth" onchange="toggleLogAuth()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div id="dhcp-log-auth-fields" class="auth-fields" style="display:none;">
+                <div class="auth-pair">
+                    <div class="auth-field">
+                        <label data-i18n="dhcp.log_auth_user">Login</label>
+                        <input type="text" id="dhcp-log-auth-user" autocomplete="off">
+                    </div>
+                    <div class="auth-field">
+                        <label data-i18n="dhcp.log_auth_pass">Password</label>
+                        <input type="password" id="dhcp-log-auth-pass" autocomplete="new-password">
+                    </div>
+                </div>
+            </div>
+
+            <div class="test-conn-row">
+                <button class="btn btn-primary" onclick="testDhcpLogConnection()" data-i18n="dhcp.test_connection">Test connection</button>
+                <span id="dhcp-log-test-result" class="test-conn-result"></span>
+            </div>
+
+            <button class="btn btn-primary" onclick="saveDhcpSettings()" data-i18n="dhcp.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Last-saved (NVS) value of the DHCP REST log settings — the "Test
+        // connection" button must test these, NOT the (possibly unsaved) form.
+        let savedDhcpLog = null;
+
+        // Only the fields this page owns (DHCP logging). Every save merges with
+        // the current server state via saveDhcpPartial().
+        function readDhcpForm() {
+            return {
+                log_terminal: document.getElementById('dhcp-log-terminal').checked,
+                log_rest: document.getElementById('dhcp-log-rest').checked,
+                log_url: document.getElementById('dhcp-log-url').value,
+                log_auth: document.getElementById('dhcp-log-auth').checked,
+                log_auth_user: document.getElementById('dhcp-log-auth-user').value,
+                log_auth_password: document.getElementById('dhcp-log-auth-pass').value,
+            };
+        }
+
+        async function loadDhcpSettings() {
+            const data = await fetchJSON('/api/dhcp/settings');
+            document.getElementById('dhcp-log-terminal').checked = data.log_terminal || false;
+            document.getElementById('dhcp-log-rest').checked = data.log_rest || false;
+            document.getElementById('dhcp-log-url').value = data.log_url || '';
+            document.getElementById('dhcp-log-auth').checked = data.log_auth || false;
+            document.getElementById('dhcp-log-auth-user').value = data.log_auth_user || '';
+            document.getElementById('dhcp-log-auth-pass').value = data.log_auth_password || '';
+            savedDhcpLog = {
+                url: data.log_url || '',
+                auth: data.log_auth || false,
+                user: data.log_auth_user || '',
+                pass: data.log_auth_password || ''
+            };
+            updateDhcpLogAuthVisibility();
+        }
+
+        function updateDhcpLogAuthVisibility() {
+            const fields = document.getElementById('dhcp-log-auth-fields');
+            if (fields) {
+                fields.style.display = document.getElementById('dhcp-log-auth').checked ? 'flex' : 'none';
+            }
+        }
+
+        async function toggleLogTerminal() {
+            const checked = document.getElementById('dhcp-log-terminal').checked;
+            const result = await saveDhcpPartial({ log_terminal: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dhcp-log-terminal').checked = !checked;
+            }
+        }
+
+        async function toggleLogRest() {
+            const checked = document.getElementById('dhcp-log-rest').checked;
+            const result = await saveDhcpPartial({ log_rest: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dhcp-log-rest').checked = !checked;
+            }
+        }
+
+        async function toggleLogAuth() {
+            const checked = document.getElementById('dhcp-log-auth').checked;
+            const result = await saveDhcpPartial({
+                log_auth: checked,
+                log_auth_user: document.getElementById('dhcp-log-auth-user').value,
+                log_auth_password: document.getElementById('dhcp-log-auth-pass').value
+            });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dhcp-log-auth').checked = !checked;
+            }
+            updateDhcpLogAuthVisibility();
+        }
+
+        async function testDhcpLogConnection() {
+            const form = {
+                url: document.getElementById('dhcp-log-url').value,
+                auth: document.getElementById('dhcp-log-auth').checked,
+                user: document.getElementById('dhcp-log-auth-user').value,
+                pass: document.getElementById('dhcp-log-auth-pass').value
+            };
+            await testConnection('dhcp-log-test-result', 'dhcp_log', savedDhcpLog, form, 'dhcp');
+        }
+
+        async function saveDhcpSettings() {
+            const result = await saveDhcpPartial(readDhcpForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadDhcpSettings();
+        }
+
+        loadDhcpSettings();
+    </script>
+</body>
+</html>

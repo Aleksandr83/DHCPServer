@@ -1,0 +1,53 @@
+# CONFIG_FW_VER_GLOBAL
+CONFIG_FW_VER_GLOBAL=1
+# CONFIG_FW_VER_DEVICE
+CONFIG_FW_VER_DEVICE=2
+# CONFIG_FW_VER_RELEASE
+CONFIG_FW_VER_RELEASE=28
+# CONFIG_FW_VER_SUBRELEASE
+CONFIG_FW_VER_SUBRELEASE=0
+# CONFIG_FW_VER_YEAR
+CONFIG_FW_VER_YEAR=26
+# CONFIG_FW_VER_MONTH
+CONFIG_FW_VER_MONTH=8
+# CONFIG_FW_VER_REGION
+CONFIG_FW_VER_REGION="RU"
+
+# ESP-IDF defaults
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/dhcp_partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/dhcp_partitions.csv"
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32_SPIRAM_SUPPORT=n
+CONFIG_LWIP_DHCP=y
+CONFIG_LWIP_DNS=y
+# More sockets for the web server: the UI polls /api/status periodically and
+# sockets pile up in TIME_WAIT; the default (10) gets exhausted ->
+# "httpd_accept_conn: error in accept (23)". 24 leaves headroom for httpd + DNS.
+CONFIG_LWIP_MAX_SOCKETS=24
+CONFIG_LWIP_SO_LINGER=y
+CONFIG_ESP_HTTP_SERVER=y
+CONFIG_SPIFFS_USE_MTIME=y
+
+# System event loop task (sys_evt) runs the network-connected handler which
+# starts DHCP/DNS/Web servers; default 2304 overflows -> bump to 8192
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
+
+# Reboot with a backtrace if a task hangs (instead of hanging silently)
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# CPU load monitoring via FreeRTOS idle/tick hooks (CpuMonitor)
+CONFIG_FREERTOS_USE_IDLE_HOOK=y
+CONFIG_FREERTOS_USE_TICK_HOOK=y
+
+# Ethernet (ENC28J60)
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_SPI_ETHERNET=y
+CONFIG_ETH_SPI_ETHERNET_ENC28J60=y
+
+# HTTPS REST client (DNS log sender): self-signed certs on LAN allowed
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+CONFIG_ESP_HTTP_CLIENT_ENABLE_BASIC_AUTH=y
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
