@@ -4,6 +4,10 @@
 
 ---
 
+![DHCPServer web interface](Docs/images/web_interface.png)
+
+---
+
 ## 📖 Description
 
 DHCP server and caching DNS proxy built on **ESP32-WROOM-32** with an **ENC28J60 Ethernet module**. The device connects to the local network **over wired Ethernet (ENC28J60 via SPI)** — **WiFi is not used**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
