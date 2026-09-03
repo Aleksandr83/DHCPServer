@@ -393,3 +393,93 @@ HTTP client settings as the REST log/cache senders: preemptive Basic auth,
 > `http` is the response status (0 on transport failure); `error` holds an
 > `esp_err_to_name` string on failure (empty on success). The web UI treats a
 > 401/403 as an authentication problem and any other code as reachable.
+
+---
+
+## GET /api/settings/export
+
+Full backup of all persisted settings as a single JSON document. Passwords are
+**not** exported (web password, REST-log/cache auth passwords) — the matching
+`*_auth` booleans are kept so an import knows whether auth is enabled.
+
+**Response `200 OK`:**
+```json
+{
+  "format": "dhcpserver-settings",
+  "schema": 1,
+  "firmware_version": "01.02.028.00.26.08.RU",
+  "dhcp": {
+    "enabled": true, "server_ip": "192.168.1.201",
+    "start_ip": "192.168.1.100", "end_ip": "192.168.1.200",
+    "subnet": "255.255.255.0", "gateway": "192.168.1.1",
+    "lease_time": 86400, "log_terminal": false, "log_rest": false,
+    "log_url": "", "log_auth": false, "log_auth_user": "",
+    "dns_mode": "auto", "dns_address": ""
+  },
+  "static_bindings": [
+    { "mac": "24:0A:C4:01:23:45", "ip": "192.168.1.50", "name": "",
+      "gateway": "", "use_gateway": true, "enabled": true, "use_dns": true }
+  ],
+  "dns": {
+    "enabled": true, "external_dns": "192.168.1.1",
+    "log_terminal": false, "log_forwarded": true, "log_local": true,
+    "log_cache": true, "log_rest_sent": false, "log_rest": false,
+    "log_url": "", "log_auth": false, "log_auth_user": "",
+    "cache_rest": false, "cache_rest_read": true, "cache_rest_write": true,
+    "cache_url": "", "cache_auth": false, "cache_auth_user": ""
+  },
+  "local_hosts": [
+    { "name": "mydevice.local", "ip4": "192.168.1.60", "ip6": "", "enabled": true }
+  ],
+  "security": { "username": "admin", "max_attempts": 5, "lockout_period": 300 }
+}
+```
+
+---
+
+## POST /api/settings/import
+
+Restore settings from a JSON document produced by `GET /api/settings/export`.
+
+**Request body:** the export JSON (full or partial document). Content-Length may
+be up to ~16 KB.
+
+Import logic:
+
+1. **Format marker** — `"format":"dhcpserver-settings"` is required; otherwise
+   `400`/error response.
+2. **Version** — `firmware_version` is compared **by release number** (`xxx` of
+   `aa.bb.xxx.cc.YY.MM.RR`); sub-release / date / region are ignored.
+3. **Recognized fields only** — each section is applied field-by-field from the
+   known schema; passwords are never imported (current ones are kept).
+4. **Unknown fields** (e.g. a file exported by a **newer** firmware) are not
+   applied and are listed in `skipped_fields`.
+5. **Apply** — sections are saved to NVS; the DHCP/DNS servers are started or
+   stopped to match the imported `enabled` flags. A change of the network
+   parameters (`server_ip` / `subnet` / `gateway`) is **not** applied on the fly —
+   the response flags `reboot_required`, so a reboot picks up the new static IP.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "firmware_version": "01.02.028.00.26.08.RU",
+  "file_version": "01.02.027.00.26.08.RU",
+  "version_mismatch": true,
+  "file_newer": false,
+  "reboot_required": false,
+  "imported": {
+    "dhcp": true, "static_bindings": true, "dns": true,
+    "local_hosts": true, "security": true
+  },
+  "skipped_fields": ["some_future_field"]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `version_mismatch` | imported release ≠ current release |
+| `file_newer` | imported file was produced by a newer release |
+| `reboot_required` | network params changed — reboot to apply static IP |
+| `imported` | which sections were actually found and applied |
+| `skipped_fields` | fields present but unknown to this firmware (not imported) |

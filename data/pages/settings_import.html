@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="settings_import">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Import Settings — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="settings_import.title">Import Settings</h1>
+
+        <div class="card">
+            <p data-i18n="settings_import.desc">Choose a settings backup file (*.conf, JSON) exported earlier and apply it. Only parameters supported by this firmware version are imported.</p>
+
+            <input type="file" id="import-file" accept=".conf,.json">
+            <button class="btn btn-primary" onclick="importSettings()" data-i18n="settings_import.button">Import</button>
+            <div id="import-result"></div>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        async function importSettings() {
+            const fileInput = document.getElementById('import-file');
+            const out = document.getElementById('import-result');
+            out.textContent = '';
+
+            const file = fileInput.files && fileInput.files[0];
+            if (!file) {
+                out.textContent = tr('settings_import.error') + ' no file';
+                return;
+            }
+
+            const text = await file.text();
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch (e) { /* keep null */ }
+            if (!parsed || parsed.format !== 'dhcpserver-settings') {
+                out.textContent = tr('settings_import.error') + ' bad format';
+                return;
+            }
+
+            let resp;
+            try {
+                resp = await apiFetch('/api/settings/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: text,
+                });
+            } catch (e) {
+                out.textContent = tr('settings_import.error') + ' ' + e;
+                return;
+            }
+            const r = await resp.json();
+
+            const lines = [tr('settings_import.ok')];
+            if (r.version_mismatch) {
+                lines.push(tr('settings_import.version_mismatch') + ': ' +
+                           (r.file_version || '?') + ' → ' + (r.firmware_version || '?'));
+            }
+            if (r.file_newer) lines.push(tr('settings_import.file_newer'));
+            if (r.reboot_required) lines.push(tr('settings_import.reboot_required'));
+            if (Array.isArray(r.skipped_fields) && r.skipped_fields.length) {
+                lines.push(tr('settings_import.skipped') + ' ' + r.skipped_fields.join(', '));
+            }
+            out.textContent = lines.join('\n');
+        }
+    </script>
+</body>
+</html>

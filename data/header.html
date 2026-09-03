@@ -23,7 +23,14 @@
                         <a href="/pages/dns_logging.html" data-i18n="nav.dns_logging">Logging</a>
                     </div>
                 </div>
-                <a href="/pages/security.html" data-i18n="nav.security">Security</a>
+                <div class="nav-dropdown">
+                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.settings">Settings</button>
+                    <div class="nav-dropdown-menu">
+                        <a href="/pages/security.html" data-i18n="nav.security">Security</a>
+                        <a href="/pages/settings_import.html" data-i18n="nav.settings_import">Import</a>
+                        <a href="/pages/settings_export.html" data-i18n="nav.settings_export">Export</a>
+                    </div>
+                </div>
                 <div class="nav-dropdown">
                     <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.help">Help</button>
                     <div class="nav-dropdown-menu">

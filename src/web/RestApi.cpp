@@ -127,13 +127,14 @@ void RestApi::addJsonInt(std::string& json, const std::string& key,
 // Body reader
 // ─────────────────────────────────────────────────────
 
-std::string RestApi::readBody(httpd_req* req)
+std::string RestApi::readBody(httpd_req* req, size_t maxLen)
 {
     size_t totalLen = req->content_len;
     if (totalLen == 0) return "";
-    // Sanity cap: settings bodies are small (<1 KB). Guard against a bogus
-    // content_len claiming a huge body (the httpd socket buffer is limited).
-    if (totalLen > 4096) totalLen = 4096;
+    // Sanity cap: guard against a bogus content_len claiming a huge body
+    // (the httpd socket buffer is limited). Most settings bodies are small;
+    // the settings-import endpoint passes a larger cap (~16 KB).
+    if (totalLen > maxLen) totalLen = maxLen;
 
     std::string body(totalLen, '\0');
     size_t offset = 0;
@@ -755,6 +756,403 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/settings/export
+// Full backup of all NVS settings as JSON, including the firmware version.
+// Passwords are intentionally NOT exported (log/cache auth and web password) —
+// the corresponding *_auth booleans are kept so an import knows auth is on.
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    auto dhcp = cfgMgr.getDhcp();
+    auto dns  = cfgMgr.getDns();
+    auto sec  = cfgMgr.getSecurity();
+    auto bindings = cfgMgr.getStaticBindings();
+    auto hosts    = cfgMgr.getLocalHosts();
+
+    std::string json = "{";
+    addJsonString(json, "format", "dhcpserver-settings", false);
+    addJsonInt(json, "schema", 1, true);
+    addJsonString(json, "firmware_version",
+                  ::dhcp::core::Version::instance().toString(), true);
+
+    // ── dhcp section (no log_auth_password) ──
+    json += ",\"dhcp\":{";
+    addJsonBool(json, "enabled", dhcp.enabled, false);
+    addJsonString(json, "server_ip", dhcp.serverIp, true);
+    addJsonString(json, "start_ip", dhcp.startIp, true);
+    addJsonString(json, "end_ip", dhcp.endIp, true);
+    addJsonString(json, "subnet", dhcp.subnet, true);
+    addJsonString(json, "gateway", dhcp.gateway, true);
+    addJsonInt(json, "lease_time", dhcp.leaseTimeSec, true);
+    addJsonBool(json, "log_terminal", dhcp.logTerminal, true);
+    addJsonBool(json, "log_rest", dhcp.logRest, true);
+    addJsonString(json, "log_url", dhcp.logUrl, true);
+    addJsonBool(json, "log_auth", dhcp.logAuthEnabled, true);
+    addJsonString(json, "log_auth_user", dhcp.logAuthUser, true);
+    addJsonString(json, "dns_mode", dhcp.dnsMode, true);
+    addJsonString(json, "dns_address", dhcp.dnsAddress, true);
+    json += "}";
+
+    // ── static_bindings section ──
+    json += ",\"static_bindings\":[";
+    for (size_t i = 0; i < bindings.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{\"mac\":\"" + bindings[i].mac + "\",";
+        json += "\"ip\":\"" + bindings[i].ip + "\",";
+        json += "\"name\":\"" + bindings[i].name + "\",";
+        json += "\"gateway\":\"" + bindings[i].gateway + "\",";
+        json += std::string("\"use_gateway\":") +
+                (bindings[i].useGateway ? "true" : "false") + ",";
+        json += std::string("\"enabled\":") +
+                (bindings[i].enabled ? "true" : "false") + ",";
+        json += std::string("\"use_dns\":") +
+                (bindings[i].useDns ? "true" : "false") + "}";
+    }
+    json += "]";
+
+    // ── dns section (no log_auth_password / cache_auth_password) ──
+    json += ",\"dns\":{";
+    addJsonBool(json, "enabled", dns.enabled, false);
+    addJsonString(json, "external_dns", dns.externalDns, true);
+    addJsonBool(json, "log_terminal", dns.logTerminal, true);
+    addJsonBool(json, "log_forwarded", dns.logForwarded, true);
+    addJsonBool(json, "log_local", dns.logLocal, true);
+    addJsonBool(json, "log_cache", dns.logCache, true);
+    addJsonBool(json, "log_rest_sent", dns.logRestSent, true);
+    addJsonBool(json, "log_rest", dns.logRest, true);
+    addJsonString(json, "log_url", dns.logUrl, true);
+    addJsonBool(json, "log_auth", dns.logAuthEnabled, true);
+    addJsonString(json, "log_auth_user", dns.logAuthUser, true);
+    addJsonBool(json, "cache_rest", dns.cacheRest, true);
+    addJsonBool(json, "cache_rest_read", dns.cacheRestRead, true);
+    addJsonBool(json, "cache_rest_write", dns.cacheRestWrite, true);
+    addJsonString(json, "cache_url", dns.cacheUrl, true);
+    addJsonBool(json, "cache_auth", dns.cacheAuthEnabled, true);
+    addJsonString(json, "cache_auth_user", dns.cacheAuthUser, true);
+    json += "}";
+
+    // ── local_hosts section ──
+    json += ",\"local_hosts\":[";
+    for (size_t i = 0; i < hosts.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{\"name\":\"" + hosts[i].name + "\",";
+        json += "\"ip4\":\"" + hosts[i].ip4 + "\",";
+        json += "\"ip6\":\"" + hosts[i].ip6 + "\",";
+        json += std::string("\"enabled\":") +
+                (hosts[i].enabled ? "true" : "false") + "}";
+    }
+    json += "]";
+
+    // ── security section (no password) ──
+    json += ",\"security\":{";
+    addJsonString(json, "username", sec.username, false);
+    addJsonInt(json, "max_attempts", sec.maxAttempts, true);
+    addJsonInt(json, "lockout_period", sec.lockoutPeriodSec, true);
+    json += "}";
+
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "Settings exported (%zu bytes)", json.size());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/settings/import
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string body = readBody(req, 16384);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    // ─── 1. Validate format / version marker ───
+    const std::string fmt = jsonGetStr(body, "format");
+    if (fmt != "dhcpserver-settings") {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"Invalid format marker\"}");
+        return ESP_OK;
+    }
+
+    // ─── 2. Compare firmware version by release (xxx) ───
+    const std::string fileVerStr = jsonGetStr(body, "firmware_version");
+    const auto& curVer = ::dhcp::core::Version::instance();
+    bool versionMismatch = false;
+    bool fileNewer = false;
+    if (!fileVerStr.empty()) {
+        int g = -1, d = -1, rel = -1;
+        if (std::sscanf(fileVerStr.c_str(), "%d.%d.%d", &g, &d, &rel) >= 3) {
+            versionMismatch = (rel != curVer.release());
+            fileNewer = (rel > curVer.release());
+        }
+    }
+
+    // ─── 3. Collect unknown top-level keys (cannot be imported) ───
+    // We only know these section keys; anything else is reported as skipped.
+    std::string skipped;
+    const char* known[] = { "format", "schema", "firmware_version",
+                            "dhcp", "static_bindings", "dns",
+                            "local_hosts", "security" };
+    size_t pos = 0;
+    while ((pos = body.find('"', pos)) != std::string::npos) {
+        size_t keyStart = pos + 1;
+        size_t keyEnd = body.find('"', keyStart);
+        if (keyEnd == std::string::npos) break;
+        std::string key = body.substr(keyStart, keyEnd - keyStart);
+        // A key is a candidate object key if followed by ':' (not part of a
+        // nested value). Keys at top level are followed by ':' and are not
+        // within the known sections (we accept the whole file as flat scan).
+        size_t colon = keyEnd + 1;
+        while (colon < body.size() && body[colon] == ' ') colon++;
+        if (colon < body.size() && body[colon] == ':') {
+            bool isKnown = false;
+            for (const char* k : known) {
+                if (key == k) { isKnown = true; break; }
+            }
+            if (!isKnown && key != "enabled" && key != "server_ip" &&
+                key != "start_ip" && key != "end_ip" && key != "subnet" &&
+                key != "gateway" && key != "lease_time" &&
+                key != "log_terminal" && key != "log_rest" &&
+                key != "log_url" && key != "log_auth" &&
+                key != "log_auth_user" && key != "dns_mode" &&
+                key != "dns_address" && key != "mac" && key != "ip" &&
+                key != "name" && key != "use_gateway" && key != "use_dns" &&
+                key != "external_dns" && key != "log_forwarded" &&
+                key != "log_local" && key != "log_cache" &&
+                key != "log_rest_sent" && key != "cache_rest" &&
+                key != "cache_rest_read" && key != "cache_rest_write" &&
+                key != "cache_url" && key != "cache_auth" &&
+                key != "cache_auth_user" && key != "ip4" && key != "ip6" &&
+                key != "username" && key != "max_attempts" &&
+                key != "lockout_period") {
+                if (!skipped.empty()) skipped += ",";
+                skipped += "\"" + key + "\"";
+            }
+        }
+        pos = keyEnd + 1;
+    }
+
+    // ─── 4. Import sections (recognized fields only; passwords never) ───
+    bool importedDhcp = false, importedBind = false, importedDns = false;
+    bool importedHosts = false, importedSec = false;
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    const auto oldDhcp = cfgMgr.getDhcp();  // to detect network-level changes
+
+    // DHCP section (object nested under "dhcp")
+    {
+        size_t s = body.find("\"dhcp\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('{', s);
+            if (open != std::string::npos) {
+                std::string seg = body.substr(open);
+                auto cur = cfgMgr.getDhcp();
+                cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
+                std::string v = jsonGetStr(seg, "server_ip"); if (!v.empty()) cur.serverIp = v;
+                v = jsonGetStr(seg, "start_ip"); if (!v.empty()) cur.startIp = v;
+                v = jsonGetStr(seg, "end_ip"); if (!v.empty()) cur.endIp = v;
+                v = jsonGetStr(seg, "subnet"); if (!v.empty()) cur.subnet = v;
+                v = jsonGetStr(seg, "gateway"); if (!v.empty()) cur.gateway = v;
+                v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
+                v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
+                v = jsonGetStr(seg, "dns_address"); cur.dnsAddress = v;
+                std::string m = jsonGetStr(seg, "dns_mode"); if (m == "manual" || m == "auto") cur.dnsMode = m;
+                cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
+                cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
+                cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
+                cur.leaseTimeSec = jsonGetInt(seg, "lease_time", cur.leaseTimeSec);
+                cfgMgr.setDhcp(cur);
+                importedDhcp = true;
+            }
+        }
+    }
+
+    // Static bindings (array; we rebuild from recognized entries)
+    {
+        size_t s = body.find("\"static_bindings\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('[', s);
+            if (open != std::string::npos) {
+                std::vector<::dhcp::core::StaticBinding> out;
+                size_t p = open;
+                while ((p = body.find("\"mac\"", p)) != std::string::npos &&
+                       p < body.size()) {
+                    ::dhcp::core::StaticBinding b;
+                    std::string seg = body.substr(p);
+                    b.mac = jsonGetStr(seg, "mac");
+                    b.ip = jsonGetStr(seg, "ip");
+                    b.name = jsonGetStr(seg, "name");
+                    b.gateway = jsonGetStr(seg, "gateway");
+                    b.useGateway = jsonGetBool(seg, "use_gateway", true);
+                    b.enabled = jsonGetBool(seg, "enabled", true);
+                    b.useDns = jsonGetBool(seg, "use_dns", true);
+                    if (!b.mac.empty() && !b.ip.empty()) out.push_back(b);
+                    p++;
+                }
+                cfgMgr.setStaticBindings(out);
+                if (s_dhcp) s_dhcp->reloadStaticBindings();
+                importedBind = true;
+            }
+        }
+    }
+
+    // DNS section
+    {
+        size_t s = body.find("\"dns\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('{', s);
+            if (open != std::string::npos) {
+                std::string seg = body.substr(open);
+                auto cur = cfgMgr.getDns();
+                cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
+                std::string v = jsonGetStr(seg, "external_dns"); if (!v.empty()) cur.externalDns = v;
+                v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
+                v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
+                v = jsonGetStr(seg, "cache_url"); cur.cacheUrl = v;
+                v = jsonGetStr(seg, "cache_auth_user"); cur.cacheAuthUser = v;
+                cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
+                cur.logForwarded = jsonGetBool(seg, "log_forwarded", cur.logForwarded);
+                cur.logLocal = jsonGetBool(seg, "log_local", cur.logLocal);
+                cur.logCache = jsonGetBool(seg, "log_cache", cur.logCache);
+                cur.logRestSent = jsonGetBool(seg, "log_rest_sent", cur.logRestSent);
+                cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
+                cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
+                cur.cacheRest = jsonGetBool(seg, "cache_rest", cur.cacheRest);
+                cur.cacheRestRead = jsonGetBool(seg, "cache_rest_read", cur.cacheRestRead);
+                cur.cacheRestWrite = jsonGetBool(seg, "cache_rest_write", cur.cacheRestWrite);
+                cur.cacheAuthEnabled = jsonGetBool(seg, "cache_auth", cur.cacheAuthEnabled);
+                cfgMgr.setDns(cur);
+                importedDns = true;
+            }
+        }
+    }
+
+    // Local hosts
+    {
+        size_t s = body.find("\"local_hosts\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('[', s);
+            if (open != std::string::npos) {
+                std::vector<::dhcp::core::LocalHostEntry> out;
+                size_t p = open;
+                while ((p = body.find("\"name\"", p)) != std::string::npos &&
+                       p < body.size()) {
+                    ::dhcp::core::LocalHostEntry e;
+                    std::string seg = body.substr(p);
+                    e.name = jsonGetStr(seg, "name");
+                    e.ip4 = jsonGetStr(seg, "ip4");
+                    e.ip6 = jsonGetStr(seg, "ip6");
+                    e.enabled = jsonGetBool(seg, "enabled", true);
+                    if (!e.name.empty() && (!e.ip4.empty() || !e.ip6.empty())) out.push_back(e);
+                    p++;
+                }
+                cfgMgr.setLocalHosts(out);
+                if (s_dns) {
+                    s_dns->clearLocalHosts();
+                    for (const auto& h : out) {
+                        if (!h.enabled) continue;
+                        if (!h.ip4.empty()) s_dns->addLocalHost(h.name, h.ip4);
+                        if (!h.ip6.empty()) s_dns->addLocalHost(h.name, h.ip6);
+                    }
+                    s_dns->syncLoggerLocalHosts();
+                }
+                importedHosts = true;
+            }
+        }
+    }
+
+    // Security (username + limits only; password never imported)
+    {
+        size_t s = body.find("\"security\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('{', s);
+            if (open != std::string::npos) {
+                std::string seg = body.substr(open);
+                auto cur = cfgMgr.getSecurity();
+                std::string v = jsonGetStr(seg, "username"); if (!v.empty()) cur.username = v;
+                cur.maxAttempts = jsonGetInt(seg, "max_attempts", cur.maxAttempts);
+                cur.lockoutPeriodSec = jsonGetInt(seg, "lockout_period", cur.lockoutPeriodSec);
+                cfgMgr.setSecurity(cur);
+                if (s_auth) s_auth->reloadConfig();
+                importedSec = true;
+            }
+        }
+    }
+
+    // ─── 5. Re-apply to running servers (DHCP / DNS restart reads NVS) ───
+    // A change to the network parameters requires a reboot — the static IP is
+    // applied once at Ethernet init and cannot be re-applied on the fly.
+    bool rebootRequired = false;
+    {
+        auto cur = cfgMgr.getDhcp();
+        rebootRequired = (cur.serverIp != oldDhcp.serverIp ||
+                          cur.subnet    != oldDhcp.subnet ||
+                          cur.gateway   != oldDhcp.gateway);
+    }
+
+    // Restart DHCP if it should run; stop if disabled (best effort)
+    if (s_dhcp) {
+        auto c = cfgMgr.getDhcp();
+        if (c.enabled) {
+            if (!s_dhcp->isRunning()) s_dhcp->start();
+            s_dhcp->setLogTerminal(c.logTerminal);
+            s_dhcp->setRestLogging(c.logRest, c.logUrl,
+                                   c.logAuthEnabled, c.logAuthUser, c.logAuthPassword);
+            s_dhcp->reloadStaticBindings();
+        } else if (s_dhcp->isRunning()) {
+            s_dhcp->stop();
+        }
+    }
+    if (s_dns) {
+        auto c = cfgMgr.getDns();
+        if (c.enabled) {
+            if (!s_dns->isRunning()) s_dns->start();
+        } else if (s_dns->isRunning()) {
+            s_dns->stop();
+        }
+        if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
+    }
+
+    // ─── 6. Build response ───
+    std::string json = "{";
+    addJsonString(json, "status", "ok", false);
+    addJsonString(json, "firmware_version", curVer.toString(), true);
+    if (!fileVerStr.empty()) addJsonString(json, "file_version", fileVerStr, true);
+    addJsonBool(json, "version_mismatch", versionMismatch, true);
+    addJsonBool(json, "file_newer", fileNewer, true);
+    addJsonBool(json, "reboot_required", rebootRequired, true);
+    json += ",\"imported\":{";
+    addJsonBool(json, "dhcp", importedDhcp, false);
+    addJsonBool(json, "static_bindings", importedBind, true);
+    addJsonBool(json, "dns", importedDns, true);
+    addJsonBool(json, "local_hosts", importedHosts, true);
+    addJsonBool(json, "security", importedSec, true);
+    json += "}";
+    if (!skipped.empty()) json += ",\"skipped_fields\":[" + skipped + "]";
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d",
+             curVer.toString().c_str(), fileVerStr.c_str(),
+             versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
+             importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
+             importedHosts ? 1 : 0, importedSec ? 1 : 0);
     return ESP_OK;
 }
 

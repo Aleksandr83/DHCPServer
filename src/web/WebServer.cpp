@@ -42,7 +42,12 @@ bool WebServer::start()
     // Configure HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 40;
+    config.max_uri_handlers = 48;
+    // The settings export/import handlers build large JSON and read big POST
+    // bodies on the httpd task — the default 4096-byte stack overflows (panic:
+    // LoadProhibited in the FreeRTOS scheduler, stack filled with 0xa5). Raise
+    // the httpd task stack; there is plenty of free heap (~150 KB).
+    config.stack_size = 8192;
     // Bigger socket pool: the web UI polls /api/status periodically, and with
     // the default pool of 7 (3 reserved for internal use -> only 4 clients)
     // connections pile up in TIME_WAIT and httpd stops accepting
@@ -131,6 +136,8 @@ void WebServer::registerRoutes()
     reg("/api/security/settings",    HTTP_POST,  postSecuritySettingsHandler);
     reg("/api/ota/upload",           HTTP_POST,  postOtaUploadHandler);
     reg("/api/test-connection",      HTTP_POST,  postTestConnectionHandler);
+    reg("/api/settings/export",      HTTP_GET,   getSettingsExportHandler);
+    reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -151,6 +158,8 @@ void WebServer::registerRoutes()
     reg("/pages/dns_cache.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_local_hosts.html", HTTP_GET, staticFileHandler);
     reg("/pages/security.html", HTTP_GET, staticFileHandler);
+    reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
+    reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);
     reg("/pages/version.html", HTTP_GET, staticFileHandler);
 }
 

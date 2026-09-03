@@ -43,6 +43,8 @@ public:
     static esp_err_t handlePostSecuritySettings(httpd_req* req);
     static esp_err_t handlePostOtaUpload(httpd_req* req);
     static esp_err_t handlePostTestConnection(httpd_req* req);
+    static esp_err_t handleGetSettingsExport(httpd_req* req);
+    static esp_err_t handlePostSettingsImport(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);
@@ -55,7 +57,7 @@ private:
                             bool val, bool addComma);
     static void addJsonInt(std::string& json, const std::string& key,
                            int64_t val, bool addComma);
-    static std::string readBody(httpd_req* req);
+    static std::string readBody(httpd_req* req, size_t maxLen = 4096);
 
     static ::dhcp::wifi::IWiFiManager* s_wifi;
     static ::dhcp::dhcp::IDhcpServer*  s_dhcp;

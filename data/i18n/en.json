@@ -33,6 +33,9 @@
     "dns_logging": "Logging",
     "dns_cache": "Cache",
     "dns_local_hosts": "Local Hosts",
+    "settings": "Settings",
+    "settings_export": "Export",
+    "settings_import": "Import",
     "security": "Security",
     "help": "Help",
     "version": "Version"
@@ -155,6 +158,25 @@
     "max_attempts": "Max Attempts",
     "lockout_period": "Lockout Period (s)",
     "save": "Save"
+  },
+  "settings_export": {
+    "title": "Export Settings",
+    "desc": "Download a full backup of the device settings as a JSON file. Passwords are not included.",
+    "button": "Download JSON",
+    "saved_as": "Saved as",
+    "empty": "Nothing to export, or settings could not be loaded."
+  },
+  "settings_import": {
+    "title": "Import Settings",
+    "desc": "Choose a settings backup file (*.conf, JSON) exported earlier and apply it. Only parameters supported by this firmware version are imported.",
+    "placeholder": "Paste the JSON here...",
+    "button": "Import",
+    "ok": "Settings imported.",
+    "version_mismatch": "Version mismatch",
+    "file_newer": "The file is from a newer firmware — unknown parameters will be skipped.",
+    "reboot_required": "Network parameters changed — reboot the device to apply the static IP.",
+    "skipped": "Not imported (unknown to this firmware):",
+    "error": "Import failed:"
   },
   "version": {
     "title": "Firmware Version",
