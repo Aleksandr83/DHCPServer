@@ -12,18 +12,22 @@ namespace dhcp {
 namespace eth {
 
 /**
- * @brief ENC28J60 Ethernet manager implementation.
+ * @brief Ethernet manager implementation (ENC28J60 / ESP32-P4 EMAC).
  *
- * Uses ESP-IDF esp_eth component with ENC28J60 over SPI.
+ * Uses ESP-IDF esp_eth component:
+ *   - ESP32:         ENC28J60 over SPI
+ *   - ESP32-P4:      internal EMAC (RMII) + IP101GRI PHY
  * Static IP is configured on init (DHCP client not used for the Ethernet interface).
  *
- * Hardware wiring (see Docs/ENC28J60.md):
- *   SCK  → D18  (GPIO18)
- *   MOSI → D23  (GPIO23)
- *   MISO → D19  (GPIO19)
- *   CS   → D5   (GPIO5)
- *   INT  → D4   (GPIO4)
- *   RST  → D16  (GPIO16)
+ * Hardware wiring:
+ *   ESP32 + ENC28J60 (see Docs/ENC28J60.md):
+ *     SCK  → D18  (GPIO18)
+ *     MOSI → D23  (GPIO23)
+ *     MISO → D19  (GPIO19)
+ *     CS   → D5   (GPIO5)
+ *     INT  → D4   (GPIO4)
+ *     RST  → D16  (GPIO16)
+ *   ESP32-P4 (Waveshare ESP32-P4-ETH): internal RMII EMAC, no extra wiring.
  */
 class EthManager : public IEthManager {
 public:

@@ -1,6 +1,6 @@
 # DHCPServer
 
-**DHCPv4 + Caching DNS Proxy Server for ESP32-WROOM-32 + ENC28J60 Ethernet**
+**DHCPv4 + Caching DNS Proxy Server for Waveshare ESP32-P4-ETH**
 
 ---
 
@@ -10,7 +10,7 @@
 
 ## 📖 Description
 
-DHCP server and caching DNS proxy built on **ESP32-WROOM-32** with an **ENC28J60 Ethernet module**. The device connects to the local network **over wired Ethernet (ENC28J60 via SPI)** — **WiFi is not used**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
+DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-core RISC-V **ESP32-P4**). The device connects to the local network **over the onboard 10/100 Ethernet** (internal EMAC + **IP101GRI** PHY) — **WiFi/Bluetooth are not available on the ESP32-P4**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
 
 ---
 
@@ -18,107 +18,125 @@ DHCP server and caching DNS proxy built on **ESP32-WROOM-32** with an **ENC28J60
 
 - **DHCPv4 Server** — configurable IP range, subnet, gateway, lease time, static MAC→IP bindings (enable + per-host DNS override)
 - **DNS Proxy** — pipeline: logging → local hosts → external cache (REST) → forwarding to external DNS
-- **ENC28J60 Ethernet** — wired 10 Mbps link over SPI (no WiFi)
+- **Onboard Ethernet 10/100** — internal EMAC + IP101GRI PHY over RMII (no WiFi — ESP32-P4 has no radio)
 - **Web Interface** — dark theme, RU/EN localization, DHCP/DNS sub-pages
 - **REST API** — full device management over HTTP with Basic auth + rate limiting
 - **OTA Updates** — firmware update via web interface, dual OTA partitions for safe upgrades
 - **Terminal Menu** — UART console with `lan status`, password reset, version, reboot
-- **LED Indicator** — GPIO26 LED shows link status
-- **ESP-Prog Debug** — JTAG debug support via ESP-Prog
+- **Link Status LED** — link status indication on boards with a user LED; compiled out on the ESP32-P4-ETH (it has no user LED)
+- **UART Console & Flashing** — via onboard USB-C / CH343P
 
 ---
 
-## 🔧 Hardware Requirements
+## 🔧 Hardware — Waveshare ESP32-P4-ETH
+
+The project targets the **Waveshare ESP32-P4-ETH** development board. Ethernet is
+**onboard** (10/100 RJ45) — no external Ethernet module or wiring is required.
+
+![Waveshare ESP32-P4-ETH board](Docs/images/esp32-p4-eth_board.svg)
 
 | Component | Specification |
 |-----------|--------------|
-| MCU | ESP32-WROOM-32 (ESP32-D0WDQ6) |
-| Ethernet | ENC28J60 SPI→Ethernet module (3.3V logic) |
-| Flash | 4 MB |
-| LED | GPIO26 (active high) |
-| Debug | ESP-Prog (JTAG) — optional |
+| Board | Waveshare ESP32-P4-ETH |
+| MCU | ESP32-P4 NRW32 — ESP32-P4 module, dual-core RISC-V (max **360 MHz** on this silicon revision) |
+| Ethernet | Onboard 10/100 Mbps RJ45 — internal EMAC + **IP101GRI** PHY (RMII) |
+| Flash | GigaDevice 25Q256EY1G — SPI NOR, 256 Mbit (**32 MB**) |
+| PSRAM | 32 MB (stacked in the ESP32-P4 module) |
+| USB-UART | **CH343P** — USB-C → UART/TTL (console + flashing) |
+| Audio | **ES8311** codec + **NS4150B** 3 W power amplifier (mic / speaker) |
+| Wi-Fi / BT | — (not available on ESP32-P4) |
+| LED | only a power indicator on board — no user LED; the link-status LED feature is compiled out (GPIO `-1`) |
 
-### ENC28J60 Wiring
+### Onboard Chips
 
-The ENC28J60 is connected to the ESP32 via **SPI (Host 2)**. All signal pins are 3.3V logic.
+| Chip | Manufacturer | Function |
+|------|--------------|----------|
+| **ESP32-P4 NRW32** (FEFO FMDD297) | Espressif Systems | Dual-core RISC-V microcontroller, 32 MB PSRAM |
+| **IP101GRI** | IC Plus Corp | 10/100 Ethernet PHY transceiver (RMII) |
+| **25Q256EY1G** | GigaDevice | SPI NOR flash, 256 Mbit (32 MB) |
+| **CH343P** | WCH | USB → high-speed UART/TTL bridge (console) |
+| **ES8311** | Everest Semiconductor | Low-power mono audio codec (DAC/ADC) |
+| **NS4150B** | — | Audio power amplifier, 3 W × 1 |
 
-| ENC28J60 | → | ESP32 | GPIO |
-|----------|---|-------|------|
-| **VCC** | → | **3.3V** | — |
-| **GND** | → | **GND** | — |
-| **SCK** | → | **D18** | GPIO18 |
-| **MOSI (SI)** | → | **D23** | GPIO23 |
-| **MISO (SO)** | → | **D19** | GPIO19 |
-| **CS** | → | **D5** | GPIO5 |
-| **INT** | → | **D4** | GPIO4 |
-| **RST** | → | **D16** | GPIO16 |
+### Flashing & Console
 
-![ENC28J60 — ESP32-WROOM-32 wiring diagram](Docs/images/enc28j60_wiring.svg)
-
-> ⚠️ Power the ENC28J60 from **3.3V only** (never 5V). Full details: [Docs/ENC28J60.md](Docs/ENC28J60.md).
-
-### ESP-Prog Connection
-
-| ESP-Prog | ESP32 |
-|----------|-------|
-| TDI | GPIO12 |
-| TDO | GPIO15 |
-| TCK | GPIO13 |
-| TMS | GPIO14 |
-| GND | GND |
-| 3.3V | 3.3V |
-| GPIO0 | GPIO0 |
-| EN | EN |
+Connect the board to the PC over **USB-C**. The onboard **CH343P** exposes the
+ESP32-P4 UART0 console and the ROM bootloader. Hold **BOOT** while resetting to
+enter download mode.
 
 ---
 
 ## 🚀 Quick Start
 
-### Prerequisites
+> The firmware is **target-conditional** (`CONFIG_IDF_TARGET_ESP32P4`). The
+> ESP32-P4 path drives the internal RMII EMAC + **IP101GRI** PHY; the classic
+> ESP32 path drives an **ENC28J60** over SPI. Both share the same
+> DHCP/DNS/web application code.
 
-- [PlatformIO](https://platformio.com/) (VS Code extension or CLI)
-- Python 3.8+
-- ESP32-WROOM-32 board + ENC28J60 module (see wiring above)
+### Option A — ESP32 + ENC28J60 (PlatformIO)
 
-### Build
+Reference/legacy target — the ENC28J60 code path is preserved and fully
+buildable with PlatformIO.
 
-```bash
-# Clone the repository
-git clone <repo-url> DHCPServer
-cd DHCPServer
-
-# Build the debug environment (ESP-Prog / JTAG)
-pio run -e esp32dev-debug
-```
-
-### Flash (user action)
+**Prerequisites:** [PlatformIO](https://platformio.com/), Python 3.8+, an
+ESP32-WROOM-32 board + ENC28J60 module (wiring in `Docs/ENC28J60.md`).
 
 ```bash
-# 1. Firmware
-pio run -e esp32dev-debug --target upload
+# Build firmware
+pio run -e esp32dev
 
-# 2. SPIFFS web content (run separately!)
-pio run -e esp32dev-debug --target uploadfs
+# Flash firmware + SPIFFS web content (run separately!)
+pio run -e esp32dev --target upload
+pio run -e esp32dev --target uploadfs
 
 # Monitor serial output
-pio run -e esp32dev-debug --target monitor
+pio run -e esp32dev --target monitor
 ```
 
-> ⚠️ `--target upload --target uploadfs` in a single command flashes SPIFFS twice and skips the firmware. Always run them separately, then reboot the device.
+> ⚠️ Never combine `--target upload --target uploadfs` in one command — SPIFFS
+> would be flashed twice and the firmware skipped. Run them separately, then
+> reboot the device.
 
-### Debug with ESP-Prog
+### Option B — ESP32-P4-ETH (native ESP-IDF)
 
-```bash
-# Build and upload via ESP-Prog
-pio run -e esp32dev-debug --target upload
+> ⚠️ PlatformIO's `espressif32` platform does **not** yet ship an ESP32-P4 MCU
+> or board definition (verified up to v7.0.1, which bundles ESP-IDF 6.0.1), so
+> the ESP32-P4 target is built with the **native ESP-IDF** toolchain (≥ v6.0).
+> No `[env:esp32-p4-eth]` exists in `platformio.ini` on purpose.
 
-# Start debug session
-pio debug -e esp32dev-debug
+**Prerequisites:** ESP-IDF 6.0+ with the RISC-V toolchain (`riscv32-esp-elf`)
+and the Waveshare ESP32-P4-ETH board (onboard Ethernet — no extra module).
+
+```powershell
+# 1. Select the ESP32-P4 target (applies sdkconfig.defaults.esp32p4)
+idf.py set-target esp32p4
+
+# 2. Build
+idf.py build
+
+# 3. Flash firmware, then monitor the console
+idf.py -p COMx flash
+idf.py -p COMx monitor
+
+# 4. Upload the web UI (SPIFFS) — native ESP-IDF has no "uploadfs"
+.\scripts\upload_web_p4.ps1 -Port COMx
 ```
 
-Or use the VS Code launch configuration:
-1. Select `ESP-Prog Debug` in Run & Debug panel
-2. Press F5
+> ⚠️ PlatformIO's `uploadfs` does not exist for the ESP32-P4 — the web content
+> (`data/`) lives in a separate SPIFFS partition and is uploaded with
+> [`scripts/upload_web_p4.ps1`](scripts/upload_web_p4.ps1) (flash the firmware
+> first, then the web UI).
+
+Target configuration files for this build:
+
+- [`sdkconfig.defaults.esp32p4`](sdkconfig.defaults.esp32p4) — EMAC instead of
+  SPI Ethernet, 32 MB flash, silicon rev v1.3 support, partition table override.
+- [`partitions/dhcp_partitions_p4.csv`](partitions/dhcp_partitions_p4.csv) —
+  32 MB partition table (2× OTA + 8 MB SPIFFS).
+
+Full build/flash/web-UI/OTA/troubleshooting walkthrough:
+[`Docs/ESP32-P4-ETH.md`](Docs/ESP32-P4-ETH.md). Partition layout details are in
+[`Docs/PartitionTable.md`](Docs/PartitionTable.md).
 
 ---
 
@@ -151,6 +169,25 @@ Defined in menuconfig (`Kconfig.projbuild`) or `sdkconfig.defaults`:
 Example: `01.02.028.00.26.08.RU` — see [Docs/FirmwareVersion.md](Docs/FirmwareVersion.md).
 
 ### Partition Table
+
+The repo ships two tables: the legacy 4 MB table for the ESP32
+([`partitions/dhcp_partitions.csv`](partitions/dhcp_partitions.csv)) and a
+32 MB table for the ESP32-P4-ETH
+([`partitions/dhcp_partitions_p4.csv`](partitions/dhcp_partitions_p4.csv)).
+The ESP32-P4 uses the internal 32 MB flash with the `phy_init`/RF-calibration
+partition removed (no 2.4 GHz radio) and much larger OTA slots.
+
+**ESP32-P4-ETH layout (32 MB, `dhcp_partitions_p4.csv`):**
+
+| Partition | Offset | Size | Usage |
+|-----------|--------|------|-------|
+| nvs | 0x9000 | 24 KB | Configuration storage |
+| otadata | 0x10000 | 8 KB | OTA boot selection |
+| ota_0 | 0x20000 | 5 MB | OTA app slot 0 |
+| ota_1 | 0x520000 | 5 MB | OTA app slot 1 |
+| spiffs | 0xA20000 | 8 MB | Web interface files |
+
+**Legacy ESP32 layout (4 MB, `dhcp_partitions.csv`):**
 
 | Partition | Offset | Size | Usage |
 |-----------|--------|------|-------|
@@ -233,7 +270,7 @@ Available commands:
   reboot                      — Reboot the device
 ```
 
-> The `lan status` command reports the wired ENC28J60 link through the `IWiFiManager` interface (implemented by `EthWifiAdapter`).
+> The `lan status` command reports the wired Ethernet link through the `IWiFiManager` interface (implemented by `EthWifiAdapter`).
 
 ---
 
@@ -241,28 +278,39 @@ Available commands:
 
 ```
 DHCPServer/
-├── platformio.ini          # PlatformIO configuration
-├── sdkconfig.defaults      # ESP-IDF defaults
+├── CMakeLists.txt           # Component CMakeLists (used by ESP-IDF)
+├── platformio.ini           # PlatformIO configuration (ESP32 + ENC28J60)
+├── sdkconfig.defaults       # Shared ESP-IDF defaults (ESP32)
+├── sdkconfig.defaults.esp32p4 # ESP32-P4-ETH overrides (EMAC, 32 MB flash)
 ├── partitions/
-│   └── dhcp_partitions.csv # Custom partition table
+│   ├── dhcp_partitions.csv      # 4 MB table (ESP32 + ENC28J60)
+│   └── dhcp_partitions_p4.csv   # 32 MB table (ESP32-P4-ETH)
 ├── src/
 │   ├── main.cpp            # Application entry point
+│   ├── CMakeLists.txt      # Component sources (wifi/ excluded on ESP32-P4)
+│   ├── Kconfig.projbuild   # Project configuration options
 │   ├── core/               # Version, Config
-│   ├── eth/                # ENC28J60 Ethernet manager
+│   ├── eth/                # Ethernet manager (ENC28J60 SPI on ESP32 /
+│   │                       #   internal EMAC + IP101GRI on ESP32-P4-ETH)
 │   ├── dhcp/               # DHCP server
 │   ├── dns/                # DNS proxy, cache, logger
 │   ├── web/                # HTTP server, auth, REST API
-│   ├── led/                # LED controller
+│   ├── led/                # LED controller (no-op on ESP32-P4-ETH)
 │   ├── menu/               # Terminal menu
-│   └── storage/            # SPIFFS wrapper
+│   ├── storage/            # SPIFFS wrapper
+│   └── wifi/               # WiFiManager (ESP32 only — not built on ESP32-P4)
 ├── data/                   # SPIFFS web content
 │   ├── index.html
 │   ├── css/style.css
 │   ├── js/app.js
 │   ├── i18n/{ru,en}.json
 │   └── pages/
-├── test/                   # Unit tests
+├── test/                   # Unit tests (host-style, no board needed)
 ├── Docs/                   # Documentation
+│   ├── ENC28J60.md
+│   ├── ESP32-P4-ETH.md      # P4 build/flash/web-UI guide
+│   ├── ESP-Prog.md
+│   ├── FirmwareVersion.md
 │   ├── History.md
 │   ├── Dialog.md
 │   ├── Rest.md
@@ -278,15 +326,23 @@ DHCPServer/
 
 ## 🧪 Testing
 
+Each `test/test_*.cpp` defines its own `app_main()` — tests are built and run
+as firmware on the board through PlatformIO against the ESP32 environment
+(the shared logic classes are target-independent, so the same code is what the
+ESP32-P4 build compiles too):
+
 ```bash
-# Build and run tests on device
 pio test -e esp32dev
 ```
+
+> No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
+> has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4
+> build via native `idf.py` (see [Quick Start](#-quick-start)).
 
 Test files:
 - `test/test_version.cpp` — Version formatting and components
 - `test/test_config.cpp` — Config read/write roundtrip
-- `test/test_wifi.cpp` — LED controller
+- `test/test_wifi.cpp` — WiFiManager (needs hardware) and LedController
 - `test/test_dhcp.cpp` — DHCP server lifecycle
 - `test/test_dns.cpp` — DNS cache stub
 - `test/test_auth.cpp` — Auth manager with lockout

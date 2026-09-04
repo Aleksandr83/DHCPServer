@@ -42,14 +42,22 @@
                 </div>
             </div>
             <div class="status-row">
-                <span class="status-label" data-i18n="app.free_ram">RAM:</span>
+                <span class="status-label" data-i18n="app.free_ram">Memory:</span>
                 <div class="status-value ram-meter">
                     <div class="core-meter">
                         <span class="core-label">RAM</span>
                         <div class="meter-track"><div class="meter-fill ram-fill" id="ram-bar"></div></div>
                         <div class="ram-values">
-                            <span class="ram-num" id="ram-total">--</span>
-                            <span class="ram-num" id="free-ram">--</span>
+                            <span class="ram-total" id="ram-total">--</span>
+                            <span class="ram-free" id="free-ram">--</span>
+                        </div>
+                    </div>
+                    <div class="core-meter" id="psram-meter">
+                        <span class="core-label">PSRAM</span>
+                        <div class="meter-track"><div class="meter-fill psram-fill" id="psram-bar"></div></div>
+                        <div class="ram-values">
+                            <span class="ram-total" id="psram-total">--</span>
+                            <span class="ram-free" id="free-psram">--</span>
                         </div>
                     </div>
                 </div>

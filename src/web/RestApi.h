@@ -42,6 +42,7 @@ public:
     static esp_err_t handleGetSecuritySettings(httpd_req* req);
     static esp_err_t handlePostSecuritySettings(httpd_req* req);
     static esp_err_t handlePostOtaUpload(httpd_req* req);
+    static esp_err_t handlePostWebFile(httpd_req* req);
     static esp_err_t handlePostTestConnection(httpd_req* req);
     static esp_err_t handleGetSettingsExport(httpd_req* req);
     static esp_err_t handlePostSettingsImport(httpd_req* req);

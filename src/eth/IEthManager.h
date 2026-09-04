@@ -18,17 +18,18 @@ enum class EthStatus {
 };
 
 /**
- * @brief Abstract Ethernet manager interface for ENC28J60.
+ * @brief Abstract Ethernet manager interface (ENC28J60 / ESP32-P4 EMAC).
  *
- * Initializes SPI + esp_eth, sets static IP, and provides
- * connection status callbacks.
+ * Initializes the esp_eth driver (SPI ENC28J60 on ESP32, internal RMII
+ * EMAC on ESP32-P4), sets static IP, and provides connection status
+ * callbacks.
  */
 class IEthManager {
 public:
     virtual ~IEthManager() = default;
 
     /**
-     * @brief Initialize SPI bus and ENC28J60 Ethernet.
+     * @brief Initialize the Ethernet driver (bus + MAC + PHY).
      * Must be called once before any other operations.
      */
     virtual void init() = 0;

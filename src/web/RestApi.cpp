@@ -230,6 +230,14 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                static_cast<int64_t>(::dhcp::core::CpuMonitor::totalHeap()), true);
     addJsonInt(json, "heap_largest",
                static_cast<int64_t>(::dhcp::core::CpuMonitor::largestBlock()), true);
+    addJsonInt(json, "ram_total",
+               static_cast<int64_t>(::dhcp::core::CpuMonitor::ramTotal()), true);
+    addJsonInt(json, "psram_total",
+               static_cast<int64_t>(::dhcp::core::CpuMonitor::psramTotal()), true);
+    addJsonInt(json, "psram_free",
+               static_cast<int64_t>(::dhcp::core::CpuMonitor::psramFree()), true);
+    addJsonInt(json, "psram_largest",
+               static_cast<int64_t>(::dhcp::core::CpuMonitor::psramLargest()), true);
     addJsonInt(json, "static_bindings_used",
                static_cast<int64_t>(::dhcp::core::Config::instance().staticBindingsBytes()), true);
     addJsonInt(json, "static_bindings_max",
@@ -1231,6 +1239,179 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"OTA update failed\"}");
     }
 
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/web/file?path=<relative path on SPIFFS>
+// ─────────────────────────────────────────────────────
+// Uploads ONE web-interface file into SPIFFS. The browser sends the raw file
+// bytes as the request body (application/octet-stream) and the destination
+// path RELATIVE to the SPIFFS root (/spiffs) as a percent-encoded query
+// parameter, e.g.:
+//   POST /api/web/file?path=pages%2Fversion.html
+// with the file contents as the body. The file is written to /spiffs/<path>.
+//
+// SPIFFS holds ONLY the web files (device settings live in NVS), so replacing
+// an existing file is safe. A brand-new path is also written, but a new page
+// only becomes reachable once firmware registers a route for it — the server
+// registers explicit routes only (no wildcard matching), so the UI tells the
+// user that new files/pages require a firmware update.
+
+esp_err_t RestApi::handlePostWebFile(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    constexpr size_t kMaxFileBytes = 256 * 1024;
+
+    auto sendJsonError = [req](const char* status, const char* msg) {
+        httpd_resp_set_status(req, status);
+        httpd_resp_set_type(req, "application/json");
+        std::string j = "{\"status\":\"error\",\"message\":\"";
+        j += msg;
+        j += "\"}";
+        httpd_resp_sendstr(req, j.c_str());
+    };
+
+    // Extract and percent-decode the "path" query parameter. httpd_query_key_value
+    // copies the raw (still percent-encoded) value, so decode it here.
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        sendJsonError("400 Bad Request", "Missing query string");
+        return ESP_OK;
+    }
+    char rawPath[80];
+    if (httpd_query_key_value(query, "path", rawPath, sizeof(rawPath)) != ESP_OK) {
+        sendJsonError("400 Bad Request", "Missing path parameter");
+        return ESP_OK;
+    }
+    std::string relPath;
+    {
+        const char* p = rawPath;
+        while (*p) {
+            if (*p == '%') {
+                auto hexVal = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    return -1;
+                };
+                if (!p[1] || !p[2]) {
+                    sendJsonError("400 Bad Request", "Bad path encoding");
+                    return ESP_OK;
+                }
+                int hi = hexVal(p[1]);
+                int lo = hexVal(p[2]);
+                if (hi < 0 || lo < 0) {
+                    sendJsonError("400 Bad Request", "Bad path encoding");
+                    return ESP_OK;
+                }
+                relPath.push_back(static_cast<char>((hi << 4) | lo));
+                p += 3;
+            } else {
+                relPath.push_back(*p);
+                ++p;
+            }
+        }
+    }
+
+    // Validate: must be a relative path with no traversal and no exotic chars.
+    // Only letters/digits/._- in each segment. Longest real path is ~27 chars
+    // (pages/settings_export.html); 64 is a generous but safe cap (SPIFFS object
+    // name limit is 32, and the "/spiffs" prefix is stripped by the VFS layer).
+    auto validRelChar = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    };
+    bool valid = !relPath.empty() && relPath.size() <= 64 && relPath[0] != '/';
+    if (valid) {
+        size_t segStart = 0;
+        while (segStart <= relPath.size()) {
+            size_t slash = relPath.find('/', segStart);
+            std::string seg = relPath.substr(
+                segStart, slash == std::string::npos ? std::string::npos : slash - segStart);
+            if (seg.empty() || seg == "." || seg == "..") {
+                valid = false;
+                break;
+            }
+            for (char c : seg) {
+                if (!validRelChar(c)) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) break;
+            if (slash == std::string::npos) break;
+            segStart = slash + 1;
+        }
+    }
+    if (!valid) {
+        sendJsonError("400 Bad Request", "Invalid path");
+        return ESP_OK;
+    }
+
+    std::string fullPath = "/spiffs/" + relPath;
+
+    if (req->content_len > kMaxFileBytes) {
+        sendJsonError("413 Payload Too Large", "File too large");
+        return ESP_OK;
+    }
+
+    FILE* f = fopen(fullPath.c_str(), "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Web file upload: cannot open %s", fullPath.c_str());
+        sendJsonError("500 Internal Server Error", "Cannot open file");
+        return ESP_OK;
+    }
+
+    // Stream the raw body to the file. Reuse the bounded timeout-retry pattern
+    // from readBody(): httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between
+    // TCP segments of a multi-chunk body.
+    char buf[1024];
+    size_t remaining = req->content_len;
+    size_t written = 0;
+    int retries = 0;
+    bool ok = true;
+    while (remaining > 0) {
+        size_t want = remaining < sizeof(buf) ? remaining : sizeof(buf);
+        int got = httpd_req_recv(req, buf, want);
+        if (got < 0) {
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && written > 0 && retries++ < 20) {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        if (got == 0) {
+            ok = false;
+            break;
+        }
+        if (fwrite(buf, 1, static_cast<size_t>(got), f) != static_cast<size_t>(got)) {
+            ok = false;
+            break;
+        }
+        written += static_cast<size_t>(got);
+        remaining -= static_cast<size_t>(got);
+    }
+    fflush(f);
+    int closeRes = fclose(f);
+
+    if (!ok || written != req->content_len || closeRes != 0) {
+        ESP_LOGE(TAG, "Web file upload failed: %s written=%u of %u", fullPath.c_str(),
+                 (unsigned)written, (unsigned)req->content_len);
+        sendJsonError("500 Internal Server Error", "Upload failed");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Web file uploaded: %s (%u bytes)", fullPath.c_str(), (unsigned)written);
+
+    httpd_resp_set_type(req, "application/json");
+    std::string j = "{\"status\":\"ok\",\"path\":\"";
+    j += relPath;
+    j += "\",\"bytes\":";
+    j += std::to_string(written);
+    j += "}";
+    httpd_resp_sendstr(req, j.c_str());
     return ESP_OK;
 }
 

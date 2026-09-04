@@ -498,6 +498,13 @@ input:focus, select:focus, textarea:focus {
 
 /* ─── Status Messages ──────────────────────────────── */
 
+.hint {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin: 0.5rem 0 0.25rem;
+    line-height: 1.35;
+}
+
 .status-ok {
     color: var(--success);
 }
@@ -541,41 +548,40 @@ input:focus, select:focus, textarea:focus {
     min-width: 0;
 }
 
-/* CPU / RAM meters — animated bars like Task Manager */
-.cpu-meter {
+/* CPU / RAM meters — animated bars like Task Manager. The CPU block and the
+   memory block stack their per-core/per-bank meters vertically (C0 over C1,
+   RAM over PSRAM) one under the other in the same column. Both blocks share
+   the same fixed label and readout columns, so all four bars (C0, C1, RAM,
+   PSRAM) have the same width and line up on the same X axis. */
+.cpu-meter,
+.ram-meter {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
     flex: 1;
-    max-width: 260px;
+    max-width: 360px;
 }
 
-.ram-meter {
-    display: flex;
-    flex: 1;
-    max-width: 260px;
-}
-
-/* The nested .core-meter must stretch to fill the RAM row, otherwise the
-   track collapses to ~0px and the bar becomes invisible. */
-.ram-meter .core-meter {
-    flex: 1;
-}
-
-/* RAM value column — total on top, free below, both the same small numeric
-   font; the meter bar stays in place (right side, same size). */
+/* RAM/PSRAM readout — total + free on two right-aligned lines inside a
+   fixed-width column so the bar width does not change between banks. */
 .ram-values {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 0.1rem;
-    min-width: 4.6rem;
+    width: 6.2rem;
     flex-shrink: 0;
 }
-.ram-num {
+.ram-total {
     font-size: 0.8rem;
     font-weight: 600;
     color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.ram-free {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -588,14 +594,14 @@ input:focus, select:focus, textarea:focus {
 .core-label {
     font-size: 0.75rem;
     color: var(--text-secondary);
-    width: 1.4rem;
+    width: 3.6rem;
     flex-shrink: 0;
 }
 
 .core-pct {
     font-size: 0.8rem;
     color: var(--text-primary);
-    width: 4.6rem;
+    width: 6.2rem;
     text-align: right;
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
@@ -636,6 +642,12 @@ input:focus, select:focus, textarea:focus {
 /* RAM uses the same .core-meter layout as CPU, just a different color */
 .meter-fill.ram-fill {
     background: linear-gradient(90deg, #d29922, #f0883e);
+}
+
+/* External PSRAM fill — violet, distinct from internal RAM (orange) and CPU
+   (green/blue) */
+.meter-fill.psram-fill {
+    background: linear-gradient(90deg, #bc8cff, #8250df);
 }
 
 @keyframes meterShimmer {

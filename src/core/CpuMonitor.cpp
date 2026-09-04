@@ -53,11 +53,15 @@ void IRAM_ATTR vApplicationTickHook(void)
 namespace dhcp {
 namespace core {
 
-volatile int      CpuMonitor::s_load0      = 0;
-volatile int      CpuMonitor::s_load1      = 0;
-volatile uint32_t CpuMonitor::s_freeHeap   = 0;
-volatile uint32_t CpuMonitor::s_totalHeap  = 0;
+volatile int      CpuMonitor::s_load0        = 0;
+volatile int      CpuMonitor::s_load1        = 0;
+volatile uint32_t CpuMonitor::s_freeHeap     = 0;
+volatile uint32_t CpuMonitor::s_totalHeap    = 0;
 volatile uint32_t CpuMonitor::s_largestBlock = 0;
+volatile uint32_t CpuMonitor::s_ramTotal     = 0;
+volatile uint32_t CpuMonitor::s_psramFree    = 0;
+volatile uint32_t CpuMonitor::s_psramTotal   = 0;
+volatile uint32_t CpuMonitor::s_psramLargest = 0;
 
 void CpuMonitor::start()
 {
@@ -94,9 +98,28 @@ void CpuMonitor::sampleTask(void* arg)
         lastIdle0 = idle0;
         lastIdle1 = idle1;
 
-        s_freeHeap = esp_get_free_heap_size();
-        s_totalHeap = heap_caps_get_total_size(MALLOC_CAP_8BIT);
-        s_largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        // Internal RAM only. On chips with PSRAM the plain MALLOC_CAP_8BIT /
+        // MALLOC_CAP_DEFAULT masks would also match PSRAM regions (they carry
+        // the COMMON caps), so pin the masks to MALLOC_CAP_INTERNAL to keep
+        // the internal-RAM meter from ballooning to the PSRAM size.
+        s_freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        s_totalHeap = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        s_largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+        // Physical internal SRAM: the full 768 KiB window on ESP32-P4 (the
+        // heap above only manages ~557 KiB of it; the rest is reserved for
+        // app statics, cache, retention, etc.). On other targets there is no
+        // such window, so report the managed heap total instead.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+        s_ramTotal = 768U * 1024U;
+#else
+        s_ramTotal = s_totalHeap;
+#endif
+
+        // External PSRAM (returns 0 when CONFIG_SPIRAM is disabled).
+        s_psramFree = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        s_psramTotal = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        s_psramLargest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     }
 }
 
@@ -105,6 +128,10 @@ int CpuMonitor::loadCore1() { return s_load1; }
 uint32_t CpuMonitor::freeHeap() { return s_freeHeap; }
 uint32_t CpuMonitor::totalHeap() { return s_totalHeap; }
 uint32_t CpuMonitor::largestBlock() { return s_largestBlock; }
+uint32_t CpuMonitor::ramTotal() { return s_ramTotal; }
+uint32_t CpuMonitor::psramFree() { return s_psramFree; }
+uint32_t CpuMonitor::psramTotal() { return s_psramTotal; }
+uint32_t CpuMonitor::psramLargest() { return s_psramLargest; }
 
 } // namespace core
 } // namespace dhcp

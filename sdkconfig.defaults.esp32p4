@@ -1,0 +1,25 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Target-specific defaults for ESP32-P4 (Waveshare ESP32-P4-ETH).
+# ESP-IDF applies sdkconfig.defaults first, then sdkconfig.defaults.esp32p4,
+# so these values override the shared (ESP32/ENC28J60) ones above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ESP32-P4 module: 32MB SPI NOR flash (GigaDevice GD25Q256).
+# Overrides CONFIG_ESPTOOLPY_FLASHSIZE_4MB from the shared defaults.
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/dhcp_partitions_p4.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/dhcp_partitions_p4.csv"
+
+# Ethernet: internal RMII EMAC + IP101GRI PHY (Waveshare ESP32-P4-ETH).
+# Pin routing comes from ETH_ESP32_EMAC_DEFAULT_CONFIG() in EthManager.cpp
+# (MDC=31, MDIO=52, TX_EN=49, TXD0=34, TXD1=35, CRS_DV=28, RXD0=29, RXD1=30,
+# RMII 50MHz clock EXT_IN on GPIO50); PHY addr=1, RST=GPIO51.
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_ESP32_EMAC=y
+# No SPI Ethernet (ENC28J60 path is ESP32-only).
+CONFIG_ETH_USE_SPI_ETHERNET=n
+
+# CPU frequency: leave unset so ESP-IDF picks 400 MHz on silicon rev >= v1.3,
+# or 360 MHz automatically on earlier silicon. If your module cannot run
+# 400 MHz, add:  CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y

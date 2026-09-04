@@ -6,7 +6,7 @@
     "dhcp_status": "DHCP Server:",
     "dns_status": "DNS Server:",
     "cpu_load": "CPU Load:",
-    "free_ram": "RAM:",
+    "free_ram": "Memory:",
     "static_bindings": "Static Bindings DHCP:",
     "local_hosts": "Local DNS Hosts:",
     "footer": "ESP32 DHCP & DNS Server"
@@ -188,5 +188,19 @@
     "upload": "Upload",
     "uploading": "Uploading...",
     "success": "Update successful! Device is rebooting..."
+  },
+  "webupdate": {
+    "title": "Web Interface Update",
+    "select": "Select the \"data\" folder",
+    "note": "Existing files are overwritten. New pages are only reachable after a firmware update that registers a route for them.",
+    "no_files": "Select a folder first",
+    "browse": "Choose folder",
+    "no_folder": "No folder selected",
+    "file_count": "files",
+    "upload": "Upload",
+    "uploading": "Uploading...",
+    "progress": "files",
+    "success": "All files uploaded successfully.",
+    "failed": "files failed:"
   }
 }

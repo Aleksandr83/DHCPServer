@@ -1,8 +1,41 @@
-# Partition Table — DHCPServer (ESP32-WROOM-32)
+# Partition Table — DHCPServer
 
 ## Overview
 
-The device uses a custom partition table to accommodate dual OTA updates and a SPIFFS partition for web content.
+The device uses custom partition tables to accommodate dual OTA updates and a
+SPIFFS partition for web content. Two tables ship with the project:
+
+| Target | File | Flash size |
+|--------|------|-----------|
+| ESP32 + ENC28J60 | `partitions/dhcp_partitions.csv` | 4 MB |
+| ESP32-P4-ETH | `partitions/dhcp_partitions_p4.csv` | 32 MB |
+
+## ESP32-P4-ETH — 32 MB layout
+
+Applies to the Waveshare ESP32-P4-ETH (GigaDevice 25Q256EY1G, 32 MB).
+The `phy_init`/RF-calibration partition does not exist on the ESP32-P4 — the
+chip has no 2.4 GHz radio — so the released space goes to much larger OTA
+slots and an 8 MB SPIFFS.
+
+### Layout
+
+| # | Name    | Type    | SubType | Offset   | Size      | Description              |
+|---|---------|---------|---------|----------|-----------|--------------------------|
+| 0 | nvs     | data    | nvs     | 0x009000 | 0x006000  | NVS (config, etc.) 24 KB |
+| 1 | otadata | data    | ota     | 0x010000 | 0x002000  | OTA boot selection 8 KB  |
+| 2 | ota_0   | app     | ota_0   | 0x020000 | 0x500000  | OTA app slot 0 (5 MB)    |
+| 3 | ota_1   | app     | ota_1   | 0x520000 | 0x500000  | OTA app slot 1 (5 MB)    |
+| 4 | spiffs  | data    | spiffs  | 0xA20000 | 0x800000  | Web interface files (8 MB)|
+
+**Total used:** 0x1220000 (~18 MB); the remaining ~14 MB of the 32 MB flash is unallocated.
+
+Selected for ESP32-P4 builds via `sdkconfig.defaults.esp32p4`
+(`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/dhcp_partitions_p4.csv"`).
+
+## Legacy ESP32-WROOM-32 — 4 MB layout
+
+The device uses a custom partition table to accommodate dual OTA updates and a
+SPIFFS partition for web content.
 
 **Flash size:** 4 MB (0x400000)
 
@@ -74,7 +107,7 @@ The device uses a custom partition table to accommodate dual OTA updates and a S
 
 ## Config file
 
-Partition table CSV: `partitions/dhcp_partitions.csv`
+Legacy ESP32 table: `partitions/dhcp_partitions.csv`
 
 ```csv
 nvs,          data, nvs,      0x9000,   0x6000,
@@ -85,4 +118,16 @@ ota_1,        app,  ota_1,    0x1A0000, 0x180000,
 spiffs,       data, spiffs,   0x320000, 0xE0000,
 ```
 
-> **Note:** The first line (nvs) shows offset 0x9000 instead of 0x12000 in the table above because the bootloader and partition table occupy the first 0x8000 + 0xC00 bytes of flash. The actual NVS region starts at 0x12000.
+ESP32-P4-ETH table: `partitions/dhcp_partitions_p4.csv`
+
+```csv
+nvs,          data, nvs,      0x9000,   0x6000,
+otadata,      data, ota,      0x10000,  0x2000,
+ota_0,        app,  ota_0,    0x20000,  0x500000,
+ota_1,        app,  ota_1,    0x520000, 0x500000,
+spiffs,       data, spiffs,   0xA20000, 0x800000,
+```
+
+> **Note:** NVS lives at offset 0x9000; the bootloader and partition-table
+> metadata occupy the first 0x9000 bytes of flash. In the ESP32 layout table
+> above the NVS offset was misprinted as 0x012000 — 0x9000 is authoritative.

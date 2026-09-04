@@ -2,7 +2,7 @@
  * @file main.cpp
  * @brief DHCPServer — ESP32 DHCP + Caching DNS server
  *
- * Hardware: ESP32-WROOM-32
+ * Hardware: ESP32-WROOM-32 (+ ENC28J60) or ESP32-P4 (Waveshare ESP32-P4-ETH)
  * Framework: ESP-IDF (PlatformIO)
  */
 
@@ -21,7 +21,6 @@
 #include "core/Version.h"
 #include "core/Config.h"
 #include "core/CpuMonitor.h"
-#include "wifi/WiFiManager.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
 #include "led/LedController.h"
@@ -35,7 +34,13 @@ static const char* TAG = "DHCPServer";
 // Global instances
 static dhcp::eth::EthManager    s_ethManager;
 static dhcp::eth::EthWifiAdapter s_netAdapter(s_ethManager);  // wraps Eth as IWiFiManager
-static dhcp::led::LedController s_ledController;
+static dhcp::led::LedController s_ledController(
+#if CONFIG_IDF_TARGET_ESP32P4
+    -1  // Waveshare ESP32-P4-ETH has no user LED
+#else
+    26
+#endif
+);
 static dhcp::dhcp::DhcpServer   s_dhcpServer;
 static dhcp::dns::DnsServer     s_dnsServer;
 static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer, s_dnsServer);
@@ -126,11 +131,12 @@ extern "C" void app_main(void)
         }
 
         // Heap heartbeat every ~30 s (600 * 50 ms) — diagnostics for hangs
-        // caused by memory leaks.
+        // caused by memory leaks. Pinned to internal RAM so it stays useful
+        // on chips where PSRAM is enabled.
         if (++heartbeat % 600 == 0) {
             ESP_LOGI(TAG, "HEAP: free=%lu largest_block=%lu",
-                     (unsigned long)esp_get_free_heap_size(),
-                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));

@@ -274,23 +274,36 @@ async function updateStatus() {
         const p1 = document.getElementById('cpu-pct1');
         if (p0) p0.textContent = Math.round(pct0) + '%';
         if (p1) p1.textContent = Math.round(pct1) + '%';
-        // RAM — top line: label + TOTAL; meter below: free amount
+        // Memory meters — internal RAM always; external PSRAM when present.
+        // For internal RAM, total = physical on-chip SRAM (ram_total, e.g.
+        // 768 KB on ESP32-P4); free comes from the managed heap, so the fill
+        // bar reflects true chip utilisation (used = total - free heap).
+        const ramTotal = data.ram_total != null ? data.ram_total
+            : (data.heap_total != null ? data.heap_total : 320 * 1024);
+        const ramFree = data.heap_free != null ? data.heap_free : 0;
         const ramTotalEl = document.getElementById('ram-total');
-        if (ramTotalEl) {
-            const total = data.heap_total != null ? data.heap_total : 320 * 1024;
-            ramTotalEl.textContent = (total / 1024).toFixed(0) + ' KB';
+        if (ramTotalEl) ramTotalEl.textContent = (ramTotal / 1024).toFixed(0) + ' KB';
+        const freeRamEl = document.getElementById('free-ram');
+        if (freeRamEl) freeRamEl.textContent = (ramFree / 1024).toFixed(0) + ' KB free';
+        if (document.getElementById('ram-bar')) {
+            setMeter('ram-bar', ramTotal > 0 ? (1 - ramFree / ramTotal) * 100 : 0);
         }
-        const ramEl = document.getElementById('free-ram');
-        if (ramEl) {
-            const free = data.heap_free != null ? data.heap_free : 0;
-            ramEl.textContent = (free / 1024).toFixed(0) + ' KB free';
-        }
-        const bar = document.getElementById('ram-bar');
-        if (bar) {
-            const total = data.heap_total != null ? data.heap_total : 320 * 1024;
-            const free = data.heap_free != null ? data.heap_free : 0;
-            const usedPct = total > 0 ? (1 - free / total) * 100 : 0;
-            setMeter('ram-bar', usedPct);
+        const psramEl = document.getElementById('psram-meter');
+        if (psramEl) {
+            const psramTotal = data.psram_total != null ? data.psram_total : 0;
+            const psramFree = data.psram_free != null ? data.psram_free : 0;
+            if (psramTotal > 0) {
+                psramEl.style.display = '';
+                const psramTotalEl = document.getElementById('psram-total');
+                if (psramTotalEl) psramTotalEl.textContent = (psramTotal / 1024).toFixed(0) + ' KB';
+                const freePsramEl = document.getElementById('free-psram');
+                if (freePsramEl) freePsramEl.textContent = (psramFree / 1024).toFixed(0) + ' KB free';
+                if (document.getElementById('psram-bar')) {
+                    setMeter('psram-bar', (1 - psramFree / psramTotal) * 100);
+                }
+            } else {
+                psramEl.style.display = 'none';
+            }
         }
         // Static bindings NVS storage usage
         const sbEl = document.getElementById('static-bindings-usage');

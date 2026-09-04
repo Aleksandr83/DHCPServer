@@ -135,6 +135,7 @@ void WebServer::registerRoutes()
     reg("/api/security/settings",    HTTP_GET,   getSecuritySettingsHandler);
     reg("/api/security/settings",    HTTP_POST,  postSecuritySettingsHandler);
     reg("/api/ota/upload",           HTTP_POST,  postOtaUploadHandler);
+    reg("/api/web/file",             HTTP_POST,  postWebFileHandler);
     reg("/api/test-connection",      HTTP_POST,  postTestConnectionHandler);
     reg("/api/settings/export",      HTTP_GET,   getSettingsExportHandler);
     reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);

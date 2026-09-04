@@ -9,10 +9,15 @@
 #include "esp_eth_netif_glue.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-#include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+
+#if CONFIG_IDF_TARGET_ESP32P4
+/* ESP32-P4 internal EMAC (RMII) driver */
+#include "esp_eth_mac_esp.h"
+#else /* ESP32 + ENC28J60 over SPI */
+#include "driver/spi_master.h"
 #include "eth_enc28j60_config.h"
 #include "enc28j60.h"   /* for enc28j60_spi_init */
 
@@ -22,18 +27,28 @@ extern "C" esp_eth_mac_t *esp_eth_mac_new_enc28j60(const eth_enc28j60_config_t *
 /* Our local ENC28J60 PHY driver */
 extern "C" esp_eth_phy_t *esp_eth_phy_new_enc28j60(const eth_phy_config_t *config);
 
-static const char* TAG = "EthManager";
-
 /* Enable internal pull-up on a GPIO pin */
 static inline esp_err_t gpio_pullup(int pin)
 {
     return gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
 }
+#endif
+
+static const char* TAG = "EthManager";
 
 namespace dhcp {
 namespace eth {
 
-// ─── Pin configuration ──────────────────────────────
+#if CONFIG_IDF_TARGET_ESP32P4
+// ─── Waveshare ESP32-P4-ETH (internal EMAC + IP101GRI PHY) ──────────
+// The RMII data/clock pins already match the board via
+// ETH_ESP32_EMAC_DEFAULT_CONFIG() (MDC=31, MDIO=52, TX_EN=49, TXD0=34,
+// TXD1=35, CRS_DV=28, RXD0=29, RXD1=30, RMII_CLK = GPIO50 ext. 50 MHz).
+// Only the PHY needs board-specific settings here.
+#define ETH_PHY_ADDR       1   /* IP101GRI strap-configured address */
+#define ETH_PHY_RST_GPIO   51  /* PHY reset on Waveshare ESP32-P4-ETH */
+#else
+// ─── ESP32 + ENC28J60 (SPI) pin configuration ───────
 #define ETH_SPI_HOST       SPI2_HOST
 #define ETH_PIN_MOSI       23
 #define ETH_PIN_MISO       19
@@ -41,6 +56,7 @@ namespace eth {
 #define ETH_PIN_CS         5
 #define ETH_PIN_INT        4
 #define ETH_PIN_RST        16
+#endif
 
 // ─────────────────────────────────────────────────────
 // Construction / Destruction
@@ -73,7 +89,11 @@ void EthManager::init()
 {
     if (initialized_) return;
 
+#if CONFIG_IDF_TARGET_ESP32P4
+    ESP_LOGI(TAG, "Initializing Ethernet (ESP32-P4 EMAC + IP101GRI)...");
+#else
     ESP_LOGI(TAG, "Initializing ENC28J60 Ethernet...");
+#endif
 
     // ─── 0a. Initialize default event loop (required for eth, netif, etc.) ─
     esp_err_t err = esp_event_loop_create_default();
@@ -97,6 +117,46 @@ void EthManager::init()
         return;
     }
 
+    // ─── 1b/2/3. Create MAC + PHY (target-specific) ─
+    esp_eth_mac_t* mac = nullptr;
+    esp_eth_phy_t* phy = nullptr;
+#if CONFIG_IDF_TARGET_ESP32P4
+    // ESP32-P4: internal EMAC (RMII). Pin routing matches the Waveshare
+    // ESP32-P4-ETH. IDF 6.0.1's ETH_ESP32_EMAC_DEFAULT_CONFIG() macro
+    // initializes fields out of declaration order (mdc_freq_hz before the
+    // data-if/clk-loopback fields), which fails -Werror, so the same defaults
+    // are spelled out here explicitly.
+    {
+        eth_esp32_emac_config_t emacCfg = {};
+        emacCfg.smi_gpio.mdc_num = 31;
+        emacCfg.smi_gpio.mdio_num = 52;
+        emacCfg.interface = EMAC_DATA_INTERFACE_RMII;
+        emacCfg.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
+        emacCfg.clock_config.rmii.clock_gpio = 50;
+        emacCfg.dma_burst_len = ETH_DMA_BURST_LEN_32;
+        emacCfg.emac_dataif_gpio.rmii.tx_en_num = 49;
+        emacCfg.emac_dataif_gpio.rmii.txd0_num = 34;
+        emacCfg.emac_dataif_gpio.rmii.txd1_num = 35;
+        emacCfg.emac_dataif_gpio.rmii.crs_dv_num = 28;
+        emacCfg.emac_dataif_gpio.rmii.rxd0_num = 29;
+        emacCfg.emac_dataif_gpio.rmii.rxd1_num = 30;
+        emacCfg.clock_config_out_in.rmii.clock_mode = EMAC_CLK_EXT_IN;
+        emacCfg.clock_config_out_in.rmii.clock_gpio = -1;
+        emacCfg.mdc_freq_hz = 0;
+
+        eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        mac = esp_eth_mac_new_esp32(&emacCfg, &macCfg);
+    }
+
+    // IP101GRI is IEEE 802.3 compliant — use the generic PHY driver.
+    if (mac) {
+        eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
+        phyCfg.phy_addr = ETH_PHY_ADDR;
+        phyCfg.reset_gpio_num = ETH_PHY_RST_GPIO;
+        phy = esp_eth_phy_new_generic(&phyCfg);
+    }
+#else
+    // ESP32: ENC28J60 over SPI.
     // ─── 0c. Enable pull-ups on SPI/control pins ───
     gpio_pullup(ETH_PIN_CS);   /* CS — critical to prevent floating during boot */
     gpio_pullup(ETH_PIN_RST);  /* RST */
@@ -114,28 +174,45 @@ void EthManager::init()
     ESP_LOGI(TAG, "SPI ready (CS=%d)", ETH_PIN_CS);
 
     // ─── 2. ENC28J60 MAC config ─────────────────────
-    eth_enc28j60_config_t enc28j60Cfg = ETH_ENC28J60_DEFAULT_CONFIG(ETH_PIN_CS);
-    enc28j60Cfg.int_gpio_num = ETH_PIN_INT;
+    {
+        eth_enc28j60_config_t enc28j60Cfg = ETH_ENC28J60_DEFAULT_CONFIG(ETH_PIN_CS);
+        enc28j60Cfg.int_gpio_num = ETH_PIN_INT;
 
-    eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
-    macCfg.flags = 0;
+        eth_mac_config_t macCfg = ETH_MAC_DEFAULT_CONFIG();
+        macCfg.flags = 0;
 
-    esp_eth_mac_t* mac = esp_eth_mac_new_enc28j60(&enc28j60Cfg, &macCfg);
+        mac = esp_eth_mac_new_enc28j60(&enc28j60Cfg, &macCfg);
+    }
+
+    // ─── 3. ENC28J60 PHY config ─────────────────────
+    if (mac) {
+        eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
+        phyCfg.phy_addr = 0;
+        phyCfg.reset_gpio_num = ETH_PIN_RST;
+        phyCfg.reset_timeout_ms = 100;
+
+        phy = esp_eth_phy_new_enc28j60(&phyCfg);
+    }
+#endif
+
     if (!mac) {
+#if CONFIG_IDF_TARGET_ESP32P4
+        ESP_LOGE(TAG, "Failed to create ESP32 EMAC");
+#else
         ESP_LOGE(TAG, "Failed to create ENC28J60 MAC");
+#endif
         status_ = EthStatus::ERROR;
         if (onError_) onError_();
         return;
     }
-    // ─── 3. ENC28J60 PHY config ─────────────────────
-    eth_phy_config_t phyCfg = ETH_PHY_DEFAULT_CONFIG();
-    phyCfg.phy_addr = 0;
-    phyCfg.reset_gpio_num = ETH_PIN_RST;
-    phyCfg.reset_timeout_ms = 100;
 
-    esp_eth_phy_t* phy = esp_eth_phy_new_enc28j60(&phyCfg);
     if (!phy) {
+#if CONFIG_IDF_TARGET_ESP32P4
+        ESP_LOGE(TAG, "Failed to create generic PHY (IP101GRI)");
+#else
         ESP_LOGE(TAG, "Failed to create ENC28J60 PHY");
+#endif
+        mac->del(mac);
         status_ = EthStatus::ERROR;
         if (onError_) onError_();
         return;
@@ -214,7 +291,11 @@ void EthManager::init()
     }
 
     initialized_ = true;
+#if CONFIG_IDF_TARGET_ESP32P4
+    ESP_LOGI(TAG, "Ethernet ESP32-P4 EMAC initialized (static IP: %s)", staticIp4_.c_str());
+#else
     ESP_LOGI(TAG, "Ethernet ENC28J60 initialized (static IP: %s)", staticIp4_.c_str());
+#endif
 }
 
 // ─────────────────────────────────────────────────────

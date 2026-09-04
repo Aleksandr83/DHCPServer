@@ -7,10 +7,14 @@ static const char* TAG = "LedController";
 namespace dhcp {
 namespace led {
 
-LedController::LedController(uint8_t gpioPin, bool activeHigh)
+LedController::LedController(int gpioPin, bool activeHigh)
     : gpioPin_(gpioPin)
     , activeHigh_(activeHigh)
 {
+    if (gpioPin_ < 0) {
+        ESP_LOGI(TAG, "LED disabled (no user LED on this board)");
+        return;
+    }
     // Configure GPIO
     gpio_reset_pin(static_cast<gpio_num_t>(gpioPin_));
     gpio_set_direction(static_cast<gpio_num_t>(gpioPin_), GPIO_MODE_OUTPUT);
@@ -26,14 +30,16 @@ LedController::~LedController()
 
 void LedController::turnOn()
 {
-    gpio_set_level(static_cast<gpio_num_t>(gpioPin_), activeHigh_ ? 1 : 0);
     on_ = true;
+    if (gpioPin_ < 0) return;
+    gpio_set_level(static_cast<gpio_num_t>(gpioPin_), activeHigh_ ? 1 : 0);
 }
 
 void LedController::turnOff()
 {
-    gpio_set_level(static_cast<gpio_num_t>(gpioPin_), activeHigh_ ? 0 : 1);
     on_ = false;
+    if (gpioPin_ < 0) return;
+    gpio_set_level(static_cast<gpio_num_t>(gpioPin_), activeHigh_ ? 0 : 1);
 }
 
 bool LedController::isOn() const

@@ -40,7 +40,13 @@ public:
     bool isConnected() const override { return eth_.isConnected(); }
     std::string ip4() const override { return eth_.ip4(); }
     std::string ip6() const override { return eth_.ip6(); }
-    std::string ssid() const override { return "ENC28J60"; }
+    std::string ssid() const override {
+#if CONFIG_IDF_TARGET_ESP32P4
+        return "ESP32-P4-ETH";
+#else
+        return "ENC28J60";
+#endif
+    }
 
     void setOnConnected(Callback cb) override { eth_.setOnConnected(std::move(cb)); }
     void setOnDisconnected(Callback cb) override { eth_.setOnDisconnected(std::move(cb)); }
