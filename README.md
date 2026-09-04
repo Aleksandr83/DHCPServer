@@ -186,6 +186,7 @@ partition removed (no 2.4 GHz radio) and much larger OTA slots.
 | ota_0 | 0x20000 | 5 MB | OTA app slot 0 |
 | ota_1 | 0x520000 | 5 MB | OTA app slot 1 |
 | spiffs | 0xA20000 | 8 MB | Web interface files |
+| fat | 0x1220000 | ~14 MB | FAT data partition (RW) |
 
 **Legacy ESP32 layout (4 MB, `dhcp_partitions.csv`):**
 

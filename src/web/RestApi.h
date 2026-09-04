@@ -46,6 +46,8 @@ public:
     static esp_err_t handlePostTestConnection(httpd_req* req);
     static esp_err_t handleGetSettingsExport(httpd_req* req);
     static esp_err_t handlePostSettingsImport(httpd_req* req);
+    static esp_err_t handlePostSettingsReset(httpd_req* req);
+    static esp_err_t handlePostDeviceReboot(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);

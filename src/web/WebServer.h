@@ -59,6 +59,8 @@ private:
     static esp_err_t postTestConnectionHandler(httpd_req* req) { return RestApi::handlePostTestConnection(req); }
     static esp_err_t getSettingsExportHandler(httpd_req* req) { return RestApi::handleGetSettingsExport(req); }
     static esp_err_t postSettingsImportHandler(httpd_req* req) { return RestApi::handlePostSettingsImport(req); }
+    static esp_err_t postSettingsResetHandler(httpd_req* req) { return RestApi::handlePostSettingsReset(req); }
+    static esp_err_t postRebootHandler(httpd_req* req) { return RestApi::handlePostDeviceReboot(req); }
 
     httpd_handle_t server_ = nullptr;
     ::dhcp::web::AuthManager auth_;

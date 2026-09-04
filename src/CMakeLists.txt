@@ -24,9 +24,12 @@ set(DHCPSERVER_REQUIRES
     app_update
     mbedtls)
 
-# Wi-Fi coexistence only applies to classic ESP32 (ENC28J60 over SPI).
-# ESP32-P4 has no Wi-Fi — Ethernet uses the internal RMII EMAC.
-if(NOT CONFIG_IDF_TARGET STREQUAL "esp32p4")
+# Classic ESP32 uses Wi-Fi coexistence over the ENC28J60 (SPI Ethernet).
+# ESP32-P4 has no Wi-Fi — Ethernet uses the internal RMII EMAC, and the FAT
+# data partition is served through the FATFS + wear-levelling drivers.
+if(IDF_TARGET STREQUAL "esp32p4")
+    list(APPEND DHCPSERVER_REQUIRES esp_partition fatfs wear_levelling)
+else()
     list(APPEND DHCPSERVER_SRC_DIRS "wifi")
     list(APPEND DHCPSERVER_REQUIRES enc28j60 esp_wifi)
 endif()

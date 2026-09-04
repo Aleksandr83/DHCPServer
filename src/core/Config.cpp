@@ -177,6 +177,22 @@ bool Config::eraseKey(const char* key)
     return true;
 }
 
+bool Config::resetAll()
+{
+    nvs_handle_t h = openNvs();
+    if (!h) return false;
+    esp_err_t err = nvs_erase_all(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_erase_all failed (%s)", esp_err_to_name(err));
+        nvs_close(h);
+        return false;
+    }
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "All settings erased (factory reset)");
+    return true;
+}
+
 // ─── WiFi ───────────────────────────────────────────
 
 WifiConfig Config::getWifi() const

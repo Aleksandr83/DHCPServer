@@ -1165,6 +1165,52 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// POST /api/settings/reset — factory reset + reboot
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostSettingsReset(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    if (!::dhcp::core::Config::instance().resetAll()) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"NVS erase failed\"}");
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "Factory reset requested from web UI — rebooting...");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"ok\",\"message\":\"Settings reset to factory defaults. Rebooting...\",\"reboot\":true}");
+
+    // Give the response time to be sent before reboot
+    vTaskDelay(pdMS_TO_TICKS(700));
+    esp_restart();
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/device/reboot — reboot without touching settings
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ESP_LOGW(TAG, "Reboot requested from web UI");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"ok\",\"message\":\"Device is rebooting...\",\"reboot\":true}");
+
+    // Give the response time to be sent before reboot
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // POST /api/ota/upload
 // ─────────────────────────────────────────────────────
 

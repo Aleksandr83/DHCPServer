@@ -67,6 +67,7 @@ private:
     void cmdHelp();
     void cmdLanStatus();
     void cmdPasswdReset();
+    void cmdSettingsReset();
     void cmdVersion();
 
     dhcp::wifi::IWiFiManager& wifi_;

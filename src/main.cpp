@@ -18,6 +18,12 @@
 #include "nvs_flash.h"
 #include "esp_spiffs.h"
 
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "esp_partition.h"
+#include "esp_vfs_fat.h"
+#include "wear_levelling.h"
+#endif
+
 #include "core/Version.h"
 #include "core/Config.h"
 #include "core/CpuMonitor.h"
@@ -86,6 +92,36 @@ extern "C" void app_main(void)
     } else {
         ESP_LOGI(TAG, "SPIFFS mounted at /spiffs");
     }
+
+#if CONFIG_IDF_TARGET_ESP32P4
+    // ─── Initialize FAT (large RW data partition) ───
+    // Mount the "fat" partition with wear-levelling if it exists in the table.
+    // Non-fatal: older P4 tables without the fat row must still boot normally.
+    {
+        const esp_partition_t* fatPart = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "fat");
+        if (fatPart == nullptr) {
+            ESP_LOGW(TAG, "FAT partition not found in table, skipping /fat");
+        } else {
+            esp_vfs_fat_mount_config_t fatCfg = {
+                .format_if_mount_failed = true,
+                .max_files = 10,
+                .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
+                .disk_status_check_enable = false,
+                .use_one_fat = false,
+            };
+            wl_handle_t wlHandle = WL_INVALID_HANDLE;
+            esp_err_t fret = esp_vfs_fat_spiflash_mount_rw_wl(
+                "/fat", "fat", &fatCfg, &wlHandle);
+            if (fret != ESP_OK) {
+                ESP_LOGE(TAG, "FAT mount failed (%s)", esp_err_to_name(fret));
+            } else {
+                ESP_LOGI(TAG, "FAT mounted at /fat (%u bytes)",
+                         (unsigned)fatPart->size);
+            }
+        }
+    }
+#endif
 
     // ─── Configure server IP from config ────────────
     {
