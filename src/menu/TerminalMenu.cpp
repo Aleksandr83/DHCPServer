@@ -24,6 +24,7 @@ static const char* HELP_TEXT =
     "Available commands:\r\n"
     "  lan status                  — Show LAN connection status and IP\r\n"
     "  passwd reset                — Reset web password to default (admin)\r\n"
+    "  settings reset              — Factory reset ALL settings to defaults and reboot\r\n"
     "  version                     — Show firmware version\r\n"
     "  help                        — Show this help\r\n"
     "  reboot                      — Reboot the device\r\n";
@@ -93,6 +94,14 @@ void TerminalMenu::processLine(const std::string& line)
         } else {
             println("Unknown passwd subcommand. Usage: passwd reset");
         }
+    } else if (cmd == "settings") {
+        std::string sub;
+        stream >> sub;
+        if (sub == "reset") {
+            cmdSettingsReset();
+        } else {
+            println("Unknown settings subcommand. Usage: settings reset");
+        }
     } else if (cmd == "reboot") {
         println("Rebooting...");
         esp_restart();
@@ -150,6 +159,19 @@ void TerminalMenu::cmdPasswdReset()
         println("Web password reset to default (admin/admin). Reboot to apply.");
     }
     ESP_LOGW(TAG, "Web credentials reset to default by console command");
+}
+
+void TerminalMenu::cmdSettingsReset()
+{
+    // Full factory reset: erase the whole NVS settings namespace, then reboot.
+    // On the next boot every getter falls back to its compile-time default.
+    if (!dhcp::core::Config::instance().resetAll()) {
+        println("Settings reset FAILED (NVS erase error).");
+        return;
+    }
+    println("All settings erased. Rebooting to factory defaults...");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
 }
 
 } // namespace menu

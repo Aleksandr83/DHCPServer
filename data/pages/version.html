@@ -24,6 +24,18 @@
             <button class="btn btn-primary" onclick="uploadFirmware()" id="fw-upload-btn" data-i18n="update.upload">Upload</button>
             <div id="fw-status" style="margin-top:1rem;"></div>
         </div>
+
+        <div class="card">
+            <h2 data-i18n="webupdate.title">Web Interface Update</h2>
+            <label data-i18n="webupdate.select">Select the "data" folder</label>
+            <input type="file" id="webui-folder" webkitdirectory multiple hidden>
+            <button type="button" class="btn btn-primary" id="webui-browse-btn" data-i18n="webupdate.browse">Choose folder</button>
+            <span id="webui-folder-name" class="hint" data-i18n="webupdate.no_folder">No folder selected</span>
+            <p class="hint" data-i18n="webupdate.note">Existing files are overwritten. New pages are only reachable after a firmware update that registers a route for them.</p>
+
+            <button class="btn btn-primary" onclick="uploadWebUi()" id="webui-upload-btn" data-i18n="webupdate.upload">Upload</button>
+            <div id="webui-status" style="margin-top:1rem;"></div>
+        </div>
     </main>
 
     <div id="footer-placeholder"></div>
@@ -61,6 +73,91 @@
                 btn.disabled = false;
                 btn.textContent = translations?.update?.upload || 'Upload';
             }
+        }
+
+        // ── Web Interface Update (folder picker) ──
+        // The native <input type="file"> button text ("Choose files / No file
+        // chosen") is drawn by the browser and cannot be translated, so we
+        // hide it and use our own button + status label instead.
+        const webuiInput = document.getElementById('webui-folder');
+        const webuiBrowseBtn = document.getElementById('webui-browse-btn');
+        const webuiName = document.getElementById('webui-folder-name');
+
+        webuiBrowseBtn.addEventListener('click', () => webuiInput.click());
+        webuiInput.addEventListener('change', () => {
+            const files = Array.from(webuiInput.files || []);
+            if (files.length) {
+                // Remove the data-i18n attribute so applyTranslations() does
+                // not overwrite the runtime status text on language switch.
+                webuiName.removeAttribute('data-i18n');
+                webuiName.textContent = files.length + ' ' +
+                    (translations?.webupdate?.file_count || 'files') + ': ' +
+                    (files[0].webkitRelativePath || files[0].name);
+            } else {
+                webuiName.setAttribute('data-i18n', 'webupdate.no_folder');
+                applyTranslations();
+            }
+        });
+
+        async function uploadWebUi() {
+            const fileInput = document.getElementById('webui-folder');
+            const files = Array.from(fileInput.files || []);
+            if (!files.length) {
+                alert(translations?.webupdate?.no_files || 'Select a folder first');
+                return;
+            }
+
+            const btn = document.getElementById('webui-upload-btn');
+            const status = document.getElementById('webui-status');
+            btn.disabled = true;
+            status.innerHTML = '';
+
+            let okCount = 0;
+            let failCount = 0;
+            const failed = [];
+
+            // Strip the first path segment (the picked folder name) from
+            // webkitRelativePath ("data/pages/x.html" -> "pages/x.html").
+            const relPath = f =>
+                (f.webkitRelativePath || f.name).replace(/^[^/]*\//, '');
+
+            btn.textContent = translations?.webupdate?.uploading || 'Uploading...';
+
+            try {
+                for (const file of files) {
+                    const path = relPath(file);
+                    try {
+                        const resp = await apiFetch('/api/web/file?path=' + encodeURIComponent(path), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/octet-stream' },
+                            body: file, // raw file bytes
+                        });
+                        if (resp.ok) {
+                            okCount++;
+                        } else {
+                            failCount++;
+                            failed.push(path);
+                        }
+                    } catch (e) {
+                        failCount++;
+                        failed.push(path);
+                    }
+                    status.innerHTML =
+                        `<p class="status-stopped">${okCount + failCount}/${files.length} ` +
+                        `${translations?.webupdate?.progress || 'files'}</p>`;
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = translations?.webupdate?.upload || 'Upload';
+            }
+
+            let html = '';
+            if (failCount === 0) {
+                html += `<p class="status-ok">${translations?.webupdate?.success || 'All files uploaded successfully.'}</p>`;
+            } else {
+                html += `<p class="status-err">${failCount} ${translations?.webupdate?.failed || 'files failed:'} ${failed.join(', ')}</p>`;
+            }
+            status.innerHTML = html;
         }
 
         // Load version on page load

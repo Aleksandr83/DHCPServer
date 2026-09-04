@@ -664,10 +664,10 @@ void DnsServer::expirePendingSlot(int idx)
     const std::string clientMac = resolveClientMac(pf.client.sin_addr.s_addr);
     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
                      DnsLogSource::FORWARDED, false, "");
-    if (logTerminal_ && logger_.logForwarded()) {
-        ESP_LOGW(TAG, "DNS forward timeout: %s type=%u from %s",
-                 pf.domain.c_str(), pf.qtype, clientIp);
-    }
+    // Always logged (not gated by terminal logging): a silent forward timeout
+    // is the one failure mode that otherwise shows nothing on the serial port.
+    ESP_LOGW(TAG, "DNS forward timeout: %s type=%u from %s",
+             pf.domain.c_str(), pf.qtype, clientIp);
 
     std::vector<uint8_t> nx(DNS_MAX_MSG_SIZE);
     size_t len = buildNxdomain(nx.data(), nx.size(), pf.qid, pf.domain,
@@ -745,7 +745,7 @@ bool DnsServer::parseQuery(const uint8_t* buf, size_t len,
 
     // Decode question name
     size_t offset = 12;
-    domain = decodeDomainName(buf, offset);
+    domain = decodeDomainName(buf, len, offset);
     if (domain.empty()) return false;
 
     // QTYPE and QCLASS
@@ -771,13 +771,13 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
     size_t offset = 12;
     // Skip the question section (each question = name + 4 bytes).
     for (uint16_t q = 0; q < qdcount && offset < len; ++q) {
-        decodeDomainName(buf, offset);
+        decodeDomainName(buf, len, offset);
         offset += 4;
     }
 
     // Walk the answer records.
     for (uint16_t a = 0; a < ancount && offset + 10 <= len; ++a) {
-        decodeDomainName(buf, offset);   // NAME (may be a compression pointer)
+        decodeDomainName(buf, len, offset);   // NAME (compression pointer)
         if (offset + 10 > len) return;
         const uint16_t type = (buf[offset] << 8) | buf[offset + 1];
         const uint16_t rdlen = (buf[offset + 8] << 8) | buf[offset + 9];
@@ -943,35 +943,51 @@ size_t DnsServer::encodeDomainName(uint8_t* dst, const std::string& domain)
     return pos;
 }
 
-std::string DnsServer::decodeDomainName(const uint8_t* data, size_t& offset)
+std::string DnsServer::decodeDomainName(const uint8_t* data, size_t len,
+                                        size_t& offset)
 {
+    // Decode a (possibly compressed) DNS name with strict bounds checking.
+    // Input is untrusted network data: guard against out-of-bounds reads and
+    // against compression-pointer cycles, which would otherwise send this
+    // loop spinning forever and wedge the whole DNS task until reboot.
+    constexpr size_t kMaxNameLen = 255;   // RFC 1035 maximum
+    constexpr size_t kMaxPointers = 32;   // compression-pointer hops per name
+
     std::string domain;
-    bool jumped = false;
+    bool offsetSet = false;
     size_t pos = offset;
+    size_t jumps = 0;
 
     while (true) {
-        uint8_t len = data[pos];
-        if (len == 0) {
-            pos++;
+        if (pos >= len) return {};   // ran off the end of the message
+        const uint8_t b = data[pos];
+
+        if (b == 0) {
+            // Root terminator — name finished.
+            if (!offsetSet) offset = pos + 1;
             break;
         }
-        // Check for compression pointer (top 2 bits = 11)
-        if ((len & 0xC0) == 0xC0) {
-            if (!jumped) {
-                offset = pos + 2;
-                jumped = true;
+
+        if ((b & 0xC0) == 0xC0) {
+            // Compression pointer (top two bits = 11).
+            if (pos + 1 >= len) return {};
+            if (!offsetSet) {
+                offset = pos + 2;   // end of the name as written at its origin
+                offsetSet = true;
             }
-            pos = ((len & 0x3F) << 8) | data[pos + 1];
+            pos = (static_cast<size_t>(b & 0x3F) << 8) | data[pos + 1];
+            if (++jumps > kMaxPointers) return {};   // cycle / too many hops
             continue;
         }
-        pos++;
-        if (!domain.empty()) domain += '.';
-        domain.append(reinterpret_cast<const char*>(data + pos), len);
-        pos += len;
-    }
 
-    if (!jumped) {
-        offset = pos;
+        if ((b & 0xC0) != 0) return {};   // reserved label type (bits 10/01)
+        const uint8_t labelLen = b;
+        pos++;
+        if (labelLen > len - pos) return {};              // label overruns packet
+        if (domain.length() + labelLen > kMaxNameLen) return {};
+        if (!domain.empty()) domain += '.';
+        domain.append(reinterpret_cast<const char*>(data + pos), labelLen);
+        pos += labelLen;
     }
 
     return domain;

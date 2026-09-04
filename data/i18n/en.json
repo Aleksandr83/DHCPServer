@@ -36,6 +36,7 @@
     "settings": "Settings",
     "settings_export": "Export",
     "settings_import": "Import",
+    "settings_device": "Device Management",
     "security": "Security",
     "help": "Help",
     "version": "Version"
@@ -178,6 +179,22 @@
     "skipped": "Not imported (unknown to this firmware):",
     "error": "Import failed:"
   },
+  "settings_device": {
+    "title": "Device Management",
+    "reboot_title": "Reboot",
+    "reboot_desc": "Reboot the device without changing any settings. The web interface is unavailable for a few seconds while it restarts.",
+    "reboot_button": "Reboot",
+    "confirm_reboot": "Reboot the device now?",
+    "rebooting": "Rebooting...",
+    "ok_reboot": "The device is rebooting...",
+    "reset_title": "Reset Settings",
+    "reset_desc": "Erase ALL settings and restore factory defaults: network, DHCP, DNS, static bindings, local hosts, DNS cache and the web login (admin/admin). The device reboots to apply the reset.",
+    "reset_button": "Reset Settings",
+    "confirm_reset": "All settings will be reset to factory defaults (including the admin/admin login) and the device will reboot. Continue?",
+    "resetting": "Resetting settings...",
+    "ok_reset": "Settings reset to factory defaults. The device is rebooting... Redirecting to login.",
+    "error": "Error: the operation failed."
+  },
   "version": {
     "title": "Firmware Version",
     "label": "Version"
@@ -188,5 +205,19 @@
     "upload": "Upload",
     "uploading": "Uploading...",
     "success": "Update successful! Device is rebooting..."
+  },
+  "webupdate": {
+    "title": "Web Interface Update",
+    "select": "Select the \"data\" folder",
+    "note": "Existing files are overwritten. New pages are only reachable after a firmware update that registers a route for them.",
+    "no_files": "Select a folder first",
+    "browse": "Choose folder",
+    "no_folder": "No folder selected",
+    "file_count": "files",
+    "upload": "Upload",
+    "uploading": "Uploading...",
+    "progress": "files",
+    "success": "All files uploaded successfully.",
+    "failed": "files failed:"
   }
 }

@@ -135,9 +135,12 @@ void WebServer::registerRoutes()
     reg("/api/security/settings",    HTTP_GET,   getSecuritySettingsHandler);
     reg("/api/security/settings",    HTTP_POST,  postSecuritySettingsHandler);
     reg("/api/ota/upload",           HTTP_POST,  postOtaUploadHandler);
+    reg("/api/web/file",             HTTP_POST,  postWebFileHandler);
     reg("/api/test-connection",      HTTP_POST,  postTestConnectionHandler);
     reg("/api/settings/export",      HTTP_GET,   getSettingsExportHandler);
     reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);
+    reg("/api/settings/reset",       HTTP_POST,  postSettingsResetHandler);
+    reg("/api/device/reboot",        HTTP_POST,  postRebootHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -160,6 +163,7 @@ void WebServer::registerRoutes()
     reg("/pages/security.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);
+    reg("/pages/settings_device.html", HTTP_GET, staticFileHandler);
     reg("/pages/version.html", HTTP_GET, staticFileHandler);
 }
 

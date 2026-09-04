@@ -483,3 +483,35 @@ Import logic:
 | `reboot_required` | network params changed — reboot to apply static IP |
 | `imported` | which sections were actually found and applied |
 | `skipped_fields` | fields present but unknown to this firmware (not imported) |
+
+---
+
+## POST /api/settings/reset
+
+Factory reset: erases the **whole** settings NVS namespace (`dhcp`) and reboots.
+On the next boot every setting falls back to its compile-time default —
+network, DHCP, DNS, static bindings, local hosts, DNS cache and the web login
+(`admin/admin`). The command is authenticated.
+
+**Response `200 OK`** (sent before the device reboots, ~0.7 s later):
+```json
+{ "status": "ok", "message": "Settings reset to factory defaults. Rebooting...", "reboot": true }
+```
+
+**Response `500 Internal Server Error`** if the NVS erase failed:
+```json
+{ "status": "error", "message": "NVS erase failed" }
+```
+
+---
+
+## POST /api/device/reboot
+
+Reboots the device **without** touching any settings. The command is
+authenticated. The device restarts ~0.5 s after the response is sent.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "message": "Device is rebooting...", "reboot": true }
+```
+

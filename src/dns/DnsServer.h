@@ -114,7 +114,8 @@ private:
 
     // Domain name encoding helpers
     static size_t encodeDomainName(uint8_t* dst, const std::string& domain);
-    static std::string decodeDomainName(const uint8_t* data, size_t& offset);
+    static std::string decodeDomainName(const uint8_t* data, size_t len,
+                                        size_t& offset);
 
     // Async forwarding state — one slot per in-flight client query.
     // Strict cache-first: the external cache is consulted first, and the

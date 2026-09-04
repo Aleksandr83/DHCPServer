@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="settings_device">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Device Management — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="settings_device.title">Device Management</h1>
+
+        <div class="card">
+            <h2 data-i18n="settings_device.reboot_title">Reboot</h2>
+            <p data-i18n="settings_device.reboot_desc">Reboot the device without changing any settings. The web interface is unavailable for a few seconds while it restarts.</p>
+
+            <button class="btn btn-primary" id="reboot-btn" onclick="rebootDevice()" data-i18n="settings_device.reboot_button">Reboot</button>
+            <p id="reboot-status" style="margin-top:1rem;"></p>
+        </div>
+
+        <div class="card">
+            <h2 data-i18n="settings_device.reset_title">Reset Settings</h2>
+            <p data-i18n="settings_device.reset_desc">Erase ALL settings and restore factory defaults: network, DHCP, DNS, static bindings, local hosts, DNS cache and web login (admin/admin). The device reboots to apply the reset.</p>
+
+            <button class="btn btn-danger" id="reset-btn" onclick="resetSettings()" data-i18n="settings_device.reset_button">Reset Settings</button>
+            <p id="reset-status" style="margin-top:1rem;"></p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        // fetch() has no timeout. When the device reboots mid-request the TCP
+        // connection can be dropped silently, leaving the promise hanging
+        // forever. Abort after a grace period so the UI always moves on.
+        function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+            return apiFetch(url, Object.assign({}, options, { signal: ctrl.signal }))
+                .finally(() => clearTimeout(timer));
+        }
+
+        // After a reboot the device is unreachable for a few seconds. Poll a
+        // light endpoint until it answers again (any HTTP response means it is
+        // back up), so the page can reload into a live state instead of
+        // staying on "rebooting..." forever.
+        async function waitForDeviceBack(maxAttempts = 25, intervalMs = 2000) {
+            for (let i = 0; i < maxAttempts; i++) {
+                await sleep(intervalMs);
+                try {
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => ctrl.abort(), 2000);
+                    const resp = await fetch('/api/status', {
+                        headers: getAuthHeaders(),
+                        signal: ctrl.signal,
+                        cache: 'no-store',
+                    });
+                    clearTimeout(timer);
+                    if (resp) return true;
+                } catch (e) {
+                    // Device not back up yet — keep waiting.
+                }
+            }
+            return false;
+        }
+
+        async function rebootDevice() {
+            if (!confirm(tr('settings_device.confirm_reboot'))) return;
+
+            const btn = document.getElementById('reboot-btn');
+            const statusEl = document.getElementById('reboot-status');
+            btn.disabled = true;
+            statusEl.className = '';
+            statusEl.textContent = tr('settings_device.rebooting');
+            try {
+                const resp = await fetchWithTimeout('/api/device/reboot', { method: 'POST' });
+                const data = await resp.json().catch(() => null);
+                if (data && data.status !== 'ok') {
+                    statusEl.className = 'status-err';
+                    statusEl.textContent = tr('settings_device.error');
+                    btn.disabled = false;
+                    return;
+                }
+            } catch (e) {
+                // Server reboots before the response arrives — a dropped or
+                // aborted connection is the expected successful outcome.
+            }
+            statusEl.className = 'status-ok';
+            statusEl.textContent = tr('settings_device.ok_reboot');
+
+            // Reload once the device is back so the page shows live state.
+            if (await waitForDeviceBack()) {
+                window.location.reload();
+            }
+        }
+
+        async function resetSettings() {
+            if (!confirm(tr('settings_device.confirm_reset'))) return;
+
+            const btn = document.getElementById('reset-btn');
+            const statusEl = document.getElementById('reset-status');
+            btn.disabled = true;
+            statusEl.className = '';
+            statusEl.textContent = tr('settings_device.resetting');
+            try {
+                const resp = await fetchWithTimeout('/api/settings/reset', { method: 'POST' });
+                const data = await resp.json().catch(() => null);
+                if (data && data.status !== 'ok') {
+                    statusEl.className = 'status-err';
+                    statusEl.textContent = tr('settings_device.error');
+                    btn.disabled = false;
+                    return;
+                }
+            } catch (e) {
+                // Server went down during the reset/reboot — expected.
+            }
+            statusEl.className = 'status-ok';
+            statusEl.textContent = tr('settings_device.ok_reset');
+
+            // After the reset credentials are back to admin/admin, so the
+            // current session is no longer valid — once the device is back,
+            // send the user to login.
+            sessionStorage.removeItem('dhcp_auth');
+            if (await waitForDeviceBack()) {
+                window.location.href = 'login.html';
+            }
+        }
+    </script>
+</body>
+</html>

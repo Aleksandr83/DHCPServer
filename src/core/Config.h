@@ -152,6 +152,11 @@ public:
     SecurityConfig getSecurity() const;
     void setSecurity(const SecurityConfig& cfg);
 
+    // ─── Factory reset ───────────────────────────────
+    // Erases the whole "dhcp" NVS namespace. All getters then fall back to
+    // their compile-time defaults (factory state) until set* is called again.
+    static bool resetAll();
+
 private:
     Config() = default;
     ~Config() = default;

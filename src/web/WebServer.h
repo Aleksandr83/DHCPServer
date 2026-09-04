@@ -55,9 +55,12 @@ private:
     static esp_err_t getSecuritySettingsHandler(httpd_req* req)  { return RestApi::handleGetSecuritySettings(req); }
     static esp_err_t postSecuritySettingsHandler(httpd_req* req) { return RestApi::handlePostSecuritySettings(req); }
     static esp_err_t postOtaUploadHandler(httpd_req* req) { return RestApi::handlePostOtaUpload(req); }
+    static esp_err_t postWebFileHandler(httpd_req* req) { return RestApi::handlePostWebFile(req); }
     static esp_err_t postTestConnectionHandler(httpd_req* req) { return RestApi::handlePostTestConnection(req); }
     static esp_err_t getSettingsExportHandler(httpd_req* req) { return RestApi::handleGetSettingsExport(req); }
     static esp_err_t postSettingsImportHandler(httpd_req* req) { return RestApi::handlePostSettingsImport(req); }
+    static esp_err_t postSettingsResetHandler(httpd_req* req) { return RestApi::handlePostSettingsReset(req); }
+    static esp_err_t postRebootHandler(httpd_req* req) { return RestApi::handlePostDeviceReboot(req); }
 
     httpd_handle_t server_ = nullptr;
     ::dhcp::web::AuthManager auth_;
