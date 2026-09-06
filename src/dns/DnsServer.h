@@ -4,6 +4,7 @@
 #include "IDnsServer.h"
 #include "DnsCache.h"
 #include "DnsLogger.h"
+#include "InternalDnsCache.h"
 #include "../dhcp/IDhcpServer.h"
 
 #include <string>
@@ -72,6 +73,72 @@ public:
      */
     DnsLogger& logger() { return logger_; }
     DnsCache& cache() { return cache_; }
+    InternalDnsCache& internalCache() { return internalCache_; }
+
+    /**
+     * @brief (Re)apply the built-in (PSRAM) cache config at runtime.
+     *
+     * Enables/disables the internal cache, resizes it when the limit changed
+     * and updates the ignore-TTL flag. Safe to call from the REST handler.
+     */
+    void applyInternalCache(bool enabled, uint32_t sizeMb, bool ignoreTtl);
+
+    /**
+     * @brief Built-in cache statistics + per-query counters (main page).
+     */
+    InternalDnsCache::Stats internalCacheStats() { return internalCache_.stats(); }
+    // Queries answered directly from the built-in cache.
+    uint32_t internalCacheHits() const { return internalCacheHits_; }
+    // Queries that were forwarded to the external DNS server.
+    uint32_t forwardedCount() const { return forwardedCount_; }
+    // Average time of a successful built-in-cache lookup in µs (0 if no hits).
+    uint32_t internalCacheAvgHitUs() const
+    {
+        return internalCacheHits_ > 0
+                   ? static_cast<uint32_t>(internalCacheHitUs_ / internalCacheHits_)
+                   : 0;
+    }
+
+    // ─── Built-in cache persistence (cache.dat on FAT) ───
+    /**
+     * @brief Path of the built-in cache persistence file on the FAT partition.
+     * The FAT filesystem is optional — all persistence operations are safe
+     * no-ops (false) when /fat is not mounted.
+     */
+    static constexpr const char* kCacheDatPath = "/fat/cache.dat";
+
+    /**
+     * @brief Progress of the running save/load job.
+     */
+    struct PersistProgress {
+        bool     busy = false;   // a background job is running
+        bool     isSave = false; // true=save, false=load
+        uint32_t done = 0;       // records processed so far
+        uint32_t total = 0;      // total records (0 until known)
+    };
+
+    /**
+     * @brief Start a background save/load of the built-in cache (single-flight).
+     *
+     * Spawns a low-priority task ("ic_persist") so the long file I/O never
+     * blocks the httpd task (web stays responsive) nor holds the arena mutex
+     * for the whole operation. Progress is polled via persistProgress().
+     * @param save true → cache → /fat/cache.dat; false → file → cache.
+     * @return true when the job was started; false when another job is running,
+     * the cache is disabled, or the operation is not possible (e.g. no file
+     * to load).
+     */
+    bool startPersistJob(bool save);
+
+    /**
+     * @brief Current save/load progress (for GET .../progress).
+     */
+    PersistProgress persistProgress() const;
+
+    /**
+     * @brief Info (exists/size/entries) about kCacheDatPath.
+     */
+    InternalDnsCache::FileInfo internalCacheFileInfo() const;
 
     /**
      * @brief Provide the DHCP server for the client IP → MAC lookup fallback
@@ -90,16 +157,23 @@ private:
     // Task
     static void serverTask(void* arg);
     void serverLoop();
+    // Background manual save/load job (startPersistJob). Single-flight. Also
+    // used for the boot-time auto-restore from /fat/cache.dat.
+    static void persistJobTask(void* arg);
+    // Progress callback fed to InternalDnsCache::saveToFile/loadFromFile.
+    static void onPersistProgress(uint32_t done, uint32_t total, void* ctx);
 
     // DNS message parsing
     bool parseQuery(const uint8_t* buf, size_t len,
                     std::string& domain, uint16_t& type,
                     uint16_t& cls, uint16_t& id);
 
-    // Extract A/AAAA answer IPs from an upstream DNS reply, so the resolved
-    // mapping can be stored in the external cache (fire-and-forget).
+    // Extract A/AAAA answer IPs (and the minimum TTL) from an upstream DNS
+    // reply, so the resolved mapping can be stored in the built-in cache and
+    // the external cache.
     void parseForwardAnswer(const uint8_t* buf, size_t len,
-                            std::vector<std::string>& ips);
+                            std::vector<std::string>& ips,
+                            uint32_t& ttlSec);
 
     // DNS message building
     size_t buildAnswer(uint8_t* buf, size_t bufSize,
@@ -165,6 +239,19 @@ private:
     int socketFd_ = -1;
     bool stopRequested_ = false;
     uint32_t queryCount_ = 0;
+    uint32_t internalCacheHits_ = 0;  // answered from the built-in cache
+    uint64_t internalCacheHitUs_ = 0; // total lookup time of those hits (µs)
+    uint32_t forwardedCount_ = 0;     // sent to the external DNS server
+
+    // Background manual persist job state (save/load of cache.dat). Guarded
+    // by persistJobMutex_. Read by the REST GET .../progress handler, written
+    // by the persist job task (progress callback).
+    void*  persistJobMutex_ = nullptr;   // SemaphoreHandle_t
+    bool   persistBusy_ = false;
+    bool   persistSave_ = false;         // true=save, false=load
+    uint32_t persistDone_ = 0;
+    uint32_t persistTotal_ = 0;
+    TaskHandle_t persistTaskHandle_ = nullptr;
 
     // External DNS server address
     uint32_t externalDnsIp_ = 0;
@@ -181,6 +268,7 @@ private:
     // Sub-components
     DnsLogger logger_;
     DnsCache cache_;
+    InternalDnsCache internalCache_;
 };
 
 } // namespace dns

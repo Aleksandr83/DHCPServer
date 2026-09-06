@@ -17,7 +17,9 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 ## ✨ Features
 
 - **DHCPv4 Server** — configurable IP range, subnet, gateway, lease time, static MAC→IP bindings (enable + per-host DNS override)
-- **DNS Proxy** — pipeline: logging → local hosts → external cache (REST) → forwarding to external DNS
+- **DNS Proxy** — pipeline: logging → local hosts → **internal (PSRAM) cache** → external cache (REST) → forwarding to external DNS
+- **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache
+- **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
 - **Onboard Ethernet 10/100** — internal EMAC + IP101GRI PHY over RMII (no WiFi — ESP32-P4 has no radio)
 - **Web Interface** — dark theme, RU/EN localization, DHCP/DNS sub-pages
 - **REST API** — full device management over HTTP with Basic auth + rate limiting
@@ -132,7 +134,7 @@ Target configuration files for this build:
 - [`sdkconfig.defaults.esp32p4`](sdkconfig.defaults.esp32p4) — EMAC instead of
   SPI Ethernet, 32 MB flash, silicon rev v1.3 support, partition table override.
 - [`partitions/dhcp_partitions_p4.csv`](partitions/dhcp_partitions_p4.csv) —
-  32 MB partition table (2× OTA + 8 MB SPIFFS).
+  32 MB partition table (2× OTA + 1 MB SPIFFS + ~21 MB FAT).
 
 Full build/flash/web-UI/OTA/troubleshooting walkthrough:
 [`Docs/ESP32-P4-ETH.md`](Docs/ESP32-P4-ETH.md). Partition layout details are in
@@ -185,8 +187,8 @@ partition removed (no 2.4 GHz radio) and much larger OTA slots.
 | otadata | 0x10000 | 8 KB | OTA boot selection |
 | ota_0 | 0x20000 | 5 MB | OTA app slot 0 |
 | ota_1 | 0x520000 | 5 MB | OTA app slot 1 |
-| spiffs | 0xA20000 | 8 MB | Web interface files |
-| fat | 0x1220000 | ~14 MB | FAT data partition (RW) |
+| spiffs | 0xA20000 | 1 MB | Web interface files |
+| fat | 0xB20000 | ~21 MB | FAT data partition (RW) |
 
 **Legacy ESP32 layout (4 MB, `dhcp_partitions.csv`):**
 
@@ -218,7 +220,8 @@ Access: `http://192.168.1.201` (default static IP)
 | DHCP ▾ Static Bindings | `/pages/dhcp_static.html` | Static MAC→IP bindings (enable/DNS) |
 | DNS ▾ Setup | `/pages/dns_setup.html` | DNS forwarding, mode/address |
 | DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
-| DNS ▾ Cache | `/pages/dns_cache.html` | External cache URL, cache stats |
+| DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, save/load `cache.dat` with progress |
+| DNS ▾ External Cache | `/pages/dns_cache.html` | External REST cache URL, cache stats |
 | DNS ▾ Local Hosts | `/pages/dns_local_hosts.html` | Local domain→IP mappings |
 | Security | `/pages/security.html` | Auth settings, rate limiting |
 | Help ▾ Version | `/pages/version.html` | Firmware version info |
@@ -252,6 +255,10 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/security/settings` | Update security settings |
 | POST | `/api/ota/upload` | Upload firmware (multipart) |
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
+| GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
+| GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
+| POST | `/api/dns/internal-cache/save` | Save the PSRAM cache to `cache.dat` (async) |
+| POST | `/api/dns/internal-cache/load` | Restore the cache from `cache.dat` (async) |
 
 Full documentation: [Docs/Rest.md](Docs/Rest.md)
 

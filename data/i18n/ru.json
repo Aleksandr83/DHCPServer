@@ -7,6 +7,12 @@
     "dns_status": "DNS Сервер:",
     "cpu_load": "Нагрузка CPU:",
     "free_ram": "Память:",
+    "internal_cache": "Внутренний кэш DNS:",
+    "ic_label": "Кэш",
+    "ic_entries": "Записей:",
+    "ic_hits": "Из кэша:",
+    "ic_forward": "Forward:",
+    "ic_avg": "Средн. hit:",
     "static_bindings": "Статические привязки DHCP:",
     "local_hosts": "Локальные хосты DNS:",
     "footer": "ESP32 DHCP и DNS Сервер"
@@ -30,8 +36,9 @@
     "dhcp_static": "Статические привязки",
     "dns": "DNS",
     "dns_general": "Общее",
+    "dns_internal": "Внутренний кэш",
     "dns_logging": "Логирование",
-    "dns_cache": "Кэш",
+    "dns_cache": "Внешний кэш",
     "dns_local_hosts": "Локальные хосты",
     "settings": "Настройки",
     "settings_export": "Экспорт",
@@ -147,7 +154,26 @@
     "title": "Логирование DNS"
   },
   "dns_cache": {
-    "title": "Кэш DNS"
+    "title": "Внешний кэш"
+  },
+  "dns_internal": {
+    "title": "Внутренний кэш",
+    "enabled": "Внутренний кэш (PSRAM)",
+    "ignore_ttl": "Игнорировать TTL",
+    "file": "Файл кэша",
+    "save_file": "Сохранить в файл",
+    "load_file": "Загрузить из файла",
+    "file_hint": "Кэш записывается в /fat/cache.dat и восстанавливается автоматически при загрузке.",
+    "file_exists": "есть:",
+    "file_missing": "Файла кэша пока нет",
+    "file_entries": "записей",
+    "saving": "Сохранение…",
+    "saved": "Сохранено",
+    "save_failed": "Ошибка сохранения",
+    "loading": "Загрузка…",
+    "loaded": "Загружено",
+    "load_failed": "Ошибка загрузки",
+    "psram_note": "Внутренний кэш недоступен — на устройстве не обнаружена PSRAM."
   },
   "dns_local_hosts": {
     "title": "Локальные хосты"

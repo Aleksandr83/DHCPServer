@@ -150,17 +150,17 @@ Layout for the 32 MB flash (see [PartitionTable.md](PartitionTable.md)):
 | otadata | 0x10000 | 8 KB | OTA boot selection |
 | ota_0 | 0x20000 | 5 MB | OTA app slot 0 |
 | ota_1 | 0x520000 | 5 MB | OTA app slot 1 |
-| spiffs | 0xA20000 | 8 MB | Web interface files |
-| fat | 0x1220000 | ~14 MB | FAT data partition (RW) |
+| spiffs | 0xA20000 | 1 MB | Web interface files |
+| fat | 0xB20000 | ~21 MB | FAT data partition (RW) |
 
-> The `spiffs` partition was sized **8 MB** deliberately: ESP-IDF's SPIFFS
-> driver numbers pages with a 16-bit counter (`spiffs_page_ix`, max 65 535).
-> At the default 256-byte page the largest mountable partition is 16 MB, and the
-> original 22 MB layout exceeded it — SPIFFS then failed to mount with
-> `spiffs partition is too large for spiffs_page_ix type` and the web UI
-> returned "Not Found". The web interface is ~127 KB, so 8 MB leaves ample room.
+> The `spiffs` partition is **1 MB** — ESP-IDF's SPIFFS driver numbers pages
+> with a 16-bit counter (`spiffs_page_ix`, max 65 535); at the default 256-byte
+> page the largest mountable partition is 16 MB. The web interface is ~144 KB,
+> so 1 MB leaves ample room and the rest of the flash goes to the FAT data
+> partition. (Originally the SPIFFS partition was 8 MB — it was shrunk to 1 MB
+> and the freed ~7 MB was reallocated to FAT.)
 
-The `fat` partition (0x1220000, `0xDE0000` ≈ 14 MB) fills the rest of the
+The `fat` partition (0xB20000, `0x14E0000` ≈ 21 MB) fills the rest of the
 32 MB flash. It is mounted read-write at `/fat` through the FATFS +
 wear-levelling drivers (`esp_vfs_fat_spiflash_mount_rw_wl`) and is formatted
 automatically on first boot. The mount is optional — if the running table has

@@ -4,6 +4,9 @@
 # so these values override the shared (ESP32/ENC28J60) ones above.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Device/product code: 03 = Waveshare ESP32-P4-ETH (02 = classic ESP32 + ENC28J60).
+CONFIG_FW_VER_DEVICE=3
+
 # ESP32-P4 module: 32MB SPI NOR flash (GigaDevice GD25Q256).
 # Overrides CONFIG_ESPTOOLPY_FLASHSIZE_4MB from the shared defaults.
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y

@@ -246,6 +246,31 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                static_cast<int64_t>(::dhcp::core::Config::instance().localHostsBytes()), true);
     addJsonInt(json, "local_hosts_max",
                static_cast<int64_t>(::dhcp::core::Config::kMaxLocalHostsBytes), true);
+    // Built-in (PSRAM) DNS cache statistics + per-query counters
+    {
+        ::dhcp::dns::InternalDnsCache::Stats st;
+        int64_t icHits = 0, fwd = 0, avgUs = 0;
+        if (s_dns) {
+            st = s_dns->internalCacheStats();
+            icHits = s_dns->internalCacheHits();
+            fwd = s_dns->forwardedCount();
+            avgUs = s_dns->internalCacheAvgHitUs();
+        }
+        addJsonBool(json, "internal_cache_available", st.available, true);
+        addJsonInt(json, "internal_cache_size_mb",
+                   static_cast<int64_t>(st.sizeMb), true);
+        addJsonInt(json, "internal_cache_entries",
+                   static_cast<int64_t>(st.entries), true);
+        addJsonInt(json, "internal_cache_capacity",
+                   static_cast<int64_t>(st.capacity), true);
+        addJsonInt(json, "internal_cache_used_bytes",
+                   static_cast<int64_t>(st.usedBytes), true);
+        addJsonInt(json, "internal_cache_free_bytes",
+                   static_cast<int64_t>(st.freeBytes), true);
+        addJsonInt(json, "internal_cache_hits", icHits, true);
+        addJsonInt(json, "internal_cache_avg_hit_us", avgUs, true);
+        addJsonInt(json, "internal_forward_count", fwd, true);
+    }
     addJsonString(json, "firmware_version",
                   ::dhcp::core::Version::instance().toString(), true);
     json += "}";
@@ -535,6 +560,11 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     addJsonBool(json, "cache_auth", cfg.cacheAuthEnabled, true);
     addJsonString(json, "cache_auth_user", cfg.cacheAuthUser, true);
     addJsonString(json, "cache_auth_password", cfg.cacheAuthPassword, true);
+    addJsonBool(json, "cache_internal", cfg.cacheInternal, true);
+    addJsonInt(json, "cache_internal_size_mb", cfg.cacheInternalSizeMb, true);
+    addJsonBool(json, "cache_internal_ignore_ttl", cfg.cacheInternalIgnoreTtl, true);
+    addJsonBool(json, "cache_internal_available",
+                ::dhcp::core::CpuMonitor::psramTotal() > 0, true);
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -577,6 +607,12 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     cfg.cacheAuthEnabled = jsonGetBool(body, "cache_auth", false);
     cfg.cacheAuthUser = jsonGetStr(body, "cache_auth_user");
     cfg.cacheAuthPassword = jsonGetStr(body, "cache_auth_password");
+    cfg.cacheInternal = jsonGetBool(body, "cache_internal", false);
+    cfg.cacheInternalSizeMb = static_cast<uint32_t>(
+        jsonGetInt(body, "cache_internal_size_mb", 20));
+    if (cfg.cacheInternalSizeMb < 1) cfg.cacheInternalSizeMb = 1;
+    if (cfg.cacheInternalSizeMb > 20) cfg.cacheInternalSizeMb = 20;
+    cfg.cacheInternalIgnoreTtl = jsonGetBool(body, "cache_internal_ignore_ttl", false);
 
     // If body_read < content_len the POST body was truncated — the last
     // fields (cache_auth_user/password) would be lost even though earlier
@@ -617,6 +653,10 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         s_dns->cache().setUrl(cfg.cacheUrl);
         s_dns->cache().setAuth(cfg.cacheAuthEnabled,
                                cfg.cacheAuthUser, cfg.cacheAuthPassword);
+        // Built-in PSRAM cache — apply enable/size/ignore-ttl live.
+        s_dns->applyInternalCache(cfg.cacheInternal,
+                                  cfg.cacheInternalSizeMb,
+                                  cfg.cacheInternalIgnoreTtl);
         if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
     }
     // Diagnostic: shows what the client actually sent for the external cache
@@ -845,6 +885,9 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "cache_url", dns.cacheUrl, true);
     addJsonBool(json, "cache_auth", dns.cacheAuthEnabled, true);
     addJsonString(json, "cache_auth_user", dns.cacheAuthUser, true);
+    addJsonBool(json, "cache_internal", dns.cacheInternal, true);
+    addJsonInt(json, "cache_internal_size_mb", dns.cacheInternalSizeMb, true);
+    addJsonBool(json, "cache_internal_ignore_ttl", dns.cacheInternalIgnoreTtl, true);
     json += "}";
 
     // ── local_hosts section ──
@@ -945,7 +988,10 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 key != "log_rest_sent" && key != "cache_rest" &&
                 key != "cache_rest_read" && key != "cache_rest_write" &&
                 key != "cache_url" && key != "cache_auth" &&
-                key != "cache_auth_user" && key != "ip4" && key != "ip6" &&
+                key != "cache_auth_user" && key != "cache_internal" &&
+                key != "cache_internal_size_mb" &&
+                key != "cache_internal_ignore_ttl" &&
+                key != "ip4" && key != "ip6" &&
                 key != "username" && key != "max_attempts" &&
                 key != "lockout_period") {
                 if (!skipped.empty()) skipped += ",";
@@ -1044,6 +1090,15 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.cacheRestRead = jsonGetBool(seg, "cache_rest_read", cur.cacheRestRead);
                 cur.cacheRestWrite = jsonGetBool(seg, "cache_rest_write", cur.cacheRestWrite);
                 cur.cacheAuthEnabled = jsonGetBool(seg, "cache_auth", cur.cacheAuthEnabled);
+                cur.cacheInternal = jsonGetBool(seg, "cache_internal", cur.cacheInternal);
+                int icSize = jsonGetInt(seg, "cache_internal_size_mb",
+                                        static_cast<int>(cur.cacheInternalSizeMb));
+                if (icSize < 1) icSize = 1;
+                if (icSize > 20) icSize = 20;
+                cur.cacheInternalSizeMb = static_cast<uint32_t>(icSize);
+                cur.cacheInternalIgnoreTtl =
+                    jsonGetBool(seg, "cache_internal_ignore_ttl",
+                                cur.cacheInternalIgnoreTtl);
                 cfgMgr.setDns(cur);
                 importedDns = true;
             }
@@ -1647,6 +1702,148 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/dns/internal-cache/file
+// ─────────────────────────────────────────────────────
+// Info about the built-in (PSRAM) DNS cache persistence file (cache.dat on
+// FAT). Response: {exists, path, size_bytes, entries, version}. The file only
+// exists after a "save" — until then exists=false.
+
+esp_err_t RestApi::handleGetInternalCacheFile(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::InternalDnsCache::FileInfo info;
+    if (s_dns) info = s_dns->internalCacheFileInfo();
+
+    std::string json = "{";
+    addJsonBool(json, "exists", info.exists, false);
+    addJsonString(json, "path",
+                  s_dns ? s_dns->kCacheDatPath : "/fat/cache.dat", true);
+    addJsonInt(json, "size_bytes", static_cast<int64_t>(info.size), true);
+    addJsonInt(json, "entries", static_cast<int64_t>(info.entries), true);
+    addJsonInt(json, "version", static_cast<int64_t>(info.version), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/dns/internal-cache/progress
+// ─────────────────────────────────────────────────────
+// Progress of the background save/load job. Response: {busy, save, done,
+// total, percent}. busy=false means no job is running (the last finished
+// job's done/total are retained so the UI can report "finished at N").
+
+esp_err_t RestApi::handleGetInternalCacheProgress(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::DnsServer::PersistProgress p;
+    if (s_dns) p = s_dns->persistProgress();
+
+    const uint32_t percent = (p.total > 0)
+                                 ? static_cast<uint32_t>(
+                                       (static_cast<uint64_t>(p.done) * 100ULL) /
+                                       p.total)
+                                 : 0;
+
+    std::string json = "{";
+    addJsonBool(json, "busy", p.busy, false);
+    addJsonBool(json, "save", p.isSave, true);
+    addJsonInt(json, "done", static_cast<int64_t>(p.done), true);
+    addJsonInt(json, "total", static_cast<int64_t>(p.total), true);
+    addJsonInt(json, "percent", static_cast<int64_t>(percent), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/internal-cache/save
+// ─────────────────────────────────────────────────────
+// Starts a BACKGROUND save of the built-in (PSRAM) DNS cache to
+// /fat/cache.dat. The handler returns immediately {status:started}; the UI
+// polls GET .../progress until busy=false. Fails with 409 when another job is
+// running or the cache is disabled, and with 500 when the job could not start.
+
+esp_err_t RestApi::handlePostInternalCacheSave(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    if (!s_dns) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"DNS server unavailable\"}");
+        return ESP_OK;
+    }
+    if (!s_dns->internalCache().available()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Internal cache is disabled\"}");
+        return ESP_OK;
+    }
+    if (s_dns->persistProgress().busy) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Operation already running\"}");
+        return ESP_OK;
+    }
+
+    if (!s_dns->startPersistJob(true)) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Could not start save\"}");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"started\",\"op\":\"save\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/internal-cache/load
+// ─────────────────────────────────────────────────────
+// Starts a BACKGROUND load of the built-in (PSRAM) DNS cache from
+// /fat/cache.dat. The handler returns immediately {status:started}; the UI
+// polls GET .../progress until busy=false. Fails with 409 when another job is
+// running or the cache is disabled, and with 404 when there is no file.
+
+esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    if (!s_dns) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"DNS server unavailable\"}");
+        return ESP_OK;
+    }
+    if (!s_dns->internalCache().available()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Internal cache is disabled\"}");
+        return ESP_OK;
+    }
+    if (!s_dns->internalCacheFileInfo().exists) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"No cache file\"}");
+        return ESP_OK;
+    }
+    if (s_dns->persistProgress().busy) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Operation already running\"}");
+        return ESP_OK;
+    }
+
+    if (!s_dns->startPersistJob(false)) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Could not start load\"}");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"started\",\"op\":\"load\"}");
     return ESP_OK;
 }
 

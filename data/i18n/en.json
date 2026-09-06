@@ -7,6 +7,12 @@
     "dns_status": "DNS Server:",
     "cpu_load": "CPU Load:",
     "free_ram": "Memory:",
+    "internal_cache": "Internal DNS Cache:",
+    "ic_label": "Cache",
+    "ic_entries": "Entries:",
+    "ic_hits": "From cache:",
+    "ic_forward": "Forward:",
+    "ic_avg": "Avg hit:",
     "static_bindings": "Static Bindings DHCP:",
     "local_hosts": "Local DNS Hosts:",
     "footer": "ESP32 DHCP & DNS Server"
@@ -30,8 +36,9 @@
     "dhcp_static": "Static Bindings",
     "dns": "DNS",
     "dns_general": "General",
+    "dns_internal": "Internal Cache",
     "dns_logging": "Logging",
-    "dns_cache": "Cache",
+    "dns_cache": "External Cache",
     "dns_local_hosts": "Local Hosts",
     "settings": "Settings",
     "settings_export": "Export",
@@ -147,7 +154,26 @@
     "title": "DNS Logging"
   },
   "dns_cache": {
-    "title": "DNS Cache"
+    "title": "External Cache"
+  },
+  "dns_internal": {
+    "title": "Internal Cache",
+    "enabled": "Internal cache (PSRAM)",
+    "ignore_ttl": "Ignore TTL",
+    "file": "Cache file",
+    "save_file": "Save to file",
+    "load_file": "Load from file",
+    "file_hint": "The cache is written to /fat/cache.dat and restored automatically on boot.",
+    "file_exists": "exists:",
+    "file_missing": "No cache file yet",
+    "file_entries": "entries",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "save_failed": "Save failed",
+    "loading": "Loading…",
+    "loaded": "Loaded",
+    "load_failed": "Load failed",
+    "psram_note": "Internal cache is unavailable — no PSRAM detected on this device."
   },
   "dns_local_hosts": {
     "title": "Local Hosts"

@@ -650,6 +650,20 @@ input:focus, select:focus, textarea:focus {
     background: linear-gradient(90deg, #bc8cff, #8250df);
 }
 
+/* Built-in DNS cache fill — teal/cyan */
+.meter-fill.ic-fill {
+    background: linear-gradient(90deg, #2dd4bf, #0ea5e9);
+}
+
+/* Built-in DNS cache sub-statistics line (entries / from-cache / forward) */
+.cache-sub {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
 @keyframes meterShimmer {
     0% { background-position: 200% 0; }
     100% { background-position: -200% 0; }

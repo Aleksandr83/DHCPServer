@@ -79,6 +79,12 @@ struct DnsConfig {
     bool cacheAuthEnabled = false;
     std::string cacheAuthUser;
     std::string cacheAuthPassword;
+    // Built-in DNS cache (hash table in PSRAM — ESP32-P4 has 32 MB).
+    // Size is capped at 20 MB so the cache can be persisted to cache.dat on
+    // the ~21 MB FAT partition.
+    bool    cacheInternal = false;   // master switch
+    uint32_t cacheInternalSizeMb = 20;  // max table size in MB (1..20)
+    bool cacheInternalIgnoreTtl = false;// store TTL but never expire by it
 };
 
 /**

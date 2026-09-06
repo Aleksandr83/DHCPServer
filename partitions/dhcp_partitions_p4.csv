@@ -1,10 +1,10 @@
 # ESP32-P4 (Waveshare ESP32-P4-ETH) Partition Table for DHCPServer
-# 32MB Flash (GigaDevice GD25Q256), 2x OTA + SPIFFS + FAT data
+# 32MB Flash (GigaDevice GD25Q256), 2x OTA + SPIFFS (1MB) + FAT data
 #
 # Name,       Type, SubType, Offset,   Size,     Flags
 nvs,          data, nvs,     0x9000,   0x6000,
 otadata,      data, ota,     0x10000,  0x2000,
 ota_0,        app,  ota_0,   0x20000,  0x500000,
 ota_1,        app,  ota_1,   0x520000, 0x500000,
-spiffs,       data, spiffs,  0xA20000, 0x800000,
-fat,          data, fat,     0x1220000, 0xDE0000,
+spiffs,       data, spiffs,  0xA20000, 0x100000,
+fat,          data, fat,     0xB20000, 0x14E0000,

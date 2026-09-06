@@ -9,52 +9,64 @@ aa.bb.xxx.cc.YY.MM.RR
 | Segment | Name | Range | Current | Description |
 |---------|------|-------|---------|-------------|
 | `aa` | Global version | 00–99 | `01` | Global firmware version |
-| `bb` | Device/Product code | 00–99 | `02` | ESP32 DHCP Server |
-| `xxx` | Release number | 000–999 | `003` | Major release |
+| `bb` | Device/Product code | 00–99 | `02`/`03` | `02` = ESP32 + ENC28J60 (legacy), `03` = ESP32-P4-ETH |
+| `xxx` | Release number | 000–999 | `036` | Major release |
 | `cc` | Sub-release | 00–99 | `00` | Incremented on each reflash |
 | `YY` | Year | 00–99 | `26` | Last 2 digits of year (2026) |
-| `MM` | Month | 01–12 | `07` | Month |
+| `MM` | Month | 01–12 | `09` | Month |
 | `RR` | Region | 2 chars | `RU` | Region code |
 
-**Example:** `01.02.003.00.26.07.RU`
+**Example (ESP32-P4-ETH):** `01.03.036.00.26.09.RU`
+
+> Device code: classic **ESP32 + ENC28J60** builds report `02`; the current
+> **Waveshare ESP32-P4-ETH** target reports `03`. The P4 value is set in
+> `sdkconfig.defaults.esp32p4` (`CONFIG_FW_VER_DEVICE=3`), which overrides the
+> shared `sdkconfig.defaults` (`02`).
 
 ---
 
 ## Configuration Files
 
-The version is defined in three places (all must match):
+The version is defined in several places (release/month must match):
 
-### 1. `sdkconfig.defaults` (ESP-IDF defaults)
+### 1. `sdkconfig.defaults` (shared ESP-IDF defaults — classic ESP32)
 ```
 CONFIG_FW_VER_GLOBAL=1
 CONFIG_FW_VER_DEVICE=2
-CONFIG_FW_VER_RELEASE=3
+CONFIG_FW_VER_RELEASE=36
 CONFIG_FW_VER_SUBRELEASE=0
 CONFIG_FW_VER_YEAR=26
-CONFIG_FW_VER_MONTH=7
+CONFIG_FW_VER_MONTH=9
 CONFIG_FW_VER_REGION="RU"
 ```
 
-### 2. `platformio.ini` (PlatformIO menuconfig overrides)
+### 2. `sdkconfig.defaults.esp32p4` (ESP32-P4-ETH overrides)
+Only the values that differ from the shared defaults are set here — currently
+the **device code**:
+```
+CONFIG_FW_VER_DEVICE=3
+```
+
+### 3. `platformio.ini` (PlatformIO menuconfig overrides — classic ESP32)
 Each build environment (`[env:esp32dev]`, `[env:esp32dev-debug]`) has:
 ```
 board_build.menuconfig.FW_VER_GLOBAL = 1
 board_build.menuconfig.FW_VER_DEVICE = 2
-board_build.menuconfig.FW_VER_RELEASE = 3
+board_build.menuconfig.FW_VER_RELEASE = 36
 board_build.menuconfig.FW_VER_SUBRELEASE = 0
 board_build.menuconfig.FW_VER_YEAR = 26
-board_build.menuconfig.FW_VER_MONTH = 7
+board_build.menuconfig.FW_VER_MONTH = 9
 board_build.menuconfig.FW_VER_REGION = "RU"
 ```
 
-### 3. `src/core/Version.cpp` (fallback defines, if config not found)
+### 4. `src/core/Version.cpp` (fallback defines, if config not found)
 ```cpp
 #ifndef CONFIG_FW_VER_RELEASE
-#define CONFIG_FW_VER_RELEASE 3
+#define CONFIG_FW_VER_RELEASE 36
 #endif
 ```
 
-### 4. `src/Kconfig.projbuild` (menuconfig UI defaults)
+### 5. `src/Kconfig.projbuild` (menuconfig UI defaults)
 Used when running `idf.py menuconfig` or on first build.
 
 ---

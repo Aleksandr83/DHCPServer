@@ -72,9 +72,13 @@ def increment(increment_sub=True):
     )
     pio_path.write_text(pio_text, encoding="utf-8")
 
-    # Delete all cached sdkconfig.* files so rebuild picks new version
+    # Delete cached sdkconfig.* files so rebuild picks new version. Keep the
+    # committed source-of-truth defaults (sdkconfig.defaults and the
+    # ESP32-P4 overrides sdkconfig.defaults.esp32p4) — only the generated
+    # per-env caches (sdkconfig.esp32dev*, sdkconfig.old, ...) are removed.
+    PROTECTED = {"sdkconfig.defaults", "sdkconfig.defaults.esp32p4"}
     for f in PROJECT_DIR.glob("sdkconfig.*"):
-        if f.name != "sdkconfig.defaults":
+        if f.name not in PROTECTED:
             f.unlink()
             print(f"  Deleted cached: {f.name}")
 

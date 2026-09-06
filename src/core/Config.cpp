@@ -50,6 +50,9 @@ static const char* KEY_DNS_CACHE_AUTH   = "dns_cache_auth";
 // ESP_ERR_NVS_KEY_TOO_LONG, silently dropping the cached credentials.
 static const char* KEY_DNS_CACHE_AUTH_U = "dns_cach_auth_u";
 static const char* KEY_DNS_CACHE_AUTH_P = "dns_cach_auth_p";
+static const char* KEY_DNS_IC_ENABLE  = "dns_ic_enable";
+static const char* KEY_DNS_IC_SIZE_MB = "dns_ic_size_mb";
+static const char* KEY_DNS_IC_IGN_TTL = "dns_ic_ign_ttl";
 static const char* KEY_DNS_HOSTS      = "dns_hosts";
 static const char* KEY_DNS_CACHE_DATA = "dns_cache";
 static const char* KEY_SEC_USER       = "sec_user";
@@ -353,6 +356,14 @@ DnsConfig Config::getDns() const
     cfg.cacheAuthEnabled = readI32(KEY_DNS_CACHE_AUTH, 0) != 0;
     cfg.cacheAuthUser = readStr(KEY_DNS_CACHE_AUTH_U, "");
     cfg.cacheAuthPassword = readStr(KEY_DNS_CACHE_AUTH_P, "");
+    cfg.cacheInternal = readI32(KEY_DNS_IC_ENABLE, 0) != 0;
+    {
+        uint32_t sz = static_cast<uint32_t>(readI32(KEY_DNS_IC_SIZE_MB, 20));
+        if (sz < 1) sz = 1;
+        if (sz > 20) sz = 20;  // cap 20 MB (fits cache.dat on the FAT partition)
+        cfg.cacheInternalSizeMb = sz;
+    }
+    cfg.cacheInternalIgnoreTtl = readI32(KEY_DNS_IC_IGN_TTL, 0) != 0;
     return cfg;
 }
 
@@ -377,6 +388,9 @@ void Config::setDns(const DnsConfig& cfg)
     writeI32(KEY_DNS_CACHE_AUTH, cfg.cacheAuthEnabled ? 1 : 0);
     writeStr(KEY_DNS_CACHE_AUTH_U, cfg.cacheAuthUser);
     writeStr(KEY_DNS_CACHE_AUTH_P, cfg.cacheAuthPassword);
+    writeI32(KEY_DNS_IC_ENABLE, cfg.cacheInternal ? 1 : 0);
+    writeI32(KEY_DNS_IC_SIZE_MB, static_cast<int32_t>(cfg.cacheInternalSizeMb));
+    writeI32(KEY_DNS_IC_IGN_TTL, cfg.cacheInternalIgnoreTtl ? 1 : 0);
 }
 
 // ─── Local DNS hosts ────────────────────────────────

@@ -48,6 +48,11 @@ public:
     static esp_err_t handlePostSettingsImport(httpd_req* req);
     static esp_err_t handlePostSettingsReset(httpd_req* req);
     static esp_err_t handlePostDeviceReboot(httpd_req* req);
+    // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
+    static esp_err_t handleGetInternalCacheFile(httpd_req* req);
+    static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
+    static esp_err_t handlePostInternalCacheSave(httpd_req* req);
+    static esp_err_t handlePostInternalCacheLoad(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);

@@ -22,6 +22,12 @@ Get overall system status.
 }
 ```
 
+> The response also carries many runtime metrics: CPU load, heap/PSRAM,
+> static-bindings/local-hosts usage and the built-in DNS cache block
+> (`internal_cache_available/size_mb/entries/capacity/used_bytes/free_bytes`,
+> `internal_cache_hits`, `internal_cache_avg_hit_us` — average µs of a
+> successful PSRAM-cache lookup, `internal_forward_count`).
+
 ---
 
 ## GET /api/version
@@ -187,7 +193,11 @@ Get DNS server configuration.
   "cache_rest_write": true,
   "cache_auth": false,
   "cache_auth_user": "",
-  "cache_auth_password": ""
+  "cache_auth_password": "",
+  "cache_internal": false,
+  "cache_internal_size_mb": 20,
+  "cache_internal_ignore_ttl": false,
+  "cache_internal_available": true
 }
 ```
 
@@ -197,6 +207,15 @@ Get DNS server configuration.
 > `cache_rest` — master switch for the external DNS cache; `cache_rest_read`
 > enables lookups (reading from the cache) and `cache_rest_write` enables
 > storing forwarded answers into the cache (they default to on).
+> `cache_internal` — master switch for the **built-in** (on-device) DNS cache
+> (hash table in PSRAM, ESP32-P4); `cache_internal_size_mb` is its max size
+> in MB (1..20, default 20); `cache_internal_ignore_ttl` — when on, stored
+> TTLs are kept but never expire entries (actualization comes later).
+> `cache_internal_available` (read-only) is true when PSRAM is present and
+> the cache can actually be enabled.
+>
+> The 20 MB cap matches the FAT partition size (~21 MB) so the cache contents
+> can later be persisted to `cache.dat` on `/fat`.
 
 ---
 
@@ -221,7 +240,10 @@ Update DNS server configuration.
   "cache_rest_write": true,
   "cache_auth": false,
   "cache_auth_user": "",
-  "cache_auth_password": ""
+  "cache_auth_password": "",
+  "cache_internal": false,
+  "cache_internal_size_mb": 20,
+  "cache_internal_ignore_ttl": false
 }
 ```
 
@@ -231,6 +253,115 @@ Update DNS server configuration.
   "status": "ok"
 }
 ```
+
+> The POST applies the built-in cache settings live: enabling/disabling it,
+> resizing the PSRAM hash table when `cache_internal_size_mb` changed, and
+> updating the ignore-TTL flag — no reboot required.
+
+---
+
+## Built-in (internal) DNS cache (PSRAM)
+
+On the ESP32-P4-ETH (32 MB PSRAM) the device keeps an on-board DNS answer
+cache — a hash table stored in external PSRAM (no HTTP involved). Lookup is
+**synchronous and in-memory**, so it is consulted before the external REST
+cache. Effective query pipeline:
+
+```
+local hosts → internal (PSRAM) cache → external (REST) cache → forward
+```
+
+- Internal hits are answered immediately with the stored TTL.
+- On a forward, the upstream reply's A/AAAA records are stored in the internal
+  cache together with the minimum TTL of the answers (TTL 0 → treated as 300 s).
+- When `cache_internal_ignore_ttl` is **off** an entry older than its TTL is
+  treated as a miss and purged. When **on** the TTL is kept but never expires
+  an entry (a dedicated actualization mechanism will be added later).
+- On a full table the oldest entry is evicted. Without PSRAM the internal cache
+  is unavailable (`cache_internal_available=false`); every call is a safe no-op.
+
+### Persistence file — `cache.dat` on FAT
+
+The internal cache can be persisted to a file on the **FAT** partition
+(`/fat/cache.dat`, only present on the ESP32-P4 layout) so it survives a
+reboot. The DNS server **auto-loads** the file at start() (in a background
+job) when the cache is enabled; Save/Load can also be triggered manually via
+REST. Save/Load run in a **background low-priority task** — the HTTP handlers
+return immediately (`started`) and the UI polls the progress endpoint until
+`busy=false`. At most one operation runs at a time.
+
+#### `GET /api/dns/internal-cache/file`
+
+Info about the cache file (auth required).
+
+**Response `200 OK`:**
+```json
+{
+  "exists": true,
+  "path": "/fat/cache.dat",
+  "size_bytes": 4096,
+  "entries": 512,
+  "version": 1
+}
+```
+
+#### `GET /api/dns/internal-cache/progress`
+
+Progress of the running background save/load job (auth required).
+
+**Response `200 OK`:**
+```json
+{
+  "busy": true,
+  "save": true,
+  "done": 256,
+  "total": 512,
+  "percent": 50
+}
+```
+
+> `busy=false` means no job is running; `done`/`total` keep the last
+> finished job's values so the UI can show "finished at N entries".
+
+#### `POST /api/dns/internal-cache/save`
+
+Start a background save of the whole PSRAM cache to `/fat/cache.dat` (auth
+required). Returns immediately; poll `GET .../progress`.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "started",
+  "op": "save"
+}
+```
+
+**Errors:** `409 Conflict` — internal cache disabled **or** another operation
+is already running; `500` — the background job could not start.
+
+#### `POST /api/dns/internal-cache/load`
+
+Start a background restore of the cache from `/fat/cache.dat` (auth
+required). Entries are re-inserted with their **remaining TTL**, so they
+expire after the remaining time once reloaded. Returns immediately; poll
+`GET .../progress`.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "started",
+  "op": "load"
+}
+```
+
+**Errors:** `409 Conflict` — internal cache disabled or another operation is
+already running; `404 Not Found` — no cache file yet; `500` — the background
+job could not start.
+
+**File format:** binary, little-endian — 16-byte header (`"DCC1"` magic,
+u32 version=1, u32 entryCount, u32 reserved), then per entry: nameLen u8 +
+name, qtype u16, nA u8, nAAAA u8, remaining-ttl u32, then nA×4 B IPv4 and
+nAAAA×16 B IPv6 raw bytes.
 
 ---
 

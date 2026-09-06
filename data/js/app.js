@@ -325,6 +325,49 @@ async function updateStatus() {
                 lhEl.textContent = '--';
             }
         }
+        // Built-in DNS cache (PSRAM) — used/free MB + entries + counters
+        const icRow = document.getElementById('internal-cache-row');
+        if (icRow) {
+            if (!data.internal_cache_available) {
+                icRow.style.display = 'none';
+            } else {
+                icRow.style.display = '';
+                const MB = 1048576;
+                const used = data.internal_cache_used_bytes != null ? data.internal_cache_used_bytes : 0;
+                const free = data.internal_cache_free_bytes != null ? data.internal_cache_free_bytes : 0;
+                const entries = data.internal_cache_entries != null ? data.internal_cache_entries : 0;
+                const capacity = data.internal_cache_capacity != null ? data.internal_cache_capacity : 0;
+                const hits = data.internal_cache_hits != null ? data.internal_cache_hits : 0;
+                const fwd = data.internal_forward_count != null ? data.internal_forward_count : 0;
+                const avgUs = data.internal_cache_avg_hit_us != null ? data.internal_cache_avg_hit_us : 0;
+                const mbFmt = (bytes) => {
+                    const m = bytes / MB;
+                    if (m > 0 && m < 0.01) return (bytes / 1024).toFixed(0) + ' KB';
+                    return m.toFixed(2) + ' MB';
+                };
+                const usFmt = (us) => {
+                    if (us < 1000) return us + 'µs';
+                    return (us / 1000).toFixed(1) + 'ms';
+                };
+                const usedEl = document.getElementById('internal-cache-used');
+                if (usedEl) usedEl.textContent = mbFmt(used);
+                const freeEl = document.getElementById('internal-cache-free');
+                if (freeEl) freeEl.textContent = mbFmt(free) + ' free';
+                const pct = (used + free) > 0 ? (used / (used + free)) * 100 : 0;
+                setMeter('internal-cache-bar', pct);
+                const statsEl = document.getElementById('internal-cache-stats');
+                if (statsEl) {
+                    let s =
+                        tr('app.ic_entries') + ' ' + entries + ' / ' + capacity +
+                        '   ·   ' + tr('app.ic_hits') + ' ' + hits +
+                        '   ·   ' + tr('app.ic_forward') + ' ' + fwd;
+                    if (avgUs > 0) {
+                        s += '   ·   ' + tr('app.ic_avg') + ' ' + usFmt(avgUs);
+                    }
+                    statsEl.textContent = s;
+                }
+            }
+        }
     } catch (e) {
         console.warn('Status update failed:', e);
     }

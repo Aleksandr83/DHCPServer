@@ -141,6 +141,11 @@ void WebServer::registerRoutes()
     reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);
     reg("/api/settings/reset",       HTTP_POST,  postSettingsResetHandler);
     reg("/api/device/reboot",        HTTP_POST,  postRebootHandler);
+    // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
+    reg("/api/dns/internal-cache/file", HTTP_GET,  getInternalCacheFileHandler);
+    reg("/api/dns/internal-cache/progress", HTTP_GET, getInternalCacheProgressHandler);
+    reg("/api/dns/internal-cache/save", HTTP_POST, postInternalCacheSaveHandler);
+    reg("/api/dns/internal-cache/load", HTTP_POST, postInternalCacheLoadHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -159,6 +164,7 @@ void WebServer::registerRoutes()
     reg("/pages/dns_setup.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_logging.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_cache.html", HTTP_GET, staticFileHandler);
+    reg("/pages/dns_internal.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_local_hosts.html", HTTP_GET, staticFileHandler);
     reg("/pages/security.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);

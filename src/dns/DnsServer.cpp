@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/semphr.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lwip/netif.h"
@@ -45,6 +46,7 @@ namespace dns {
 
 DnsServer::DnsServer()
 {
+    persistJobMutex_ = xSemaphoreCreateMutex();
 }
 
 DnsServer::~DnsServer()
@@ -53,6 +55,10 @@ DnsServer::~DnsServer()
     logger_.stopRestSender();
     cache_.stopCacheSender();
     cache_.stopLookupWorker();
+    if (persistJobMutex_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+        persistJobMutex_ = nullptr;
+    }
 }
 
 // ─────────────────────────────────────────────────────
@@ -87,6 +93,9 @@ bool DnsServer::start()
     cache_.setUrl(dnsCfg.cacheUrl);
     cache_.setAuth(dnsCfg.cacheAuthEnabled,
                    dnsCfg.cacheAuthUser, dnsCfg.cacheAuthPassword);
+    // Built-in PSRAM cache config (hash table; enabled only when PSRAM exists).
+    applyInternalCache(dnsCfg.cacheInternal, dnsCfg.cacheInternalSizeMb,
+                       dnsCfg.cacheInternalIgnoreTtl);
     // The cache lookup runs in a dedicated worker task so the DNS server
     // task is never blocked on an HTTP request (a synchronous lookup here
     // stalled every query and made sites time out).
@@ -133,8 +142,138 @@ bool DnsServer::start()
         return false;
     }
 
+    // Background restore of the built-in cache from /fat/cache.dat — a
+    // low-priority persist job, so the DNS server answers immediately (cold
+    // cache → forwards) while the file is read and the arena warmed.
+    if (internalCache_.available() && internalCacheFileInfo().exists) {
+        startPersistJob(false);
+    }
+
     ESP_LOGI(TAG, "DNS server started on port %d", DNS_PORT);
     return true;
+}
+
+// ─────────────────────────────────────────────────────
+// Background persist job (save/load of cache.dat on FAT)
+// ─────────────────────────────────────────────────────
+
+bool DnsServer::startPersistJob(bool save)
+{
+    if (!internalCache_.available()) {
+        ESP_LOGW(TAG, "Cannot start persist job: internal cache is disabled");
+        return false;
+    }
+    if (!save && !internalCacheFileInfo().exists) {
+        ESP_LOGW(TAG, "Cannot start load: no cache file %s", kCacheDatPath);
+        return false;
+    }
+
+    bool started = false;
+    if (persistJobMutex_) {
+        if (xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_),
+                           portMAX_DELAY) == pdTRUE) {
+            if (!persistBusy_) {
+                persistBusy_ = true;
+                persistSave_ = save;
+                persistDone_ = 0;
+                persistTotal_ = 0;
+                started = true;
+            }
+            xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+        }
+    }
+    if (!started) {
+        ESP_LOGW(TAG, "Persist job already running — rejected");
+        return false;
+    }
+
+    BaseType_t res = xTaskCreate(
+        persistJobTask, "ic_persist", 8192, this,
+        tskIDLE_PRIORITY + 1, &persistTaskHandle_);
+    if (res != pdTRUE) {
+        if (persistJobMutex_) {
+            xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_),
+                           portMAX_DELAY);
+            persistBusy_ = false;
+            persistTaskHandle_ = nullptr;
+            xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+        }
+        ESP_LOGE(TAG, "Failed to create persist job task");
+        return false;
+    }
+    ESP_LOGI(TAG, "Persist job started: %s", save ? "save" : "load");
+    return true;
+}
+
+DnsServer::PersistProgress DnsServer::persistProgress() const
+{
+    PersistProgress p;
+    if (persistJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_),
+                       portMAX_DELAY);
+        p.busy = persistBusy_;
+        p.isSave = persistSave_;
+        p.done = persistDone_;
+        p.total = persistTotal_;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+    }
+    return p;
+}
+
+void DnsServer::onPersistProgress(uint32_t done, uint32_t total, void* ctx)
+{
+    auto* self = static_cast<DnsServer*>(ctx);
+    if (!self || !self->persistJobMutex_) return;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->persistJobMutex_),
+                   portMAX_DELAY);
+    self->persistDone_ = done;
+    self->persistTotal_ = total;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->persistJobMutex_));
+}
+
+void DnsServer::persistJobTask(void* arg)
+{
+    auto* self = static_cast<DnsServer*>(arg);
+    if (!self) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (self->persistSave_) {
+        size_t written = 0;
+        bool ok = self->internalCache_.saveToFile(
+            self->kCacheDatPath, &written,
+            &DnsServer::onPersistProgress, self);
+        if (ok) {
+            ESP_LOGI(TAG, "Built-in cache saved: %u entries -> %s",
+                     (unsigned)written, self->kCacheDatPath);
+        } else {
+            ESP_LOGE(TAG, "Built-in cache save failed -> %s",
+                     self->kCacheDatPath);
+        }
+    } else {
+        size_t loaded = 0;
+        bool ok = self->internalCache_.loadFromFile(
+            self->kCacheDatPath, &loaded,
+            &DnsServer::onPersistProgress, self);
+        if (ok) {
+            ESP_LOGI(TAG, "Built-in cache restored: %u entries <- %s",
+                     (unsigned)loaded, self->kCacheDatPath);
+        } else {
+            ESP_LOGD(TAG, "No cache file to restore (%s)", self->kCacheDatPath);
+        }
+    }
+
+    // Mark the job done (busy=false, keep last done/total so the UI can
+    // report "finished at N").
+    if (self->persistJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->persistJobMutex_),
+                       portMAX_DELAY);
+        self->persistBusy_ = false;
+        self->persistTaskHandle_ = nullptr;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->persistJobMutex_));
+    }
+    vTaskDelete(nullptr);
 }
 
 void DnsServer::stop()
@@ -192,6 +331,34 @@ void DnsServer::setLogTerminal(bool enabled)
 void DnsServer::syncLoggerLocalHosts()
 {
     logger_.setLocalHosts(&localHosts_);
+}
+
+void DnsServer::applyInternalCache(bool enabled, uint32_t sizeMb, bool ignoreTtl)
+{
+    internalCache_.setIgnoreTtl(ignoreTtl);
+    if (!enabled) {
+        if (internalCache_.available()) {
+            internalCache_.disable();
+            ESP_LOGI(TAG, "Internal DNS cache disabled");
+        }
+        return;
+    }
+    if (!internalCache_.available() ||
+        internalCache_.sizeMb() != sizeMb) {
+        if (internalCache_.available()) internalCache_.disable();
+        if (!internalCache_.enable(sizeMb)) {
+            ESP_LOGW(TAG, "Internal DNS cache could not be enabled "
+                     "(no PSRAM?) — external cache only");
+            return;
+        }
+    }
+    ESP_LOGI(TAG, "Internal DNS cache configured: size=%u MB ignore_ttl=%d",
+             (unsigned)sizeMb, ignoreTtl ? 1 : 0);
+}
+
+InternalDnsCache::FileInfo DnsServer::internalCacheFileInfo() const
+{
+    return internalCache_.fileInfo(kCacheDatPath);
 }
 
 void DnsServer::setDhcpServer(::dhcp::dhcp::IDhcpServer* dhcp)
@@ -347,13 +514,23 @@ void DnsServer::serverLoop()
                     // in the external cache (fire-and-forget ring buffer +
                     // sender task), so future queries hit the cache.
                     std::vector<std::string> answerIps;
+                    uint32_t answerTtl = 0;
                     parseForwardAnswer(response.data(),
-                                       static_cast<size_t>(rl), answerIps);
+                                       static_cast<size_t>(rl), answerIps,
+                                       answerTtl);
                     if (!answerIps.empty()) {
                         if (logTerminal_) {
                             ESP_LOGI(TAG, "DNS forward: storing %zu IP(s) of %s to cache",
                                      answerIps.size(), pf.domain.c_str());
                         }
+                        // Built-in PSRAM cache (TTL=0 treated as 300 s;
+                        // ignore_ttl config decides expiry).
+                        if (internalCache_.available()) {
+                            internalCache_.store(pf.domain, pf.qtype,
+                                                 answerIps,
+                                                 answerTtl ? answerTtl : 300);
+                        }
+                        // External REST cache (fire-and-forget sender).
                         cache_.store(pf.domain, pf.qtype, answerIps);
                     } else {
                         if (logTerminal_) {
@@ -431,6 +608,12 @@ void DnsServer::serverLoop()
                         }
                         expirePendingSlot(res.token);
                         continue;
+                    }
+
+                    // Warm the built-in PSRAM cache from an external-cache hit
+                    // (the REST stub carries no TTL — use the default 300 s).
+                    if (internalCache_.available()) {
+                        internalCache_.store(pf.domain, pf.qtype, ips, 300);
                     }
 
                     size_t rl = buildAnswer(response.data(), response.size(),
@@ -520,6 +703,40 @@ void DnsServer::serverLoop()
                 }
             }
 
+            // Step 2: built-in PSRAM cache — a fast SYNCHRONOUS in-memory
+            // hash-table lookup (no HTTP, never blocks). Consulted before the
+            // external (REST) cache.
+            uint32_t internalTtl = 0;
+            bool internalHit = false;
+            uint32_t internalHitUs = 0;
+            if (!found && internalCache_.available() &&
+                (qtype == DNS_TYPE_A || qtype == DNS_TYPE_AAAA)) {
+                const int64_t t0 = esp_timer_get_time();
+                const bool hit = internalCache_.lookup(lookupDomain, qtype,
+                                                       resolvedIps, internalTtl);
+                if (hit) {
+                    internalHitUs = static_cast<uint32_t>(esp_timer_get_time() - t0);
+                    found = true;
+                    internalHit = true;
+                    internalCacheHits_++;
+                    internalCacheHitUs_ += internalHitUs;
+                    if (logTerminal_ && logger_.logCache()) {
+                        // Auto format: µs when < 1 ms, else ms with 1 decimal.
+                        if (internalHitUs < 1000) {
+                            ESP_LOGI(TAG,
+                                     "DNS query: %s type=%u from %s [internal %uµs]",
+                                     domain.c_str(), qtype, clientIpStr,
+                                     (unsigned)internalHitUs);
+                        } else {
+                            ESP_LOGI(TAG,
+                                     "DNS query: %s type=%u from %s [internal %.1fms]",
+                                     domain.c_str(), qtype, clientIpStr,
+                                     internalHitUs / 1000.0);
+                        }
+                    }
+                }
+            }
+
             // Note: the external cache is consulted ASYNCHRONOUSLY — see the
             // "Handle async cache lookup results" section and the forward
             // path below (cache_.submitLookup). A synchronous lookup here
@@ -528,9 +745,10 @@ void DnsServer::serverLoop()
             // Build and send response
             size_t respLen = 0;
             if (found && !resolvedIps.empty()) {
+                const uint32_t respTtl = internalHit ? internalTtl : 300;
                 respLen = buildAnswer(response.data(), response.size(),
                                       qid, domain, qtype, qclass,
-                                      resolvedIps, 300);
+                                      resolvedIps, respTtl);
                 logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                  fromLocal ? DnsLogSource::LOCAL : DnsLogSource::CACHE,
                                  true, resolvedIps[0]);
@@ -717,6 +935,7 @@ bool DnsServer::startForward(int idx, uint64_t now)
 
     pf.waitingCache = false;
     pf.sentMs = now;
+    forwardedCount_++;
     return true;
 }
 
@@ -757,11 +976,14 @@ bool DnsServer::parseQuery(const uint8_t* buf, size_t len,
 }
 
 // Extract A/AAAA answer IPs from an upstream DNS reply. Only the answer
-// section is walked (names may use compression pointers). Returns the IPs
-// so the DNS server can store the resolved mapping in the external cache.
+// section is walked (names may use compression pointers). Also returns the
+// minimum TTL over the A/AAAA answers so the resolved mapping can be stored
+// in the built-in cache together with its lifetime.
 void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
-                                   std::vector<std::string>& ips)
+                                   std::vector<std::string>& ips,
+                                   uint32_t& ttlSec)
 {
+    ttlSec = 0;
     if (len < 12) return;
     const uint16_t qdcount = (buf[4] << 8) | buf[5];
     const uint16_t ancount = (buf[6] << 8) | buf[7];
@@ -780,10 +1002,15 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
         decodeDomainName(buf, len, offset);   // NAME (compression pointer)
         if (offset + 10 > len) return;
         const uint16_t type = (buf[offset] << 8) | buf[offset + 1];
+        const uint32_t ttlN = (static_cast<uint32_t>(buf[offset + 4]) << 24) |
+                              (static_cast<uint32_t>(buf[offset + 5]) << 16) |
+                              (static_cast<uint32_t>(buf[offset + 6]) << 8) |
+                              static_cast<uint32_t>(buf[offset + 7]);
         const uint16_t rdlen = (buf[offset + 8] << 8) | buf[offset + 9];
         offset += 10;
         if (offset + rdlen > len) return;
 
+        bool ipAnswer = false;
         if (type == DNS_TYPE_A && rdlen == 4) {
             char ip[16];
             std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
@@ -791,17 +1018,23 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
                           buf[offset + 2], buf[offset + 3]);
             if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: A %s", ip);
             ips.push_back(ip);
+            ipAnswer = true;
         } else if (type == DNS_TYPE_AAAA && rdlen == 16) {
             char ip[INET6_ADDRSTRLEN] = {0};
             if (inet_ntop(AF_INET6, buf + offset, ip, sizeof(ip))) {
                 if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: AAAA %s", ip);
                 ips.push_back(ip);
+                ipAnswer = true;
             }
+        }
+        if (ipAnswer) {
+            if (ttlSec == 0 || ttlN < ttlSec) ttlSec = ttlN;
         }
         offset += rdlen;
     }
-    if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: %u IP(s) extracted",
-                               static_cast<unsigned>(ips.size()));
+    if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: %u IP(s) extracted, ttl=%u",
+                               static_cast<unsigned>(ips.size()),
+                               static_cast<unsigned>(ttlSec));
 }
 
 // ─────────────────────────────────────────────────────

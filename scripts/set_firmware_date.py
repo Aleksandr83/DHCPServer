@@ -123,9 +123,13 @@ def main():
     update_version_cpp(PROJECT_DIR / "src" / "core" / "Version.cpp", updates)
     update_platformio(PROJECT_DIR / "platformio.ini", updates)
 
-    # Delete all cached sdkconfig.* files so a rebuild picks up the new version
+    # Delete cached sdkconfig.* files so a rebuild picks up the new version.
+    # Keep the committed source-of-truth defaults (sdkconfig.defaults and the
+    # ESP32-P4 overrides sdkconfig.defaults.esp32p4) — only the generated
+    # per-env caches (sdkconfig.esp32dev*, sdkconfig.old, ...) are removed.
+    PROTECTED = {"sdkconfig.defaults", "sdkconfig.defaults.esp32p4"}
     for f in PROJECT_DIR.glob("sdkconfig.*"):
-        if f.name != "sdkconfig.defaults":
+        if f.name not in PROTECTED:
             f.unlink()
             print(f"  Deleted cached: {f.name}")
 

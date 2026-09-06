@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internal Cache — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dns_internal.title">Internal Cache</h1>
+
+        <div class="card toggle-row">
+            <span data-i18n="dns_internal.enabled">Internal cache (PSRAM)</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-internal" onchange="toggleInternalCache()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div id="dns-internal-options" style="display:none;">
+            <div class="card toggle-row">
+                <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dns-internal-ignore-ttl" onchange="toggleInternalIgnoreTtl()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <!-- Persistence: save the PSRAM cache to /fat/cache.dat and restore it -->
+            <div class="card" id="dns-internal-persist">
+                <div class="toggle-row" style="margin-bottom:0.5rem;">
+                    <span data-i18n="dns_internal.file">Cache file</span>
+                    <span id="dns-internal-file-status" class="test-conn-result"></span>
+                </div>
+                <div class="test-conn-row">
+                    <button class="btn btn-primary" onclick="saveInternalCacheFile(this)" data-i18n="dns_internal.save_file">Save to file</button>
+                    <button class="btn" onclick="loadInternalCacheFile(this)" data-i18n="dns_internal.load_file">Load from file</button>
+                </div>
+                <!-- Live progress while a save/load job is running -->
+                <div id="dns-internal-progress-row" style="display:none; margin-top:0.6rem;">
+                    <div style="display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:0.3rem;">
+                        <span id="dns-internal-progress-label"></span>
+                        <span id="dns-internal-progress-percent"></span>
+                    </div>
+                    <div class="meter-track" style="height:8px;">
+                        <div class="meter-fill ic-fill" id="dns-internal-progress-bar" style="width:0%;"></div>
+                    </div>
+                    <p id="dns-internal-progress-done" class="hint"></p>
+                </div>
+                <p class="hint" data-i18n="dns_internal.file_hint">The cache is written to /fat/cache.dat and restored automatically on boot.</p>
+            </div>
+        </div>
+
+        <p id="dns-internal-psram-note" style="display:none; color:#f59e0b;" data-i18n="dns_internal.psram_note">Internal cache is unavailable — no PSRAM detected on this device.</p>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        let internalAvailable = false;
+
+        async function loadInternalCacheSettings() {
+            const data = await fetchJSON('/api/dns/settings');
+            internalAvailable = !!data.cache_internal_available;
+            const cb = document.getElementById('dns-internal');
+            cb.checked = !!data.cache_internal;
+            const ittl = document.getElementById('dns-internal-ignore-ttl');
+            ittl.checked = !!data.cache_internal_ignore_ttl;
+            // The internal cache needs PSRAM — disable the toggle without it.
+            cb.disabled = !internalAvailable;
+            const note = document.getElementById('dns-internal-psram-note');
+            if (note) note.style.display = internalAvailable ? 'none' : 'block';
+            updateInternalOptionsVisibility();
+        }
+
+        // Ignore-TTL only makes sense while the cache is enabled and PSRAM
+        // exists — show/hide that block together with the master toggle.
+        function updateInternalOptionsVisibility() {
+            const opt = document.getElementById('dns-internal-options');
+            if (!opt) return;
+            const cb = document.getElementById('dns-internal');
+            const active = internalAvailable && cb.checked;
+            opt.style.display = active ? 'block' : 'none';
+            const ittl = document.getElementById('dns-internal-ignore-ttl');
+            if (ittl) ittl.disabled = !active;
+        }
+
+        async function toggleInternalCache() {
+            const cb = document.getElementById('dns-internal');
+            const checked = cb.checked;
+            const result = await saveDnsPartial({ cache_internal: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                cb.checked = !checked;
+            }
+            updateInternalOptionsVisibility();
+            if (cb.checked) updateInternalCacheFileStatus();
+        }
+
+        async function toggleInternalIgnoreTtl() {
+            const ittl = document.getElementById('dns-internal-ignore-ttl');
+            const checked = ittl.checked;
+            const result = await saveDnsPartial({ cache_internal_ignore_ttl: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                ittl.checked = !checked;
+            }
+        }
+
+        // ─── Persistence (cache.dat on FAT) ───
+        let persistPollTimer = null;
+
+        async function updateInternalCacheFileStatus() {
+            const el = document.getElementById('dns-internal-file-status');
+            if (!el) return;
+            try {
+                const d = await fetchJSON('/api/dns/internal-cache/file');
+                if (d.exists) {
+                    const kb = (d.size_bytes / 1024).toFixed(1);
+                    el.textContent = tr('dns_internal.file_exists') + ' ' +
+                                     kb + ' KB, ' + tr('dns_internal.file_entries') + ' ' +
+                                     d.entries;
+                    el.className = 'test-conn-result test-conn-ok';
+                } else {
+                    el.textContent = tr('dns_internal.file_missing');
+                    el.className = 'test-conn-result test-conn-warn';
+                }
+            } catch (e) {
+                el.textContent = tr('dns_internal.file_missing');
+                el.className = 'test-conn-result test-conn-warn';
+            }
+        }
+
+        function setPersistBusy(busy, save) {
+            const row = document.getElementById('dns-internal-progress-row');
+            const label = document.getElementById('dns-internal-progress-label');
+            if (!row || !label) return;
+            if (busy) {
+                label.textContent = save ? tr('dns_internal.saving') : tr('dns_internal.loading');
+                row.style.display = 'block';
+            } else {
+                row.style.display = 'none';
+            }
+        }
+
+        function renderPersistProgress(p) {
+            const bar = document.getElementById('dns-internal-progress-bar');
+            const pct = document.getElementById('dns-internal-progress-percent');
+            const done = document.getElementById('dns-internal-progress-done');
+            if (!bar || !pct || !done) return;
+            const percent = Math.max(0, Math.min(100, p.percent || 0));
+            bar.style.width = percent + '%';
+            pct.textContent = percent + '%';
+            done.textContent = tr('dns_internal.file_entries') + ': ' + p.done +
+                               ' / ' + (p.total > 0 ? p.total : '?');
+        }
+
+        // Poll GET .../progress every 0.5 s until the background job finishes,
+        // then refresh the file status and re-enable the buttons.
+        function pollPersistProgress(save) {
+            if (persistPollTimer) clearInterval(persistPollTimer);
+            persistPollTimer = setInterval(async () => {
+                let p = { busy: true };
+                try { p = await fetchJSON('/api/dns/internal-cache/progress'); } catch (e) { /* keep busy */ }
+                if (p.busy) {
+                    renderPersistProgress(p);
+                    return;
+                }
+                clearInterval(persistPollTimer);
+                persistPollTimer = null;
+                setPersistBusy(false);
+                renderPersistProgress(p);
+                enablePersistButtons(true);
+                const out = document.getElementById('dns-internal-file-status');
+                if (out && p.total > 0) {
+                    out.textContent = (p.save ? tr('dns_internal.saved') : tr('dns_internal.loaded')) +
+                                      ' ' + p.done + ' ' + tr('dns_internal.file_entries');
+                    out.className = 'test-conn-result test-conn-ok';
+                }
+                // Refresh the cache-file line in the background (after the
+                // "Saved/Loaded N" message so it does not overwrite it).
+                setTimeout(updateInternalCacheFileStatus, 300);
+            }, 500);
+        }
+
+        function enablePersistButtons(enabled) {
+            document.querySelectorAll('#dns-internal-persist button').forEach(b => {
+                b.disabled = !enabled;
+            });
+        }
+
+        async function startPersistJob(save, btn) {
+            const out = document.getElementById('dns-internal-file-status');
+            enablePersistButtons(false);
+            out.textContent = save ? tr('dns_internal.saving') : tr('dns_internal.loading');
+            out.className = 'test-conn-result test-conn-warn';
+            try {
+                const resp = await apiFetch(
+                    save ? '/api/dns/internal-cache/save' : '/api/dns/internal-cache/load',
+                    { method: 'POST' });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'started') {
+                    setPersistBusy(true, save);
+                    pollPersistProgress(save);
+                } else {
+                    out.textContent = (d.message || tr('dns_internal.load_failed'));
+                    out.className = 'test-conn-result test-conn-fail';
+                    enablePersistButtons(true);
+                }
+            } catch (e) {
+                out.textContent = tr('dns_internal.load_failed');
+                out.className = 'test-conn-result test-conn-fail';
+                enablePersistButtons(true);
+            }
+        }
+
+        async function saveInternalCacheFile(btn) {
+            await startPersistJob(true, btn);
+        }
+
+        async function loadInternalCacheFile(btn) {
+            await startPersistJob(false, btn);
+        }
+
+        loadInternalCacheSettings();
+        // The file status is dynamic (tr() text) — only render it once the
+        // translation dictionary has been fetched (loadTranslations is async).
+        function refreshFileStatusWhenReady() {
+            if (!translations || Object.keys(translations).length === 0) {
+                setTimeout(refreshFileStatusWhenReady, 50);
+                return;
+            }
+            updateInternalCacheFileStatus();
+        }
+        document.addEventListener('DOMContentLoaded', refreshFileStatusWhenReady);
+    </script>
+</body>
+</html>

@@ -61,8 +61,20 @@
                         </div>
                     </div>
                 </div>
-            </div>
-            <div class="status-row">
+            </div>            <div class="status-row" id="internal-cache-row" style="display:none;">
+                <span class="status-label" data-i18n="app.internal_cache">Internal DNS Cache:</span>
+                <div class="status-value ram-meter">
+                    <div class="core-meter">
+                        <span class="core-label" data-i18n="app.ic_label">Cache</span>
+                        <div class="meter-track"><div class="meter-fill ic-fill" id="internal-cache-bar"></div></div>
+                        <div class="ram-values">
+                            <span class="ram-total" id="internal-cache-used">--</span>
+                            <span class="ram-free" id="internal-cache-free">--</span>
+                        </div>
+                    </div>
+                    <div class="cache-sub" id="internal-cache-stats"></div>
+                </div>
+            </div>            <div class="status-row">
                 <span class="status-label" data-i18n="app.static_bindings">Static Bindings:</span>
                 <span class="status-value" id="static-bindings-usage">--</span>
             </div>
