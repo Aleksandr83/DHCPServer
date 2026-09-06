@@ -2,7 +2,6 @@
   "app": {
     "title": "DHCPServer",
     "subtitle": "DHCP & Caching DNS Server",
-    "wifi_status": "WiFi Status:",
     "dhcp_status": "DHCP Server:",
     "dns_status": "DNS Server:",
     "cpu_load": "CPU Load:",
@@ -18,8 +17,6 @@
     "footer": "ESP32 DHCP & DNS Server"
   },
   "status": {
-    "connected": "Connected",
-    "disconnected": "Disconnected",
     "running": "Running",
     "stopped": "Stopped",
     "error": "Error",

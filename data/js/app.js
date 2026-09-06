@@ -233,7 +233,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // Update status on index page
-    if (document.getElementById('wifi-status')) {
+    if (document.getElementById('dhcp-status')) {
         updateStatus();
         // Auto-refresh every 5 s — live bars like Task Manager. Polling too
         // often (2 s) opens many TCP connections and exhausts the httpd
@@ -252,9 +252,6 @@ function setMeter(id, pct) {
 async function updateStatus() {
     try {
         const data = await fetchJSON('/api/status');
-        document.getElementById('wifi-status').textContent =
-            data.wifi_connected ? tr('status.connected') : tr('status.disconnected');
-        document.getElementById('wifi-status').className = data.wifi_connected ? 'status-ok' : 'status-err';
         const dhcpEl = document.getElementById('dhcp-status');
         if (dhcpEl) {
             dhcpEl.textContent = data.dhcp_running ? tr('status.running') : tr('status.stopped');

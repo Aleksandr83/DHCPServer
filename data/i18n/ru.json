@@ -2,7 +2,6 @@
   "app": {
     "title": "DHCPServer",
     "subtitle": "DHCP и Кэширующий DNS Сервер",
-    "wifi_status": "Статус сети:",
     "dhcp_status": "DHCP Сервер:",
     "dns_status": "DNS Сервер:",
     "cpu_load": "Нагрузка CPU:",
@@ -18,8 +17,6 @@
     "footer": "ESP32 DHCP и DNS Сервер"
   },
   "status": {
-    "connected": "Подключено",
-    "disconnected": "Отключено",
     "running": "Работает",
     "stopped": "Остановлен",
     "error": "Ошибка",
