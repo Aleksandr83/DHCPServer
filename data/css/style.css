@@ -548,6 +548,15 @@ input:focus, select:focus, textarea:focus {
     min-width: 0;
 }
 
+/* "not synchronized" note of the device date/time row — its own line under the
+   value, so the time itself stays aligned with the other status values. */
+.status-value .unsynced-note {
+    display: block;
+    font-weight: 400;
+    font-size: 0.8rem;
+    color: #f59e0b;
+}
+
 /* CPU / RAM meters — animated bars like Task Manager. The CPU block and the
    memory block stack their per-core/per-bank meters vertically (C0 over C1,
    RAM over PSRAM) one under the other in the same column. Both blocks share

@@ -18,6 +18,7 @@ Get overall system status.
   "ip6": "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d",
   "dhcp_running": true,
   "dns_running": true,
+  "ntp_running": false,
   "firmware_version": "01.02.001.00.26.07.RU"
 }
 ```
@@ -56,6 +57,7 @@ Get current DHCP server configuration.
   "subnet": "255.255.255.0",
   "gateway": "192.168.1.1",
   "lease_time": 86400,
+  "max_lease_entries": 0,
   "log_rest": false,
   "log_url": "",
   "log_auth": false,
@@ -66,6 +68,10 @@ Get current DHCP server configuration.
 
 > `log_rest` — send DHCP events (OFFER/ACK/NAK/RELEASE/DECLINE) to the
 > external REST URL `log_url`; `log_auth*` are the HTTP Basic credentials.
+> `max_lease_entries` — hard cap on the lease/offer table: `0` = **auto**
+> (2× the configured pool size, clamped to 8..512) or an explicit 8..512.
+> `max_lease_entries_effective` (read-only) is the cap currently enforced and
+> `lease_limit_rejects` counts the requests refused because the table was full.
 
 ---
 
@@ -82,6 +88,7 @@ Update DHCP server configuration.
   "subnet": "255.255.255.0",
   "gateway": "192.168.1.1",
   "lease_time": 86400,
+  "max_lease_entries": 0,
   "log_rest": false,
   "log_url": "http://example.com/api/v1/dhcp/log",
   "log_auth": false,
@@ -197,7 +204,9 @@ Get DNS server configuration.
   "cache_internal": false,
   "cache_internal_size_mb": 20,
   "cache_internal_ignore_ttl": false,
-  "cache_internal_available": true
+  "cache_internal_available": true,
+  "block_forward_non_aa": false,
+  "allow_own_subnet": true
 }
 ```
 
@@ -213,6 +222,18 @@ Get DNS server configuration.
 > TTLs are kept but never expire entries (actualization comes later).
 > `cache_internal_available` (read-only) is true when PSRAM is present and
 > the cache can actually be enabled.
+> `block_forward_non_aa` — when on, queries of any type other than A/AAAA
+> that are NOT answered from local hosts are answered **NODATA** (NOERROR,
+> 0 records) and are never sent to the external cache or the upstream DNS.
+> The external cache only ever stores A/AAAA, so nothing is lost; the client
+> falls back to A/AAAA on NODATA.
+> `allow_own_subnet` — when on (**the default**), the server answers only
+> clients inside the device's **own subnet** (address + netmask taken from the
+> DHCP settings, see `GET /api/dhcp/settings`); queries from any other address
+> are **silently dropped** (no reply at all — so the device is neither an open
+> resolver nor a reflection amplifier), counted and logged at most once per 5 s.
+> If the filter is enabled while the DHCP subnet cannot be parsed, it is skipped
+> with a warning (fail-open) instead of black-holing the LAN.
 >
 > The 20 MB cap matches the FAT partition size (~21 MB) so the cache contents
 > can later be persisted to `cache.dat` on `/fat`.
@@ -243,7 +264,9 @@ Update DNS server configuration.
   "cache_auth_password": "",
   "cache_internal": false,
   "cache_internal_size_mb": 20,
-  "cache_internal_ignore_ttl": false
+  "cache_internal_ignore_ttl": false,
+  "block_forward_non_aa": false,
+  "allow_own_subnet": true
 }
 ```
 
@@ -257,6 +280,11 @@ Update DNS server configuration.
 > The POST applies the built-in cache settings live: enabling/disabling it,
 > resizing the PSRAM hash table when `cache_internal_size_mb` changed, and
 > updating the ignore-TTL flag — no reboot required.
+> `block_forward_non_aa` is also applied live: toggling it on makes the
+> running server answer non-A/AAAA queries with NODATA immediately — no
+> reboot required.
+> `allow_own_subnet` is applied live too (the subnet itself is re-read from the
+> DHCP settings, so it also follows `POST /api/dhcp/settings`).
 
 ---
 
@@ -645,3 +673,168 @@ authenticated. The device restarts ~0.5 s after the response is sent.
 ```json
 { "status": "ok", "message": "Device is rebooting...", "reboot": true }
 ```
+
+---
+
+## GET /api/time/settings
+
+Get the NTP (time) server configuration and runtime status.
+
+**Response `200 OK`:**
+```json
+{
+  "enabled": false,
+  "sync_enabled": true,
+  "server_state": "stopped",
+  "synced": false,
+  "now_utc": "2026-09-11 14:24:00",
+  "now_local": "2026-09-11 17:24:00",
+  "uptime_sec": 1234,
+  "external_ntp": "pool.ntp.org",
+  "timezone": "Europe/Moscow",
+  "utc_offset_hours": 3,
+  "sync_interval_sec": 86400,
+  "allow_own_subnet": true,
+  "rate_limit_per_sec": 5,
+  "min_datetime": "2026-09-11 00:00:00",
+  "log_terminal": false,
+  "log_rest": false,
+  "log_url": "",
+  "log_auth": false,
+  "log_auth_user": "",
+  "log_auth_password": ""
+}
+```
+
+> `server_state` — `running` / `stopped` / `error`; `synced` (read-only) is
+> true once the SNTP client has synchronised at least once; `now_utc` /
+> `now_local` are read-only current-time snapshots (UTC and UTC+offset);
+> `uptime_sec` is seconds since boot. `enabled` is the **NTP server** switch
+> (serving LAN clients) and `sync_enabled` is the **SNTP clock-sync** switch —
+> they are independent: the device clock can be synchronised even when the NTP
+> server is off. Clients always receive **UTC** — the
+> `timezone` / `utc_offset_hours` values are used only for local display/logging
+> (`timezone` is the zone id, e.g. `Europe/Moscow`; an empty string means a
+> custom offset, in which case `utc_offset_hours` is authoritative).
+> `allow_own_subnet` (default **on**) makes the NTP server answer only clients
+> inside the device's own subnet (address + netmask from the DHCP settings — the
+> same policy as the DNS filter); requests from other addresses and requests
+> above `rate_limit_per_sec` (1..100 per second **per client address**, default
+> 5) are dropped **without a reply**, so the device is neither an open time
+> service nor a reflection amplifier. Both are counted and logged at most once
+> per 5 s; if the filter is on while the DHCP subnet cannot be parsed it is
+> skipped with a warning (fail-open).
+> `min_datetime` (read-only) is a **build constant** — the lowest date/time the
+> "Set date/time manually" form accepts. It uses the `YYYY-MM-DD HH:00:00` form
+> (hour granularity: the minutes and seconds are always zero). It is kept at the
+> firmware build date by the version scripts (`scripts/inc_firmware_ver.py`,
+> `scripts/set_firmware_date.py`, from `CONFIG_FW_MIN_DATETIME`); the web page
+> rejects earlier values, while the device itself does not enforce the limit.
+
+---
+
+## POST /api/time/settings
+
+Update the NTP server configuration. The body is the same object as the GET
+response (read-only fields are ignored). Values are clamped:
+`utc_offset_hours` −12..14, `sync_interval_sec` 15..604800 (RFC 4330 minimum
+15 s).
+
+**Request body:**
+```json
+{
+  "enabled": true,
+  "sync_enabled": true,
+  "external_ntp": "pool.ntp.org",
+  "timezone": "Europe/Moscow",
+  "utc_offset_hours": 3,
+  "sync_interval_sec": 86400,
+  "allow_own_subnet": true,
+  "rate_limit_per_sec": 5,
+  "log_terminal": true,
+  "log_rest": false,
+  "log_url": "",
+  "log_auth": false,
+  "log_auth_user": "",
+  "log_auth_password": ""
+}
+```
+
+**Response `200 OK`:**
+```json
+{ "status": "ok" }
+```
+
+> The POST applies the settings live: enabling starts the NTP server,
+> disabling stops it; a change to `external_ntp` or `sync_interval_sec`
+> restarts the SNTP client; logger settings (terminal/REST) are updated
+> immediately — no reboot required. `sync_enabled` starts/stops the SNTP
+> clock-sync client independently of the NTP server. `timezone` is sanitized
+> to a safe charset and bounded length; an empty value selects a custom fixed
+> offset (`utc_offset_hours`).
+>
+> Until the clock has been synchronised at least once (`synced == false`), the
+> NTP server answers with **LI=3 ("clock not synchronized") + stratum 16**
+> (RFC 5905) instead of a (wrong) time — compliant clients ignore such a reply
+> and never set their clock from an unsynchronised server.
+
+---
+
+## GET /api/time/now
+
+Current time as reported by the device clock (debug helper).
+
+**Response `200 OK`:**
+```json
+{
+  "now_utc": "2026-09-11 14:24:00",
+  "now_local": "2026-09-11 17:24:00",
+  "unix_sec": 1789136640,
+  "synced": true
+}
+```
+
+---
+
+## POST /api/time/set
+
+Set the device clock by hand (the board has no battery-backed RTC, so without
+an internet connection the clock would otherwise stay at 1970). The SNTP client
+is **not** touched — a later successful synchronisation may overwrite the value.
+On success the clock counts as synchronised, so the NTP server stops answering
+with the "not synchronised" gate.
+
+**Request body:**
+```json
+{
+  "datetime": "2026-09-11 18:32:05",
+  "utc_offset_hours": 3
+}
+```
+
+> `datetime` is **local** time in the format `YYYY-MM-DD HH:MM:SS` (a missing
+> `:SS` part and the ISO `T` separator are also accepted, which is what the
+> browser date/time inputs emit). `utc_offset_hours` is the offset of that local
+> time from UTC (clamped to −12..14); when omitted the configured
+> `utc_offset_hours` is used. The server stores
+> `unix_utc = local − utc_offset_hours × 3600`.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "unix_sec": 1789151525,
+  "now_utc": "2026-09-11 15:32:05",
+  "now_local": "2026-09-11 18:32:05",
+  "synced": true
+}
+```
+
+**Response `400 Bad Request`** — unparsable/out-of-range value, or a result
+before 1970-01-01 UTC:
+```json
+{ "status": "error", "message": "invalid datetime (expected YYYY-MM-DD HH:MM:SS)" }
+```
+
+**Response `500 Internal Server Error`** — the time service is unavailable or
+`settimeofday()` failed.

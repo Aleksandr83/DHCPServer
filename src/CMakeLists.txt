@@ -5,6 +5,7 @@ set(DHCPSERVER_SRC_DIRS
     "eth"
     "dhcp"
     "dns"
+    "time"
     "web"
     "storage"
     "led"
@@ -17,6 +18,7 @@ set(DHCPSERVER_REQUIRES
     esp_http_client
     esp_http_server
     esp_netif
+    lwip
     esp_eth
     esp_timer
     nvs_flash

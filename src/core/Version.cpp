@@ -10,7 +10,7 @@
 #define CONFIG_FW_VER_DEVICE 2
 #endif
 #ifndef CONFIG_FW_VER_RELEASE
-#define CONFIG_FW_VER_RELEASE 36
+#define CONFIG_FW_VER_RELEASE 41
 #endif
 #ifndef CONFIG_FW_VER_SUBRELEASE
 #define CONFIG_FW_VER_SUBRELEASE 0
@@ -23,6 +23,9 @@
 #endif
 #ifndef CONFIG_FW_VER_REGION
 #define CONFIG_FW_VER_REGION "RU"
+#endif
+#ifndef CONFIG_FW_MIN_DATETIME
+#define CONFIG_FW_MIN_DATETIME "2026-09-11 22:00:00"
 #endif
 
 namespace dhcp {
@@ -42,6 +45,7 @@ Version::Version()
     , year_(CONFIG_FW_VER_YEAR)
     , month_(CONFIG_FW_VER_MONTH)
     , region_(CONFIG_FW_VER_REGION)
+    , minDateTime_(CONFIG_FW_MIN_DATETIME)
 {
     // Trim region to exactly 2 chars
     if (region_.length() > 2) {

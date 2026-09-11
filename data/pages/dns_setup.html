@@ -26,6 +26,22 @@
             </label>
         </div>
 
+        <div class="card toggle-row">
+            <span data-i18n="dns.block_non_aa">Block forward of non-A/AAAA</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-block-non-aa" onchange="toggleBlockNonAa()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="dns.allow_own_subnet">Allow only own subnet</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="dns-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
         <div class="card">
             <label data-i18n="dns.external_dns">External DNS Server</label>
             <input type="text" id="dns-external" placeholder="192.168.1.1">
@@ -36,13 +52,16 @@
     <div id="footer-placeholder"></div>
     <script src="../js/app.js"></script>
     <script>
-        // DNS General page — owns only {enabled, external_dns}. The logging /
-        // cache / local-hosts sub-pages own the rest of the settings object;
-        // every save merges with the current server state via saveDnsPartial().
+        // DNS General page — owns only {enabled, external_dns,
+        // block_forward_non_aa, allow_own_subnet}. The logging / cache /
+        // local-hosts sub-pages own the rest of the settings object; every save
+        // merges with the current server state via saveDnsPartial().
         function readDnsForm() {
             return {
                 enabled: document.getElementById('dns-enabled').checked,
                 external_dns: document.getElementById('dns-external').value,
+                block_forward_non_aa: document.getElementById('dns-block-non-aa').checked,
+                allow_own_subnet: document.getElementById('dns-allow-own-subnet').checked,
             };
         }
 
@@ -50,6 +69,8 @@
             const data = await fetchJSON('/api/dns/settings');
             document.getElementById('dns-enabled').checked = data.enabled !== false;
             document.getElementById('dns-external').value = data.external_dns || '';
+            document.getElementById('dns-block-non-aa').checked = data.block_forward_non_aa === true;
+            document.getElementById('dns-allow-own-subnet').checked = data.allow_own_subnet === true;
             updateDnsServerStatus(data);
         }
 
@@ -76,6 +97,27 @@
             } else {
                 const fresh = await fetchJSON('/api/dns/settings');
                 updateDnsServerStatus(fresh);
+            }
+        }
+
+        async function toggleBlockNonAa() {
+            const checked = document.getElementById('dns-block-non-aa').checked;
+            const result = await saveDnsPartial({ block_forward_non_aa: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-block-non-aa').checked = !checked;
+            }
+        }
+
+        // "Allow only own subnet": the DNS server then answers only clients
+        // inside the device's subnet (device IP + netmask from the DHCP page);
+        // everyone else gets no reply at all.
+        async function toggleAllowOwnSubnet() {
+            const checked = document.getElementById('dns-allow-own-subnet').checked;
+            const result = await saveDnsPartial({ allow_own_subnet: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('dns-allow-own-subnet').checked = !checked;
             }
         }
 

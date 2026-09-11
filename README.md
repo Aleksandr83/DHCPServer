@@ -1,6 +1,6 @@
 # DHCPServer
 
-**DHCPv4 + Caching DNS Proxy Server for Waveshare ESP32-P4-ETH**
+**DHCPv4 + Caching DNS Proxy + NTP Server for Waveshare ESP32-P4-ETH**
 
 ---
 
@@ -10,7 +10,7 @@
 
 ## 📖 Description
 
-DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-core RISC-V **ESP32-P4**). The device connects to the local network **over the onboard 10/100 Ethernet** (internal EMAC + **IP101GRI** PHY) — **WiFi/Bluetooth are not available on the ESP32-P4**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
+DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-core RISC-V **ESP32-P4**). The device connects to the local network **over the onboard 10/100 Ethernet** (internal EMAC + **IP101GRI** PHY) — **WiFi/Bluetooth are not available on the ESP32-P4**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, serves time over NTP (and syncs its own clock from an upstream NTP server), and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
 
 ---
 
@@ -18,13 +18,16 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 
 - **DHCPv4 Server** — configurable IP range, subnet, gateway, lease time, static MAC→IP bindings (enable + per-host DNS override)
 - **DNS Proxy** — pipeline: logging → local hosts → **internal (PSRAM) cache** → external cache (REST) → forwarding to external DNS
+- **Block non-A/AAAA forwarding** — optional toggle on DNS Setup: queries of any type other than A/AAAA that are not answered from local hosts get an immediate NODATA reply and are never sent to the external cache/upstream (the client falls back to A/AAAA)
 - **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache
 - **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
+- **Time Server (NTP)** — the device syncs its clock from an external NTP server (SNTP) and serves UTC time to LAN clients over NTP (UDP 123; configurable external NTP server, re-sync interval, named timezone selection with a custom-offset fallback; clock sync and serving can be switched on/off independently; optional terminal/REST logging of served requests). Until the clock has been synchronised (or set by hand) the server answers with LI=3/stratum 16 (RFC 5905) instead of a wrong time. The date/time can also be **set manually** from the web interface — typed in the selected timezone or taken from the computer's clock, and values earlier than the firmware build time are refused (the board has no battery-backed RTC)
+- **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
 - **Onboard Ethernet 10/100** — internal EMAC + IP101GRI PHY over RMII (no WiFi — ESP32-P4 has no radio)
-- **Web Interface** — dark theme, RU/EN localization, DHCP/DNS sub-pages
+- **Web Interface** — dark theme, RU/EN localization, DHCP/DNS/Time sub-pages
 - **REST API** — full device management over HTTP with Basic auth + rate limiting
 - **OTA Updates** — firmware update via web interface, dual OTA partitions for safe upgrades
-- **Terminal Menu** — UART console with `lan status`, password reset, version, reboot
+- **Terminal Menu** — UART console with `lan status`, `passwd reset`, `settings reset` (factory reset), `version` and `reboot`
 - **Link Status LED** — link status indication on boards with a user LED; compiled out on the ESP32-P4-ETH (it has no user LED)
 - **UART Console & Flashing** — via onboard USB-C / CH343P
 
@@ -73,7 +76,7 @@ enter download mode.
 > The firmware is **target-conditional** (`CONFIG_IDF_TARGET_ESP32P4`). The
 > ESP32-P4 path drives the internal RMII EMAC + **IP101GRI** PHY; the classic
 > ESP32 path drives an **ENC28J60** over SPI. Both share the same
-> DHCP/DNS/web application code.
+> DHCP/DNS/time/web application code.
 
 ### Option A — ESP32 + ENC28J60 (PlatformIO)
 
@@ -129,6 +132,12 @@ idf.py -p COMx monitor
 > [`scripts/upload_web_p4.ps1`](scripts/upload_web_p4.ps1) (flash the firmware
 > first, then the web UI).
 
+> ℹ️ `idf.py set-target` already performs a full reconfigure and `idf.py build`
+> re-runs CMake when `CMakeLists.txt`/`sdkconfig*` change, so no separate step
+> is needed. Run `idf.py reconfigure` after **adding or removing a source
+> file**: ESP-IDF expands `SRC_DIRS` with a plain `file(GLOB ...)` (no
+> `CONFIGURE_DEPENDS`), so a brand-new file would otherwise be ignored.
+
 Target configuration files for this build:
 
 - [`sdkconfig.defaults.esp32p4`](sdkconfig.defaults.esp32p4) — EMAC instead of
@@ -152,7 +161,7 @@ Full build/flash/web-UI/OTA/troubleshooting walkthrough:
 | IPv6 | `fd12:3456:789a:0001:021b:21ff:fe6b:8c4d` |
 | External DNS | `192.168.1.1` |
 
-Configured in `src/eth/EthManager.cpp`.
+Default addresses come from the `EthManager` constructor (`src/eth/EthManager.h`, classic ESP32: `src/wifi/WiFiManager.h`); the address the DHCP server hands out as its own (`server_ip`, default `192.168.1.201`) is configurable in the web UI and stored in NVS (`src/core/Config.cpp`).
 
 ### Firmware Version
 
@@ -161,14 +170,15 @@ Defined in menuconfig (`Kconfig.projbuild`) or `sdkconfig.defaults`:
 | Field | Format | Default | Description |
 |-------|--------|---------|-------------|
 | `aa` | 00-99 | `01` | Global version |
-| `bb` | 00-99 | `02` | Device/product code |
-| `xxx` | 000-999 | `028` | Release number |
+| `bb` | 00-99 | `02` / `03` | Device code — `02` = ESP32 + ENC28J60, `03` = ESP32-P4-ETH |
+| `xxx` | 000-999 | `041` | Release number |
 | `cc` | 00-99 | `00` | Sub-release |
 | `YY` | 00-99 | `26` | Year (2026) |
-| `MM` | 01-12 | `08` | Month |
+| `MM` | 01-12 | `09` | Month |
 | `RR` | 2 chars | `RU` | Region |
 
-Example: `01.02.028.00.26.08.RU` — see [Docs/FirmwareVersion.md](Docs/FirmwareVersion.md).
+Example: `01.03.041.00.26.09.RU` — see [Docs/FirmwareVersion.md](Docs/FirmwareVersion.md).
+The minimum manual date/time (`CONFIG_FW_MIN_DATETIME`, hour granularity) is a build constant refreshed by the version scripts together with the release.
 
 ### Partition Table
 
@@ -213,18 +223,23 @@ Access: `http://192.168.1.201` (default static IP)
 
 | Page | Route | Description |
 |------|-------|-------------|
-| Home | `/index.html` | System status (network, RAM, storage usage) |
-| DHCP ▾ Setup | `/pages/dhcp_setup.html` | Server status, IP, address range |
-| DHCP ▾ Logging | `/pages/dhcp_logging.html` | DHCP REST logging (URL/auth/Test) |
+| Home | `/index.html` | System status: device date/time, DHCP/DNS/NTP state, CPU/RAM, storage, cache stats |
+| DHCP ▾ Setup | `/pages/dhcp_setup.html` | Server status, IP, address range, lease table cap |
 | DHCP ▾ DNS | `/pages/dhcp_dns.html` | Built-in DNS status, mode/address |
 | DHCP ▾ Static Bindings | `/pages/dhcp_static.html` | Static MAC→IP bindings (enable/DNS) |
-| DNS ▾ Setup | `/pages/dns_setup.html` | DNS forwarding, mode/address |
-| DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
+| DHCP ▾ Logging | `/pages/dhcp_logging.html` | DHCP REST logging (URL/auth/Test) |
+| DNS ▾ Setup | `/pages/dns_setup.html` | DNS forwarding, mode/address, query filters (LAN-only, non-A/AAAA blocking) |
 | DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, save/load `cache.dat` with progress |
 | DNS ▾ External Cache | `/pages/dns_cache.html` | External REST cache URL, cache stats |
 | DNS ▾ Local Hosts | `/pages/dns_local_hosts.html` | Local domain→IP mappings |
-| Security | `/pages/security.html` | Auth settings, rate limiting |
-| Help ▾ Version | `/pages/version.html` | Firmware version info |
+| DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
+| Time ▾ General | `/pages/ntp_setup.html` | NTP server: on/off, LAN-only filter + reply rate limit, clock sync on/off, external NTP, timezone, sync interval, manual date/time setting (typed or taken from the computer) |
+| Time ▾ Logging | `/pages/ntp_logging.html` | NTP request logging (terminal + external REST URL/auth/Test) |
+| Settings ▾ Security | `/pages/security.html` | Web login (username/password), max attempts, lockout period |
+| Settings ▾ Import | `/pages/settings_import.html` | Restore settings from an exported JSON file |
+| Settings ▾ Export | `/pages/settings_export.html` | Download the current settings as a JSON file |
+| Settings ▾ Device | `/pages/settings_device.html` | Reboot, factory reset (erases all settings) |
+| Help ▾ Version | `/pages/version.html` | Firmware version info, OTA firmware upload, web-file (SPIFFS) upload |
 
 ### Language
 
@@ -253,12 +268,21 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/dns/local-hosts` | Update local DNS host mappings |
 | GET | `/api/security/settings` | Security settings (no password) |
 | POST | `/api/security/settings` | Update security settings |
+| GET | `/api/settings/export` | Export all settings as JSON (passwords excluded) |
+| POST | `/api/settings/import` | Import settings from JSON |
+| POST | `/api/settings/reset` | Factory reset all settings and reboot |
+| POST | `/api/device/reboot` | Reboot the device |
 | POST | `/api/ota/upload` | Upload firmware (multipart) |
+| POST | `/api/web/file?path=<rel>` | Upload a web (SPIFFS) file |
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
 | GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
 | GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
 | POST | `/api/dns/internal-cache/save` | Save the PSRAM cache to `cache.dat` (async) |
 | POST | `/api/dns/internal-cache/load` | Restore the cache from `cache.dat` (async) |
+| GET | `/api/time/settings` | NTP server configuration + status |
+| POST | `/api/time/settings` | Update NTP server configuration |
+| GET | `/api/time/now` | Current device time (UTC/local, unix) |
+| POST | `/api/time/set` | Set the device clock manually (local date/time + UTC offset) |
 
 Full documentation: [Docs/Rest.md](Docs/Rest.md)
 
@@ -273,8 +297,9 @@ dhcp> help
 Available commands:
   lan status                  — Show LAN connection status and IP
   passwd reset                — Reset web password to default (admin)
+  settings reset              — Factory reset ALL settings to defaults and reboot
   version                     — Show firmware version
-  help                         — Show this help
+  help                        — Show this help
   reboot                      — Reboot the device
 ```
 
@@ -290,18 +315,28 @@ DHCPServer/
 ├── platformio.ini           # PlatformIO configuration (ESP32 + ENC28J60)
 ├── sdkconfig.defaults       # Shared ESP-IDF defaults (ESP32)
 ├── sdkconfig.defaults.esp32p4 # ESP32-P4-ETH overrides (EMAC, 32 MB flash)
+├── 3DModel/                 # Blender model of the device enclosure (.blend)
+├── components/
+│   └── enc28j60/           # ENC28J60 SPI Ethernet driver (classic ESP32)
 ├── partitions/
 │   ├── dhcp_partitions.csv      # 4 MB table (ESP32 + ENC28J60)
 │   └── dhcp_partitions_p4.csv   # 32 MB table (ESP32-P4-ETH)
+├── scripts/
+│   ├── inc_firmware_ver.py     # Version bump (--sub / --rel / --min-only)
+│   ├── set_firmware_date.py    # Release date + minimum manual date/time
+│   ├── kconfig_tools.py        # Shared helpers used by both scripts above
+│   ├── upload_web_p4.ps1       # Upload data/ to the SPIFFS partition (ESP32-P4)
+│   └── upload_spiffs.py        # SPIFFS image helper (PlatformIO / legacy)
 ├── src/
 │   ├── main.cpp            # Application entry point
 │   ├── CMakeLists.txt      # Component sources (wifi/ excluded on ESP32-P4)
 │   ├── Kconfig.projbuild   # Project configuration options
-│   ├── core/               # Version, Config
+│   ├── core/               # Version, Config, Subnet helper, CPU monitor
 │   ├── eth/                # Ethernet manager (ENC28J60 SPI on ESP32 /
 │   │                       #   internal EMAC + IP101GRI on ESP32-P4-ETH)
 │   ├── dhcp/               # DHCP server
 │   ├── dns/                # DNS proxy, cache, logger
+│   ├── time/               # NTP server + SNTP client + logger + date/time math
 │   ├── web/                # HTTP server, auth, REST API
 │   ├── led/                # LED controller (no-op on ESP32-P4-ETH)
 │   ├── menu/               # Terminal menu
@@ -309,12 +344,15 @@ DHCPServer/
 │   └── wifi/               # WiFiManager (ESP32 only — not built on ESP32-P4)
 ├── data/                   # SPIFFS web content
 │   ├── index.html
+│   ├── login.html          # Auth gate (served at /)
+│   ├── header.html / footer.html
 │   ├── css/style.css
 │   ├── js/app.js
 │   ├── i18n/{ru,en}.json
-│   └── pages/
+│   └── pages/              # DHCP / DNS / Time / Settings / Help sub-pages
 ├── test/                   # Unit tests (host-style, no board needed)
 ├── Docs/                   # Documentation
+│   ├── images/              # Board photos and screenshots
 │   ├── ENC28J60.md
 │   ├── ESP32-P4-ETH.md      # P4 build/flash/web-UI guide
 │   ├── ESP-Prog.md
@@ -334,26 +372,39 @@ DHCPServer/
 
 ## 🧪 Testing
 
-Each `test/test_*.cpp` defines its own `app_main()` — tests are built and run
-as firmware on the board through PlatformIO against the ESP32 environment
-(the shared logic classes are target-independent, so the same code is what the
-ESP32-P4 build compiles too):
+Tests live in `test/test_*.cpp`; each file defines its own entry point
+(`app_main`).
+
+Modules with no ESP-IDF dependency are compiled and run **on the PC** (fast,
+no board needed) — this is how `Subnet` and `TimeMath` are verified, with a
+small `host_main.cpp` shim that just calls `esp_test_app_main()`:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I. \
+    test/test_subnet.cpp src/core/Subnet.cpp host_main.cpp -o test_subnet
+```
+
+The same files are also built and run **on the board** through PlatformIO
+(the shared logic classes are target-independent, so the board runs the same
+code the ESP32-P4 build compiles):
 
 ```bash
 pio test -e esp32dev
 ```
 
+Test files:
+- `test/test_subnet.cpp` — IPv4 subnet arithmetic for the DNS/NTP LAN filters (host-runnable)
+- `test/test_time.cpp` — date/time parsing and Unix conversion (host-runnable)
+- `test/test_version.cpp` — Version formatting and components
+- `test/test_config.cpp` — Config read/write roundtrip
+- `test/test_auth.cpp` — Auth manager with lockout
+- `test/test_dhcp.cpp` — DHCP server lifecycle
+- `test/test_dns.cpp` — DNS cache stub
+- `test/test_wifi.cpp` — WiFiManager (needs hardware) and LedController
+
 > No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
 > has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4
 > build via native `idf.py` (see [Quick Start](#-quick-start)).
-
-Test files:
-- `test/test_version.cpp` — Version formatting and components
-- `test/test_config.cpp` — Config read/write roundtrip
-- `test/test_wifi.cpp` — WiFiManager (needs hardware) and LedController
-- `test/test_dhcp.cpp` — DHCP server lifecycle
-- `test/test_dns.cpp` — DNS cache stub
-- `test/test_auth.cpp` — Auth manager with lockout
 
 ---
 

@@ -74,6 +74,20 @@ public:
      */
     void reloadStaticBindings() override;
 
+    /**
+     * @brief (Re)apply the lease/offer table cap from the DHCP config.
+     *
+     * 0 means "auto" = 2× the configured pool size, clamped to 8..512; an
+     * explicit value is clamped to the same range. Called from start() and
+     * whenever the DHCP settings change.
+     */
+    void applyLeaseLimit() override;
+
+    /** @brief Effective cap currently in force (never 0 after applyLeaseLimit). */
+    uint32_t maxLeaseEntriesEffective() const override { return maxLeaseEntriesEffective_; }
+    /** @brief Requests refused because the table was full (diagnostics). */
+    uint32_t leaseLimitRejects() const override { return leaseLimitRejects_; }
+
 private:
     // Internal task function
     static void serverTask(void* arg);
@@ -103,8 +117,16 @@ private:
     // Lease management
     void addLease(const uint8_t* mac, uint32_t ip);
     void removeExpiredLeases();
-    void reserveOffer(const uint8_t* mac, uint32_t ip);
+    bool reserveOffer(const uint8_t* mac, uint32_t ip);
     uint32_t getCurrentTimeSec() const;
+
+    /**
+     * @brief True when a NEW entry (ip not yet in the table) may be inserted.
+     *
+     * Expired leases are purged first, so a table that only looks full because
+     * of stale offers frees itself instead of refusing a legitimate client.
+     */
+    bool canAddLeaseEntry(uint32_t ip);
 
     // How long an offered (not yet confirmed) IP stays reserved
     static constexpr uint32_t kOfferHoldSec = 60;
@@ -137,6 +159,12 @@ private:
 
     // Leases: IP (net order) -> Lease
     mutable std::map<uint32_t, DhcpLease> leases_;
+
+    // Lease-table cap (applyLeaseLimit): configured value (0 = auto) plus the
+    // effective one actually enforced, and a refusal counter for diagnostics.
+    uint32_t maxLeaseEntries_ = 0;
+    uint32_t maxLeaseEntriesEffective_ = 64;
+    uint32_t leaseLimitRejects_ = 0;
 
     // Static bindings (cached)
     struct StaticEntry {

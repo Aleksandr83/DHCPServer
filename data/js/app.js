@@ -83,6 +83,9 @@ function applyTranslations() {
         }
     });
     document.documentElement.lang = currentLang;
+    // Let pages re-render JS-generated (non data-i18n) text on language change
+    // (e.g. <option> labels built at runtime).
+    document.dispatchEvent(new CustomEvent('i18n-applied'));
 }
 
 function setLanguage(lang) {
@@ -113,6 +116,14 @@ async function saveDnsPartial(localFields) {
 async function saveDhcpPartial(localFields) {
     const server = await fetchJSON('/api/dhcp/settings');
     return postJSON('/api/dhcp/settings', { ...server, ...localFields });
+}
+
+/* Same helper for the Time (NTP) settings — one object on the server, but the
+   Time section is split into two sub-pages (General / Logging), each owning a
+   subset of the fields. */
+async function saveTimePartial(localFields) {
+    const server = await fetchJSON('/api/time/settings');
+    return postJSON('/api/time/settings', { ...server, ...localFields });
 }
 
 /* Run a "Test connection" for a DNS/DHCP REST block. The test runs ENTIRELY on
@@ -234,11 +245,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Update status on index page
     if (document.getElementById('dhcp-status')) {
-        updateStatus();
-        // Auto-refresh every 5 s — live bars like Task Manager. Polling too
-        // often (2 s) opens many TCP connections and exhausts the httpd
-        // socket pool ("httpd_accept_conn: error in accept").
-        setInterval(updateStatus, 5000);
+        // Two requests per poll (status + time), but issued SEQUENTIALLY —
+        // polling too often or in parallel opens many TCP connections and
+        // exhausts the httpd socket pool ("httpd_accept_conn: error in accept").
+        const poll = async () => {
+            await updateStatus();
+            await updateDeviceTime();
+        };
+        poll();
+        // Auto-refresh every 5 s — live bars like Task Manager.
+        setInterval(poll, 5000);
     }
 });
 
@@ -249,18 +265,60 @@ function setMeter(id, pct) {
     bar.style.width = v + '%';
 }
 
+/* Device time for DISPLAY: the API/browser fields use the ISO-ish wire format
+   "YYYY-MM-DD HH:MM:SS", but the clock readouts are shown day-first and without
+   seconds — "DD-MM-YYYY HH:MM" (the pages poll every 5 s, so seconds would only
+   tick in jumps). Anything that does not parse as the wire format is returned
+   untouched, so an unset/unsynchronised stamp never renders as garbage. */
+function formatDeviceTimeDisplay(stamp) {
+    if (!stamp) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(stamp);
+    if (!m) return stamp;
+    return m[3] + '-' + m[2] + '-' + m[1] + ' ' + m[4] + ':' + m[5];
+}
+
+/* Device clock row on the main page. Local time (the timezone selected on the
+   Time Server page) plus a "not synchronized" note on its own line below the
+   value while the clock has never been synchronised (and was not set by hand
+   either). */
+async function updateDeviceTime() {
+    const el = document.getElementById('device-time');
+    if (!el) return;
+    try {
+        const data = await fetchJSON('/api/time/now');
+        el.textContent = formatDeviceTimeDisplay(data.now_local || data.now_utc) || '--';
+        el.className = 'status-value';
+        if (!data.synced) {
+            const note = document.createElement('span');
+            note.className = 'unsynced-note';
+            note.textContent = tr('app.time_unsynced');
+            el.appendChild(note);
+        }
+    } catch (e) {
+        /* ignore — the next poll retries */
+    }
+}
+
 async function updateStatus() {
     try {
         const data = await fetchJSON('/api/status');
         const dhcpEl = document.getElementById('dhcp-status');
         if (dhcpEl) {
             dhcpEl.textContent = data.dhcp_running ? tr('status.running') : tr('status.stopped');
-            dhcpEl.className = data.dhcp_running ? 'status-ok' : 'status-err';
+            // Keep `status-value` (right alignment + weight) — assigning only the
+            // colour class dropped it and made the value jump to the left after
+            // the first poll.
+            dhcpEl.className = 'status-value ' + (data.dhcp_running ? 'status-ok' : 'status-err');
         }
         const dnsEl = document.getElementById('dns-status');
         if (dnsEl) {
             dnsEl.textContent = data.dns_running ? tr('status.running') : tr('status.stopped');
-            dnsEl.className = data.dns_running ? 'status-ok' : 'status-err';
+            dnsEl.className = 'status-value ' + (data.dns_running ? 'status-ok' : 'status-err');
+        }
+        const ntpEl = document.getElementById('ntp-status');
+        if (ntpEl) {
+            ntpEl.textContent = data.ntp_running ? tr('status.running') : tr('status.stopped');
+            ntpEl.className = 'status-value ' + (data.ntp_running ? 'status-ok' : 'status-err');
         }
         // CPU per-core bars
         const pct0 = data.cpu_load0 != null ? data.cpu_load0 : 0;

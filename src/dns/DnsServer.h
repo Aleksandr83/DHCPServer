@@ -60,6 +60,30 @@ public:
     void setLogTerminal(bool enabled);
 
     /**
+     * @brief Enable/disable blocking of non-A/AAAA query forwarding.
+     *
+     * When enabled, queries whose type is neither A (1) nor AAAA (28) and
+     * which are not answered from local hosts are answered with NODATA
+     * instead of being sent to the external cache / upstream DNS.
+     */
+    void setBlockForwardNonAA(bool enabled);
+
+    /**
+     * @brief (Re)apply the "own subnet only" client filter.
+     *
+     * Re-reads the on/off flag from the DNS config and the network definition
+     * (device address + netmask) from the DHCP settings, since that page owns
+     * the subnet. Called from start() and whenever the DNS or DHCP settings
+     * change. When the flag is on but the DHCP subnet cannot be parsed the
+     * filter is skipped with a warning (fail-open) — a broken subnet must not
+     * lock the whole LAN out of DNS.
+     */
+    void applySubnetFilter();
+
+    /** @brief DNS queries dropped by the own-subnet filter (for diagnostics). */
+    uint32_t foreignDroppedCount() const { return foreignDropped_; }
+
+    /**
      * @brief Re-point the REST logger at the local hosts map.
      *
      * Called at startup and after Local Hosts change at runtime, so the
@@ -258,6 +282,18 @@ private:
 
     // Terminal logging flag (gates the per-query ESP_LOGI lines)
     bool logTerminal_ = false;
+
+    // When true, non-A/AAAA queries that miss local hosts are answered with
+    // NODATA instead of being forwarded to the external cache / upstream DNS.
+    bool blockForwardNonAA_ = false;
+
+    // Own-subnet client filter (allowOwnSubnet config). subnetNet_/subnetMask_
+    // are host byte order (0 mask = no usable subnet → filter skipped).
+    bool allowOwnSubnet_ = false;
+    uint32_t subnetNet_ = 0;
+    uint32_t subnetMask_ = 0;
+    uint32_t foreignDropped_ = 0;      // queries dropped by the filter
+    uint64_t lastForeignLogMs_ = 0;    // throttles the drop log line
 
     // Local hosts (domain → IP)
     std::map<std::string, std::vector<std::string>> localHosts_;

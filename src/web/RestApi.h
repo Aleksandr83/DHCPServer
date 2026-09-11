@@ -12,6 +12,7 @@ namespace dhcp {
 namespace wifi { class IWiFiManager; }
 namespace dhcp { class IDhcpServer; }
 namespace dns  { class DnsServer; }
+namespace time { class TimeServer; }
 namespace web  { class AuthManager; }
 } // namespace dhcp
 
@@ -26,6 +27,7 @@ public:
     static void init(::dhcp::wifi::IWiFiManager* wifi,
                      ::dhcp::dhcp::IDhcpServer* dhcpSrv,
                      ::dhcp::dns::DnsServer* dnsSrv,
+                     ::dhcp::time::TimeServer* timeSrv,
                      ::dhcp::web::AuthManager* auth);
 
     static esp_err_t handleGetStatus(httpd_req* req);
@@ -53,6 +55,11 @@ public:
     static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
     static esp_err_t handlePostInternalCacheSave(httpd_req* req);
     static esp_err_t handlePostInternalCacheLoad(httpd_req* req);
+    // Time (NTP) server
+    static esp_err_t handleGetTimeSettings(httpd_req* req);
+    static esp_err_t handlePostTimeSettings(httpd_req* req);
+    static esp_err_t handleGetTimeNow(httpd_req* req);
+    static esp_err_t handlePostTimeSet(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);
@@ -70,6 +77,7 @@ private:
     static ::dhcp::wifi::IWiFiManager* s_wifi;
     static ::dhcp::dhcp::IDhcpServer*  s_dhcp;
     static ::dhcp::dns::DnsServer*     s_dns;
+    static ::dhcp::time::TimeServer*   s_time;
     static ::dhcp::web::AuthManager*   s_auth;
 };
 

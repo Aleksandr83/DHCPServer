@@ -14,10 +14,12 @@ namespace web {
 
 WebServer::WebServer(::dhcp::wifi::IWiFiManager& wifi,
                      ::dhcp::dhcp::IDhcpServer& dhcpSrv,
-                     ::dhcp::dns::DnsServer& dnsSrv)
+                     ::dhcp::dns::DnsServer& dnsSrv,
+                     ::dhcp::time::TimeServer& timeSrv)
     : wifi_(wifi)
     , dhcpSrv_(dhcpSrv)
     , dnsSrv_(dnsSrv)
+    , timeSrv_(timeSrv)
 {
 }
 
@@ -37,12 +39,12 @@ bool WebServer::start()
     auth_.ensureConfigLoaded();
 
     // Initialize RestApi with subsystem references
-    RestApi::init(&wifi_, &dhcpSrv_, &dnsSrv_, &auth_);
+    RestApi::init(&wifi_, &dhcpSrv_, &dnsSrv_, &timeSrv_, &auth_);
 
     // Configure HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 48;
+    config.max_uri_handlers = 57;
     // The settings export/import handlers build large JSON and read big POST
     // bodies on the httpd task — the default 4096-byte stack overflows (panic:
     // LoadProhibited in the FreeRTOS scheduler, stack filled with 0xa5). Raise
@@ -146,6 +148,11 @@ void WebServer::registerRoutes()
     reg("/api/dns/internal-cache/progress", HTTP_GET, getInternalCacheProgressHandler);
     reg("/api/dns/internal-cache/save", HTTP_POST, postInternalCacheSaveHandler);
     reg("/api/dns/internal-cache/load", HTTP_POST, postInternalCacheLoadHandler);
+    // Time (NTP) server
+    reg("/api/time/settings",        HTTP_GET,   getTimeSettingsHandler);
+    reg("/api/time/settings",        HTTP_POST,  postTimeSettingsHandler);
+    reg("/api/time/now",             HTTP_GET,   getTimeNowHandler);
+    reg("/api/time/set",             HTTP_POST,  postTimeSetHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -166,6 +173,8 @@ void WebServer::registerRoutes()
     reg("/pages/dns_cache.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_internal.html", HTTP_GET, staticFileHandler);
     reg("/pages/dns_local_hosts.html", HTTP_GET, staticFileHandler);
+    reg("/pages/ntp_setup.html", HTTP_GET, staticFileHandler);
+    reg("/pages/ntp_logging.html", HTTP_GET, staticFileHandler);
     reg("/pages/security.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);

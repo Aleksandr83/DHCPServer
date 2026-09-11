@@ -93,6 +93,21 @@ public:
     virtual void reloadStaticBindings() = 0;
 
     /**
+     * @brief Re-apply the lease/offer table cap from the configuration.
+     *
+     * 0 means "auto" = 2× the configured pool size (clamped 8..512); an
+     * explicit value is clamped to the same range. Called at start and after
+     * the DHCP settings are saved.
+     */
+    virtual void applyLeaseLimit() = 0;
+
+    /** @brief Effective cap on the lease/offer table currently enforced. */
+    virtual uint32_t maxLeaseEntriesEffective() const = 0;
+
+    /** @brief Requests refused because the lease table was full. */
+    virtual uint32_t leaseLimitRejects() const = 0;
+
+    /**
      * @brief Get state as string.
      */
     virtual std::string stateString() const = 0;

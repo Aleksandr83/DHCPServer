@@ -27,6 +27,10 @@ struct DhcpConfig {
     std::string subnet = "255.255.255.0";
     std::string gateway = "192.168.1.1";
     uint32_t leaseTimeSec = 86400; // 24h
+    // Hard cap on the lease/offer table (DoS hardening: a DHCP starvation
+    // flood with random MACs must not grow it without bound). 0 = auto
+    // (2× the pool size, clamped 8..512); otherwise clamped to 8..512.
+    uint32_t maxLeaseEntries = 0;
     bool logTerminal = false;
     // DNS handed to DHCP clients: "auto" = built-in DNS server if running,
     // otherwise the router; "manual" = use dnsAddress
@@ -85,6 +89,14 @@ struct DnsConfig {
     bool    cacheInternal = false;   // master switch
     uint32_t cacheInternalSizeMb = 20;  // max table size in MB (1..20)
     bool cacheInternalIgnoreTtl = false;// store TTL but never expire by it
+    // Do not forward queries of any type other than A/AAAA to the external
+    // cache/upstream DNS — answer NODATA instead (client falls back to A/AAAA).
+    bool blockForwardNonAA = false;
+    // Answer only clients inside the device's own subnet (address + netmask
+    // taken from the DHCP settings, see core::Subnet). Queries from other
+    // addresses are silently dropped, so the device is not an open resolver.
+    // ON by default — an appliance in a LAN should not be an open resolver.
+    bool allowOwnSubnet = true;
 };
 
 /**
@@ -107,6 +119,34 @@ struct SecurityConfig {
     std::string password = "admin";
     uint32_t maxAttempts = 5;
     uint32_t lockoutPeriodSec = 300; // 5 min
+};
+
+/**
+ * @brief Time (NTP) server configuration.
+ *
+ * The device synchronises its clock from an external NTP server (SNTP) and
+ * serves UTC time to LAN clients over NTP (UDP port 123). The timezone offset
+ * is used only for local display/logging on the device itself.
+ */
+struct TimeConfig {
+    bool enabled = false;             // master switch for the NTP server
+    bool syncEnabled = true;          // SNTP client: sync the device clock
+    std::string externalNtp = "pool.ntp.org"; // upstream NTP server (SNTP)
+    std::string timezone = "Europe/Moscow"; // zone id (display only); empty = custom offset
+    int32_t utcOffsetHours = 3;       // timezone offset (display only, MSK)
+    uint32_t syncIntervalSec = 86400; // SNTP re-sync interval (24 h)
+    // Answer only clients inside the device's own subnet (address + netmask
+    // from the DHCP settings, see core::Subnet) — the same policy as the DNS
+    // filter. ON by default: an appliance in a LAN should not be open.
+    bool allowOwnSubnet = true;
+    // Maximum NTP replies per second and per client address (1..100).
+    uint32_t rateLimitPerSec = 5;
+    bool logTerminal = false;         // log NTP requests to the terminal
+    bool logRest = false;             // log NTP requests to an external REST
+    std::string logUrl;               // REST logging URL
+    bool logAuthEnabled = false;      // HTTP Basic auth for REST logging
+    std::string logAuthUser;
+    std::string logAuthPassword;
 };
 
 /**
@@ -157,6 +197,10 @@ public:
     // ─── Security ────────────────────────────────────
     SecurityConfig getSecurity() const;
     void setSecurity(const SecurityConfig& cfg);
+
+    // ─── Time (NTP) server ───────────────────────────
+    TimeConfig getTime() const;
+    void setTime(const TimeConfig& cfg);
 
     // ─── Factory reset ───────────────────────────────
     // Erases the whole "dhcp" NVS namespace. All getters then fall back to

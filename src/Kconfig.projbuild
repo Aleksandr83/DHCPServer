@@ -35,3 +35,18 @@ menu "Firmware version"
         default "RU"
 
 endmenu
+
+menu "Time server"
+
+    config FW_MIN_DATETIME
+        string "Minimum manual date/time (YYYY-MM-DD HH:00:00)"
+        default "2026-09-01 00:00:00"
+        help
+            Lowest date/time the operator may enter on the Time Server "General"
+            page — hour granularity: the minutes and seconds are always zero.
+            It is a build constant — the version scripts
+            (inc_firmware_ver.py / set_firmware_date.py) keep it at the current
+            build date so the clock can never be set to a meaningless value
+            (e.g. 1970). The device does not enforce it; the web page does.
+
+endmenu

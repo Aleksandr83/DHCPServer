@@ -51,6 +51,10 @@
             <label data-i18n="dhcp.lease_time">Lease Time (s)</label>
             <input type="number" id="dhcp-lease" placeholder="86400">
 
+            <label data-i18n="dhcp.max_leases" style="margin-top:0.8rem;display:block;">Max lease entries</label>
+            <input type="number" id="dhcp-max-leases" min="0" max="512" step="1" placeholder="0">
+            <p id="dhcp-max-leases-hint" style="margin:0.3rem 0 0;color:var(--text-secondary);font-size:0.8rem;"></p>
+
             <br>
             <button class="btn btn-primary" onclick="saveDhcpSettings()" data-i18n="dhcp.save">Save</button>
         </div>
@@ -60,9 +64,9 @@
     <script src="../js/app.js"></script>
     <script>
         // DHCP General page — owns {enabled, server_ip, start_ip, end_ip,
-        // subnet, gateway, lease_time}. The logging / dns / static-bindings
-        // sub-pages own the rest; every save merges with the current server
-        // state via saveDhcpPartial().
+        // subnet, gateway, lease_time, max_lease_entries}. The logging / dns /
+        // static-bindings sub-pages own the rest; every save merges with the
+        // current server state via saveDhcpPartial().
         function readDhcpForm() {
             return {
                 enabled: document.getElementById('dhcp-enabled').checked,
@@ -72,11 +76,40 @@
                 subnet: document.getElementById('dhcp-subnet').value,
                 gateway: document.getElementById('dhcp-gateway').value,
                 lease_time: parseInt(document.getElementById('dhcp-lease').value) || 86400,
+                // 0 = auto (2x the pool size); the device clamps 8..512.
+                max_lease_entries: (() => {
+                    const v = parseInt(document.getElementById('dhcp-max-leases').value, 10);
+                    if (isNaN(v) || v <= 0) return 0;
+                    return v > 512 ? 512 : v;
+                })(),
             };
+        }
+
+        // Shows the effective cap the device is enforcing (useful when the
+        // field is 0 = auto, and to see the refusal counter).
+        // `updateServerStatus()` and `updateLeaseLimitHint()` build their text
+        // with tr(), which returns the raw KEY until the dictionary is loaded —
+        // so they are re-rendered when the i18n pass finishes (and on every
+        // language switch).
+        let lastDhcpData = null;
+
+        function updateLeaseLimitHint(data) {
+            const el = document.getElementById('dhcp-max-leases-hint');
+            if (!el) return;
+            const eff = data.max_lease_entries_effective;
+            if (!eff) { el.textContent = ''; return; }
+            let text = tr('dhcp.max_leases_effective') + ' ' + eff;
+            const used = data.lease_count || 0;
+            text += ' · ' + tr('dhcp.leases_used') + ' ' + used;
+            if (data.lease_limit_rejects > 0) {
+                text += ' · ' + tr('dhcp.lease_rejects') + ' ' + data.lease_limit_rejects;
+            }
+            el.textContent = text;
         }
 
         async function loadDhcpSettings() {
             const data = await fetchJSON('/api/dhcp/settings');
+            lastDhcpData = data;
             document.getElementById('dhcp-enabled').checked = !!data.enabled;
             document.getElementById('dhcp-server-ip').value = data.server_ip || '';
             document.getElementById('dhcp-start').value = data.start_ip || '';
@@ -84,6 +117,9 @@
             document.getElementById('dhcp-subnet').value = data.subnet || '';
             document.getElementById('dhcp-gateway').value = data.gateway || '';
             document.getElementById('dhcp-lease').value = data.lease_time || '';
+            document.getElementById('dhcp-max-leases').value =
+                (data.max_lease_entries === undefined ? 0 : data.max_lease_entries);
+            updateLeaseLimitHint(data);
             updateServerStatus(data);
         }
 
@@ -135,11 +171,19 @@
 
         loadDhcpSettings();
 
+        document.addEventListener('i18n-applied', () => {
+            if (!lastDhcpData) return;
+            updateServerStatus(lastDhcpData);
+            updateLeaseLimitHint(lastDhcpData);
+        });
+
         // Periodic refresh of server status (every 5s)
         setInterval(async () => {
             try {
                 const data = await fetchJSON('/api/dhcp/settings');
+                lastDhcpData = data;
                 updateServerStatus(data);
+                updateLeaseLimitHint(data);
             } catch (e) { /* ignore */ }
         }, 5000);
     </script>

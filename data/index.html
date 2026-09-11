@@ -15,12 +15,20 @@
         <p data-i18n="app.subtitle">DHCP &amp; Caching DNS Server</p>
         <div id="status">
             <div class="status-row">
-                <span class="status-label" data-i18n="app.dhcp_status">DHCP Server:</span>
+                <span class="status-label" data-i18n="app.device_time">Device date/time:</span>
+                <span class="status-value" id="device-time">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.dhcp_status">DHCP server:</span>
                 <span id="dhcp-status" class="status-value">--</span>
             </div>
             <div class="status-row">
-                <span class="status-label" data-i18n="app.dns_status">DNS Server:</span>
+                <span class="status-label" data-i18n="app.dns_status">DNS server:</span>
                 <span id="dns-status" class="status-value">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="app.ntp_status">NTP server:</span>
+                <span id="ntp-status" class="status-value">--</span>
             </div>
             <div class="status-row">
                 <span class="status-label" data-i18n="app.cpu_load">CPU Load:</span>

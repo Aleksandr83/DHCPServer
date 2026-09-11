@@ -1,5 +1,6 @@
 #include "DnsServer.h"
 #include "../core/Config.h"
+#include "../core/Subnet.h"
 
 #include <cstdio>
 #include <cstring>
@@ -96,6 +97,8 @@ bool DnsServer::start()
     // Built-in PSRAM cache config (hash table; enabled only when PSRAM exists).
     applyInternalCache(dnsCfg.cacheInternal, dnsCfg.cacheInternalSizeMb,
                        dnsCfg.cacheInternalIgnoreTtl);
+    blockForwardNonAA_ = dnsCfg.blockForwardNonAA;
+    applySubnetFilter();
     // The cache lookup runs in a dedicated worker task so the DNS server
     // task is never blocked on an HTTP request (a synchronous lookup here
     // stalled every query and made sites time out).
@@ -326,6 +329,50 @@ void DnsServer::setLogTerminal(bool enabled)
     logger_.setLogTerminal(enabled);
     cache_.setTerminalLogging(enabled);
     ESP_LOGI(TAG, "Terminal logging %s", enabled ? "enabled" : "disabled");
+}
+
+void DnsServer::setBlockForwardNonAA(bool enabled)
+{
+    blockForwardNonAA_ = enabled;
+    ESP_LOGI(TAG, "Block forward of non-A/AAAA queries %s",
+             enabled ? "enabled" : "disabled");
+}
+
+void DnsServer::applySubnetFilter()
+{
+    const auto dnsCfg = core::Config::instance().getDns();
+    allowOwnSubnet_ = dnsCfg.allowOwnSubnet;
+
+    if (!allowOwnSubnet_) {
+        subnetNet_ = 0;
+        subnetMask_ = 0;
+        ESP_LOGI(TAG, "Own-subnet filter disabled");
+        return;
+    }
+
+    // The subnet is owned by the DHCP page (device address + netmask).
+    const auto dhcpCfg = core::Config::instance().getDhcp();
+    uint32_t ip = 0, mask = 0;
+    const bool ipOk = core::Subnet::parseIp4(dhcpCfg.serverIp, ip);
+    const bool maskOk = core::Subnet::parseIp4(dhcpCfg.subnet, mask) &&
+                        core::Subnet::isValidMask(mask);
+    if (!ipOk || !maskOk) {
+        // Fail-open with a loud warning: a broken subnet must not black-hole
+        // the LAN's DNS traffic.
+        allowOwnSubnet_ = false;
+        subnetNet_ = 0;
+        subnetMask_ = 0;
+        ESP_LOGW(TAG, "Own-subnet filter requested but the DHCP subnet is "
+                      "invalid (server_ip='%s', subnet='%s') — filter SKIPPED",
+                 dhcpCfg.serverIp.c_str(), dhcpCfg.subnet.c_str());
+        return;
+    }
+
+    subnetNet_ = core::Subnet::network(ip, mask);
+    subnetMask_ = mask;
+    ESP_LOGI(TAG, "Own-subnet filter enabled: %s/%d — other clients are dropped",
+             core::Subnet::toString(subnetNet_).c_str(),
+             core::Subnet::prefixLength(subnetMask_));
 }
 
 void DnsServer::syncLoggerLocalHosts()
@@ -666,6 +713,25 @@ void DnsServer::serverLoop()
             // Client IP string
             char clientIpStr[16];
             inet_ntop(AF_INET, &from.sin_addr, clientIpStr, sizeof(clientIpStr));
+
+            // Optional LAN-only filter: drop queries from outside the device's
+            // own subnet WITHOUT a reply — no reply means we serve neither as
+            // an open resolver nor as a reflection amplifier. Dropped packets
+            // are counted and logged at most once per 5 s.
+            if (allowOwnSubnet_ &&
+                !core::Subnet::contains(subnetNet_, subnetMask_,
+                                        ntohl(from.sin_addr.s_addr))) {
+                ++foreignDropped_;
+                const uint64_t nowMsValue = nowMs();
+                if (nowMsValue - lastForeignLogMs_ >= 5000) {
+                    lastForeignLogMs_ = nowMsValue;
+                    ESP_LOGW(TAG, "Own-subnet filter: dropped DNS query from %s "
+                                  "(%u dropped in total)",
+                             clientIpStr, static_cast<unsigned>(foreignDropped_));
+                }
+                continue;
+            }
+
             // Client MAC: ARP cache first, DHCP lease table fallback.
             const std::string clientMac = resolveClientMac(from.sin_addr.s_addr);
 
@@ -770,67 +836,91 @@ void DnsServer::serverLoop()
                            (struct sockaddr*)&from, fromLen);
                 }
             } else {
-                // Step 3: check the external cache FIRST (async). The query is
-                // sent to the external DNS ONLY when the cache misses (see the
-                // cache-result handler / cache-wait timeout above). The DNS
-                // task is never blocked on HTTP — the lookup runs in a worker.
-                int slot = allocPendingSlot();
-                if (slot >= 0) {
-                    auto& pf = pendingForwards_[slot];
-                    pf.active = true;
-                    pf.waitingCache = true;
-                    pf.fwdFd = -1;
-                    pf.client = from;
-                    pf.clientLen = fromLen;
-                    pf.qid = qid;
-                    pf.qtype = qtype;
-                    pf.qclass = qclass;
-                    pf.domain = domain;
-                    pf.createdMs = now;
-                    pf.sentMs = 0;
-                    if (recvLen <= static_cast<ssize_t>(sizeof(pf.query))) {
-                        memcpy(pf.query, buf.data(), static_cast<size_t>(recvLen));
-                        pf.queryLen = static_cast<uint16_t>(recvLen);
-                    } else {
-                        pf.queryLen = 0;  // too large to buffer
-                    }
-
-                    if (pf.queryLen > 0 && cache_.usable()) {
-                        cache_.submitLookup(domain, qtype,
-                                            static_cast<uint8_t>(slot));
-                        if (logTerminal_ && logger_.logForwarded()) {
-                            ESP_LOGI(TAG, "DNS cache-check: %s type=%u from %s",
-                                     domain.c_str(), qtype, clientIpStr);
-                        }
-                    } else {
-                        // Cache disabled/oversized query → forward directly.
-                        if (startForward(slot, now)) {
-                            if (logTerminal_ && logger_.logForwarded()) {
-                                ESP_LOGI(TAG, "DNS forward: %s type=%u from %s",
-                                         domain.c_str(), qtype, clientIpStr);
-                            }
-                        } else {
-                            freePendingSlot(slot);
-                            respLen = buildNxdomain(response.data(), response.size(),
-                                                    qid, domain, qtype, qclass);
-                            logger_.logQuery(domain, qtype, clientIpStr, clientMac,
-                                             DnsLogSource::FORWARDED, false, "");
-                            if (respLen > 0) {
-                                sendto(socketFd_, response.data(), respLen, 0,
-                                       (struct sockaddr*)&from, fromLen);
-                            }
-                        }
-                    }
-                } else {
-                    // All slots busy — answer NXDOMAIN rather than blocking
-                    // the loop.
-                    respLen = buildNxdomain(response.data(), response.size(),
-                                            qid, domain, qtype, qclass);
+                // Block forwarding of non-A/AAAA queries: when enabled, a
+                // query whose type is neither A nor AAAA (and which is NOT a
+                // local host — those are handled above) is answered NODATA
+                // right away instead of consulting the external cache or the
+                // upstream DNS. The external cache only ever holds A/AAAA, so
+                // nothing is lost; the client falls back to A/AAAA on NODATA.
+                if (blockForwardNonAA_ &&
+                    qtype != DNS_TYPE_A && qtype != DNS_TYPE_AAAA) {
+                    respLen = buildAnswer(response.data(), response.size(),
+                                          qid, domain, qtype, qclass, {}, 300);
                     logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                      DnsLogSource::FORWARDED, false, "");
+                    if (logTerminal_ && logger_.logForwarded()) {
+                        ESP_LOGI(TAG,
+                                 "DNS query: %s type=%u from %s [blocked non-A/AAAA]",
+                                 domain.c_str(), qtype, clientIpStr);
+                    }
                     if (respLen > 0) {
                         sendto(socketFd_, response.data(), respLen, 0,
                                (struct sockaddr*)&from, fromLen);
+                    }
+                } else {
+                    // Step 3: check the external cache FIRST (async). The
+                    // query is sent to the external DNS ONLY when the cache
+                    // misses (see the cache-result handler / cache-wait
+                    // timeout above). The DNS task is never blocked on HTTP —
+                    // the lookup runs in a worker.
+                    int slot = allocPendingSlot();
+                    if (slot >= 0) {
+                        auto& pf = pendingForwards_[slot];
+                        pf.active = true;
+                        pf.waitingCache = true;
+                        pf.fwdFd = -1;
+                        pf.client = from;
+                        pf.clientLen = fromLen;
+                        pf.qid = qid;
+                        pf.qtype = qtype;
+                        pf.qclass = qclass;
+                        pf.domain = domain;
+                        pf.createdMs = now;
+                        pf.sentMs = 0;
+                        if (recvLen <= static_cast<ssize_t>(sizeof(pf.query))) {
+                            memcpy(pf.query, buf.data(), static_cast<size_t>(recvLen));
+                            pf.queryLen = static_cast<uint16_t>(recvLen);
+                        } else {
+                            pf.queryLen = 0;  // too large to buffer
+                        }
+
+                        if (pf.queryLen > 0 && cache_.usable()) {
+                            cache_.submitLookup(domain, qtype,
+                                                static_cast<uint8_t>(slot));
+                            if (logTerminal_ && logger_.logForwarded()) {
+                                ESP_LOGI(TAG, "DNS cache-check: %s type=%u from %s",
+                                         domain.c_str(), qtype, clientIpStr);
+                            }
+                        } else {
+                            // Cache disabled/oversized query → forward directly.
+                            if (startForward(slot, now)) {
+                                if (logTerminal_ && logger_.logForwarded()) {
+                                    ESP_LOGI(TAG, "DNS forward: %s type=%u from %s",
+                                             domain.c_str(), qtype, clientIpStr);
+                                }
+                            } else {
+                                freePendingSlot(slot);
+                                respLen = buildNxdomain(response.data(), response.size(),
+                                                        qid, domain, qtype, qclass);
+                                logger_.logQuery(domain, qtype, clientIpStr, clientMac,
+                                                 DnsLogSource::FORWARDED, false, "");
+                                if (respLen > 0) {
+                                    sendto(socketFd_, response.data(), respLen, 0,
+                                           (struct sockaddr*)&from, fromLen);
+                                }
+                            }
+                        }
+                    } else {
+                        // All slots busy — answer NXDOMAIN rather than
+                        // blocking the loop.
+                        respLen = buildNxdomain(response.data(), response.size(),
+                                                qid, domain, qtype, qclass);
+                        logger_.logQuery(domain, qtype, clientIpStr, clientMac,
+                                         DnsLogSource::FORWARDED, false, "");
+                        if (respLen > 0) {
+                            sendto(socketFd_, response.data(), respLen, 0,
+                                   (struct sockaddr*)&from, fromLen);
+                        }
                     }
                 }
             }

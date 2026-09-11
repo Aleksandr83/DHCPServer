@@ -45,6 +45,16 @@ public:
     uint8_t month() const { return month_; }
     const std::string& region() const { return region_; }
 
+    /**
+     * @brief Lowest date/time a human may set on the device clock.
+     *
+     * A build constant (`CONFIG_FW_MIN_DATETIME`, kept at the build date by
+     * the version scripts) in the "YYYY-MM-DD HH:00:00" form — hour
+     * granularity, minutes and seconds are always zero. The web page refuses
+     * earlier values; the device itself does not enforce it.
+     */
+    const std::string& minDateTime() const { return minDateTime_; }
+
 private:
     Version();
     ~Version() = default;
@@ -58,6 +68,7 @@ private:
     uint8_t year_;
     uint8_t month_;
     std::string region_;
+    std::string minDateTime_;
     mutable std::string cached_;
     mutable bool cached_valid_ = false;
 };

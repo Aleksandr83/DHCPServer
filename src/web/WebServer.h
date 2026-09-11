@@ -15,6 +15,7 @@ namespace dhcp {
 namespace wifi { class IWiFiManager; }
 namespace dhcp { class IDhcpServer; }
 namespace dns  { class DnsServer; }
+namespace time { class TimeServer; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -27,7 +28,8 @@ class WebServer : public IWebServer {
 public:
     WebServer(::dhcp::wifi::IWiFiManager& wifi,
               ::dhcp::dhcp::IDhcpServer& dhcpSrv,
-              ::dhcp::dns::DnsServer& dnsSrv);
+              ::dhcp::dns::DnsServer& dnsSrv,
+              ::dhcp::time::TimeServer& timeSrv);
     ~WebServer() override;
 
     bool start() override;
@@ -65,12 +67,17 @@ private:
     static esp_err_t getInternalCacheProgressHandler(httpd_req* req) { return RestApi::handleGetInternalCacheProgress(req); }
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }
     static esp_err_t postInternalCacheLoadHandler(httpd_req* req) { return RestApi::handlePostInternalCacheLoad(req); }
+    static esp_err_t getTimeSettingsHandler(httpd_req* req) { return RestApi::handleGetTimeSettings(req); }
+    static esp_err_t postTimeSettingsHandler(httpd_req* req) { return RestApi::handlePostTimeSettings(req); }
+    static esp_err_t getTimeNowHandler(httpd_req* req) { return RestApi::handleGetTimeNow(req); }
+    static esp_err_t postTimeSetHandler(httpd_req* req) { return RestApi::handlePostTimeSet(req); }
 
     httpd_handle_t server_ = nullptr;
     ::dhcp::web::AuthManager auth_;
     ::dhcp::wifi::IWiFiManager& wifi_;
     ::dhcp::dhcp::IDhcpServer& dhcpSrv_;
     ::dhcp::dns::DnsServer& dnsSrv_;
+    ::dhcp::time::TimeServer& timeSrv_;
 };
 
 } // namespace web

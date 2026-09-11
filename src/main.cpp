@@ -33,6 +33,7 @@
 #include "menu/TerminalMenu.h"
 #include "dhcp/DhcpServer.h"
 #include "dns/DnsServer.h"
+#include "time/TimeServer.h"
 #include "web/WebServer.h"
 
 static const char* TAG = "DHCPServer";
@@ -49,7 +50,9 @@ static dhcp::led::LedController s_ledController(
 );
 static dhcp::dhcp::DhcpServer   s_dhcpServer;
 static dhcp::dns::DnsServer     s_dnsServer;
-static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer, s_dnsServer);
+static dhcp::time::TimeServer   s_timeServer;
+static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer,
+                                            s_dnsServer, s_timeServer);
 // TerminalMenu needs the AuthManager reference, so it must be constructed
 // after s_webServer (static init order = declaration order).
 static dhcp::menu::TerminalMenu s_terminalMenu(s_netAdapter, s_ledController,
@@ -224,6 +227,38 @@ static void onNetworkConnected()
     // Keep DHCP in sync with the built-in DNS server running state
     s_dhcpServer.setDnsServerRunning(s_dnsServer.isRunning());
 
+    // Time (NTP): the clock-sync client and the NTP server are independent.
+    {
+        auto timeCfg = ::dhcp::core::Config::instance().getTime();
+        s_timeServer.setServerName(timeCfg.externalNtp);
+        s_timeServer.setSyncIntervalSec(timeCfg.syncIntervalSec);
+        s_timeServer.setUtcOffsetHours(timeCfg.utcOffsetHours);
+        s_timeServer.setTimezoneName(timeCfg.timezone);
+        s_timeServer.logger().setLogTerminal(timeCfg.logTerminal);
+        s_timeServer.logger().setLogRest(timeCfg.logRest);
+        s_timeServer.logger().setLogUrl(timeCfg.logUrl);
+        s_timeServer.logger().setLogAuth(timeCfg.logAuthEnabled,
+                                         timeCfg.logAuthUser,
+                                         timeCfg.logAuthPassword);
+
+        // SNTP clock sync (independent of serving time).
+        if (timeCfg.syncEnabled) {
+            s_timeServer.startSync();
+        } else {
+            ESP_LOGI(TAG, "NTP clock sync is disabled in config, skipping");
+        }
+
+        // NTP server (serving LAN clients).
+        if (timeCfg.enabled) {
+            if (!s_timeServer.isRunning() && s_timeServer.start()) {
+                ESP_LOGI(TAG, "NTP server started");
+                s_terminalMenu.println("*** NTP server started ***");
+            }
+        } else {
+            ESP_LOGI(TAG, "NTP server is disabled in config, skipping");
+        }
+    }
+
     // Start web server
     if (!s_webServer.isRunning()) {
         if (s_webServer.start()) {
@@ -252,6 +287,14 @@ static void onNetworkDisconnected()
         ESP_LOGI(TAG, "DNS server stopped");
     }
     s_dhcpServer.setDnsServerRunning(false);
+
+    // Stop NTP (time) server
+    if (s_timeServer.isRunning()) {
+        s_timeServer.stop();
+        ESP_LOGI(TAG, "NTP server stopped");
+    }
+    // Stop the SNTP clock-sync client as well (no network → no sync).
+    s_timeServer.stopSync();
 
     // Stop web server
     if (s_webServer.isRunning()) {

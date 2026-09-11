@@ -20,6 +20,7 @@ static const char* KEY_DHCP_SUBNET    = "dhcp_subnet";
 static const char* KEY_DHCP_GW        = "dhcp_gw";
 static const char* KEY_DHCP_SERVER_IP = "dhcp_srv_ip";
 static const char* KEY_DHCP_LEASE     = "dhcp_lease";
+static const char* KEY_DHCP_MAX_LEASES = "dhcp_max_ent";
 static const char* KEY_DHCP_LOG_TERM   = "dhcp_log_term";
 static const char* KEY_DHCP_BINDINGS  = "dhcp_bindings";
 static const char* KEY_DHCP_DNS_MODE  = "dhcp_dns_mode";
@@ -53,12 +54,29 @@ static const char* KEY_DNS_CACHE_AUTH_P = "dns_cach_auth_p";
 static const char* KEY_DNS_IC_ENABLE  = "dns_ic_enable";
 static const char* KEY_DNS_IC_SIZE_MB = "dns_ic_size_mb";
 static const char* KEY_DNS_IC_IGN_TTL = "dns_ic_ign_ttl";
+static const char* KEY_DNS_BLK_NON_AA = "dns_blk_nonaa";
+static const char* KEY_DNS_ALLOW_LAN = "dns_allow_lan";
 static const char* KEY_DNS_HOSTS      = "dns_hosts";
 static const char* KEY_DNS_CACHE_DATA = "dns_cache";
 static const char* KEY_SEC_USER       = "sec_user";
 static const char* KEY_SEC_PASS       = "sec_pass";
 static const char* KEY_SEC_MAX_ATT    = "sec_max_att";
 static const char* KEY_SEC_LOCKOUT    = "sec_lockout";
+// Time (NTP) server settings (NVS keys limited to 15 chars).
+static const char* KEY_TIME_ENABLED   = "time_enabled";
+static const char* KEY_TIME_SYNC_EN   = "time_sync_en";
+static const char* KEY_TIME_ALLOW_LAN = "time_allow_lan";
+static const char* KEY_TIME_RATE      = "time_rate";
+static const char* KEY_TIME_NTP       = "time_ntp";
+static const char* KEY_TIME_TZ_NAME   = "time_tz_name";
+static const char* KEY_TIME_TZ_H      = "time_tz_h";
+static const char* KEY_TIME_SYNC_S    = "time_sync_s";
+static const char* KEY_TIME_LOG_TERM  = "time_log_term";
+static const char* KEY_TIME_LOG_REST  = "time_log_rest";
+static const char* KEY_TIME_LOG_URL   = "time_log_url";
+static const char* KEY_TIME_LOG_AUTH  = "time_log_auth";
+static const char* KEY_TIME_LOG_AUTH_U = "time_log_auth_u";
+static const char* KEY_TIME_LOG_AUTH_P = "time_log_auth_p";
 
 namespace dhcp {
 namespace core {
@@ -224,6 +242,14 @@ DhcpConfig Config::getDhcp() const
     cfg.gateway = readStr(KEY_DHCP_GW, "192.168.1.1");
     cfg.serverIp = readStr(KEY_DHCP_SERVER_IP, "192.168.1.201");
     cfg.leaseTimeSec = static_cast<uint32_t>(readI32(KEY_DHCP_LEASE, 86400));
+    {
+        int32_t maxEntries = readI32(KEY_DHCP_MAX_LEASES, 0);
+        if (maxEntries != 0) {           // 0 = auto (2x pool size)
+            if (maxEntries < 8) maxEntries = 8;
+            if (maxEntries > 512) maxEntries = 512;
+        }
+        cfg.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
+    }
     cfg.logTerminal = readI32(KEY_DHCP_LOG_TERM, 0) != 0;
     cfg.dnsMode = readStr(KEY_DHCP_DNS_MODE, "auto");
     cfg.dnsAddress = readStr(KEY_DHCP_DNS_ADDR, "");
@@ -244,6 +270,7 @@ void Config::setDhcp(const DhcpConfig& cfg)
     writeStr(KEY_DHCP_GW, cfg.gateway);
     writeStr(KEY_DHCP_SERVER_IP, cfg.serverIp);
     writeI32(KEY_DHCP_LEASE, static_cast<int32_t>(cfg.leaseTimeSec));
+    writeI32(KEY_DHCP_MAX_LEASES, static_cast<int32_t>(cfg.maxLeaseEntries));
     writeI32(KEY_DHCP_LOG_TERM, cfg.logTerminal ? 1 : 0);
     writeStr(KEY_DHCP_DNS_MODE, cfg.dnsMode.empty() ? "auto" : cfg.dnsMode);
     writeStr(KEY_DHCP_DNS_ADDR, cfg.dnsAddress);
@@ -364,6 +391,8 @@ DnsConfig Config::getDns() const
         cfg.cacheInternalSizeMb = sz;
     }
     cfg.cacheInternalIgnoreTtl = readI32(KEY_DNS_IC_IGN_TTL, 0) != 0;
+    cfg.blockForwardNonAA = readI32(KEY_DNS_BLK_NON_AA, 0) != 0;
+    cfg.allowOwnSubnet = readI32(KEY_DNS_ALLOW_LAN, 1) != 0;   // default ON
     return cfg;
 }
 
@@ -391,6 +420,8 @@ void Config::setDns(const DnsConfig& cfg)
     writeI32(KEY_DNS_IC_ENABLE, cfg.cacheInternal ? 1 : 0);
     writeI32(KEY_DNS_IC_SIZE_MB, static_cast<int32_t>(cfg.cacheInternalSizeMb));
     writeI32(KEY_DNS_IC_IGN_TTL, cfg.cacheInternalIgnoreTtl ? 1 : 0);
+    writeI32(KEY_DNS_BLK_NON_AA, cfg.blockForwardNonAA ? 1 : 0);
+    writeI32(KEY_DNS_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
 }
 
 // ─── Local DNS hosts ────────────────────────────────
@@ -502,6 +533,52 @@ void Config::setSecurity(const SecurityConfig& cfg)
     writeStr(KEY_SEC_PASS, cfg.password);
     writeI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(cfg.maxAttempts));
     writeI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(cfg.lockoutPeriodSec));
+}
+
+// ─── Time (NTP) server ──────────────────────────────
+
+TimeConfig Config::getTime() const
+{
+    TimeConfig cfg;
+    cfg.enabled = readI32(KEY_TIME_ENABLED, 0) != 0;
+    cfg.syncEnabled = readI32(KEY_TIME_SYNC_EN, 1) != 0;
+    cfg.externalNtp = readStr(KEY_TIME_NTP, "pool.ntp.org");
+    cfg.timezone = readStr(KEY_TIME_TZ_NAME, "Europe/Moscow");
+    cfg.utcOffsetHours = readI32(KEY_TIME_TZ_H, 3);
+    cfg.syncIntervalSec =
+        static_cast<uint32_t>(readI32(KEY_TIME_SYNC_S, 86400));
+    cfg.allowOwnSubnet = readI32(KEY_TIME_ALLOW_LAN, 1) != 0;   // default ON
+    {
+        int32_t rate = readI32(KEY_TIME_RATE, 5);
+        if (rate < 1) rate = 1;
+        if (rate > 100) rate = 100;
+        cfg.rateLimitPerSec = static_cast<uint32_t>(rate);
+    }
+    cfg.logTerminal = readI32(KEY_TIME_LOG_TERM, 0) != 0;
+    cfg.logRest = readI32(KEY_TIME_LOG_REST, 0) != 0;
+    cfg.logUrl = readStr(KEY_TIME_LOG_URL, "");
+    cfg.logAuthEnabled = readI32(KEY_TIME_LOG_AUTH, 0) != 0;
+    cfg.logAuthUser = readStr(KEY_TIME_LOG_AUTH_U, "");
+    cfg.logAuthPassword = readStr(KEY_TIME_LOG_AUTH_P, "");
+    return cfg;
+}
+
+void Config::setTime(const TimeConfig& cfg)
+{
+    writeI32(KEY_TIME_ENABLED, cfg.enabled ? 1 : 0);
+    writeI32(KEY_TIME_SYNC_EN, cfg.syncEnabled ? 1 : 0);
+    writeStr(KEY_TIME_NTP, cfg.externalNtp);
+    writeStr(KEY_TIME_TZ_NAME, cfg.timezone);
+    writeI32(KEY_TIME_TZ_H, cfg.utcOffsetHours);
+    writeI32(KEY_TIME_SYNC_S, static_cast<int32_t>(cfg.syncIntervalSec));
+    writeI32(KEY_TIME_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
+    writeI32(KEY_TIME_RATE, static_cast<int32_t>(cfg.rateLimitPerSec));
+    writeI32(KEY_TIME_LOG_TERM, cfg.logTerminal ? 1 : 0);
+    writeI32(KEY_TIME_LOG_REST, cfg.logRest ? 1 : 0);
+    writeStr(KEY_TIME_LOG_URL, cfg.logUrl);
+    writeI32(KEY_TIME_LOG_AUTH, cfg.logAuthEnabled ? 1 : 0);
+    writeStr(KEY_TIME_LOG_AUTH_U, cfg.logAuthUser);
+    writeStr(KEY_TIME_LOG_AUTH_P, cfg.logAuthPassword);
 }
 
 } // namespace core

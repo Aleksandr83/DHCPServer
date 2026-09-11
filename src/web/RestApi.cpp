@@ -7,6 +7,8 @@
 #include "../dhcp/IDhcpServer.h"
 #include "../dhcp/DhcpServer.h"
 #include "../dns/DnsServer.h"
+#include "../time/TimeServer.h"
+#include "../time/TimeMath.h"
 
 #include <cstdio>
 #include <cstring>
@@ -33,16 +35,19 @@ namespace web {
 ::dhcp::wifi::IWiFiManager*  RestApi::s_wifi = nullptr;
 ::dhcp::dhcp::IDhcpServer*   RestApi::s_dhcp = nullptr;
 ::dhcp::dns::DnsServer*      RestApi::s_dns  = nullptr;
+::dhcp::time::TimeServer*    RestApi::s_time = nullptr;
 ::dhcp::web::AuthManager*    RestApi::s_auth = nullptr;
 
 void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
                     ::dhcp::dhcp::IDhcpServer* dhcpSrv,
                     ::dhcp::dns::DnsServer* dnsSrv,
+                    ::dhcp::time::TimeServer* timeSrv,
                     ::dhcp::web::AuthManager* auth)
 {
     s_wifi = wifi;
     s_dhcp = dhcpSrv;
     s_dns  = dnsSrv;
+    s_time = timeSrv;
     s_auth = auth;
     ESP_LOGI(TAG, "RestApi initialized");
 }
@@ -222,6 +227,8 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                 s_dhcp ? s_dhcp->isRunning() : false, true);
     addJsonBool(json, "dns_running",
                 s_dns ? s_dns->isRunning() : false, true);
+    addJsonBool(json, "ntp_running",
+                s_time ? s_time->isRunning() : false, true);
     addJsonInt(json, "cpu_load0", ::dhcp::core::CpuMonitor::loadCore0(), true);
     addJsonInt(json, "cpu_load1", ::dhcp::core::CpuMonitor::loadCore1(), true);
     addJsonInt(json, "heap_free",
@@ -326,8 +333,16 @@ esp_err_t RestApi::handleGetDhcpSettings(httpd_req* req)
     addJsonBool(json, "dns_running",
                 s_dns ? s_dns->isRunning() : false, true);
     addJsonInt(json, "lease_time", cfg.leaseTimeSec, true);
+    addJsonInt(json, "max_lease_entries",
+               static_cast<int64_t>(cfg.maxLeaseEntries), true);
     addJsonInt(json, "lease_count",
                s_dhcp ? static_cast<int64_t>(s_dhcp->leaseCount()) : 0, true);
+    addJsonInt(json, "max_lease_entries_effective",
+               s_dhcp ? static_cast<int64_t>(s_dhcp->maxLeaseEntriesEffective()) : 0,
+               true);
+    addJsonInt(json, "lease_limit_rejects",
+               s_dhcp ? static_cast<int64_t>(s_dhcp->leaseLimitRejects()) : 0,
+               true);
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -368,6 +383,14 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     cfg.logAuthUser = jsonGetStr(body, "log_auth_user");
     cfg.logAuthPassword = jsonGetStr(body, "log_auth_password");
     cfg.leaseTimeSec = jsonGetInt(body, "lease_time", 86400);
+    {
+        int64_t maxEntries = jsonGetInt(body, "max_lease_entries", 0);
+        if (maxEntries != 0) {       // 0 = auto (2x pool size)
+            if (maxEntries < 8) maxEntries = 8;
+            if (maxEntries > 512) maxEntries = 512;
+        }
+        cfg.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
+    }
     cfg.dnsMode = jsonGetStr(body, "dns_mode");
     if (cfg.dnsMode != "manual") cfg.dnsMode = "auto";
     cfg.dnsAddress = jsonGetStr(body, "dns_address");
@@ -387,6 +410,8 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
         s_dhcp->setRestLogging(cfg.logRest, cfg.logUrl,
                                cfg.logAuthEnabled, cfg.logAuthUser,
                                cfg.logAuthPassword);
+        // Re-apply the lease/offer table cap (config was just stored).
+        s_dhcp->applyLeaseLimit();
 
         if (cfg.enabled && !s_dhcp->isRunning()) {
             // Check WiFi before starting
@@ -412,6 +437,11 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     }
 
     ESP_LOGI(TAG, "DHCP settings updated (enabled=%d, log_terminal=%d)", cfg.enabled, cfg.logTerminal);
+
+    // The DHCP settings own the subnet used by the DNS/NTP "own subnet only"
+    // client filters — re-evaluate them when the subnet (or the IP) changes.
+    if (s_dns) s_dns->applySubnetFilter();
+    if (s_time) s_time->applyAccessFilter();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
@@ -563,6 +593,8 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     addJsonBool(json, "cache_internal", cfg.cacheInternal, true);
     addJsonInt(json, "cache_internal_size_mb", cfg.cacheInternalSizeMb, true);
     addJsonBool(json, "cache_internal_ignore_ttl", cfg.cacheInternalIgnoreTtl, true);
+    addJsonBool(json, "block_forward_non_aa", cfg.blockForwardNonAA, true);
+    addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
     addJsonBool(json, "cache_internal_available",
                 ::dhcp::core::CpuMonitor::psramTotal() > 0, true);
     json += "}";
@@ -613,6 +645,8 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     if (cfg.cacheInternalSizeMb < 1) cfg.cacheInternalSizeMb = 1;
     if (cfg.cacheInternalSizeMb > 20) cfg.cacheInternalSizeMb = 20;
     cfg.cacheInternalIgnoreTtl = jsonGetBool(body, "cache_internal_ignore_ttl", false);
+    cfg.blockForwardNonAA = jsonGetBool(body, "block_forward_non_aa", false);
+    cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
 
     // If body_read < content_len the POST body was truncated — the last
     // fields (cache_auth_user/password) would be lost even though earlier
@@ -657,6 +691,9 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         s_dns->applyInternalCache(cfg.cacheInternal,
                                   cfg.cacheInternalSizeMb,
                                   cfg.cacheInternalIgnoreTtl);
+        // Block forwarding of non-A/AAAA queries — apply live.
+        s_dns->setBlockForwardNonAA(cfg.blockForwardNonAA);
+        s_dns->applySubnetFilter();
         if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
     }
     // Diagnostic: shows what the client actually sent for the external cache
@@ -840,6 +877,8 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "subnet", dhcp.subnet, true);
     addJsonString(json, "gateway", dhcp.gateway, true);
     addJsonInt(json, "lease_time", dhcp.leaseTimeSec, true);
+    addJsonInt(json, "max_lease_entries",
+               static_cast<int64_t>(dhcp.maxLeaseEntries), true);
     addJsonBool(json, "log_terminal", dhcp.logTerminal, true);
     addJsonBool(json, "log_rest", dhcp.logRest, true);
     addJsonString(json, "log_url", dhcp.logUrl, true);
@@ -888,7 +927,31 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonBool(json, "cache_internal", dns.cacheInternal, true);
     addJsonInt(json, "cache_internal_size_mb", dns.cacheInternalSizeMb, true);
     addJsonBool(json, "cache_internal_ignore_ttl", dns.cacheInternalIgnoreTtl, true);
+    addJsonBool(json, "block_forward_non_aa", dns.blockForwardNonAA, true);
+    addJsonBool(json, "allow_own_subnet", dns.allowOwnSubnet, true);
     json += "}";
+
+    // ── time section (no log_auth_password) ──
+    {
+        auto tcfg = cfgMgr.getTime();
+        json += ",\"time\":{";
+        addJsonBool(json, "enabled", tcfg.enabled, false);
+        addJsonBool(json, "sync_enabled", tcfg.syncEnabled, true);
+        addJsonString(json, "external_ntp", tcfg.externalNtp, true);
+        addJsonString(json, "timezone", tcfg.timezone, true);
+        addJsonInt(json, "utc_offset_hours", tcfg.utcOffsetHours, true);
+        addJsonInt(json, "sync_interval_sec",
+                   static_cast<int64_t>(tcfg.syncIntervalSec), true);
+        addJsonBool(json, "allow_own_subnet", tcfg.allowOwnSubnet, true);
+        addJsonInt(json, "rate_limit_per_sec",
+                   static_cast<int64_t>(tcfg.rateLimitPerSec), true);
+        addJsonBool(json, "log_terminal", tcfg.logTerminal, true);
+        addJsonBool(json, "log_rest", tcfg.logRest, true);
+        addJsonString(json, "log_url", tcfg.logUrl, true);
+        addJsonBool(json, "log_auth", tcfg.logAuthEnabled, true);
+        addJsonString(json, "log_auth_user", tcfg.logAuthUser, true);
+        json += "}";
+    }
 
     // ── local_hosts section ──
     json += ",\"local_hosts\":[";
@@ -957,7 +1020,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // We only know these section keys; anything else is reported as skipped.
     std::string skipped;
     const char* known[] = { "format", "schema", "firmware_version",
-                            "dhcp", "static_bindings", "dns",
+                            "dhcp", "static_bindings", "dns", "time",
                             "local_hosts", "security" };
     size_t pos = 0;
     while ((pos = body.find('"', pos)) != std::string::npos) {
@@ -978,6 +1041,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
             if (!isKnown && key != "enabled" && key != "server_ip" &&
                 key != "start_ip" && key != "end_ip" && key != "subnet" &&
                 key != "gateway" && key != "lease_time" &&
+                key != "max_lease_entries" &&
                 key != "log_terminal" && key != "log_rest" &&
                 key != "log_url" && key != "log_auth" &&
                 key != "log_auth_user" && key != "dns_mode" &&
@@ -991,6 +1055,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 key != "cache_auth_user" && key != "cache_internal" &&
                 key != "cache_internal_size_mb" &&
                 key != "cache_internal_ignore_ttl" &&
+                key != "block_forward_non_aa" &&
+                key != "allow_own_subnet" &&
+                key != "external_ntp" && key != "timezone" &&
+                key != "sync_enabled" &&
+                key != "utc_offset_hours" &&
+                key != "sync_interval_sec" &&
+                key != "rate_limit_per_sec" &&
                 key != "ip4" && key != "ip6" &&
                 key != "username" && key != "max_attempts" &&
                 key != "lockout_period") {
@@ -1003,7 +1074,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     // ─── 4. Import sections (recognized fields only; passwords never) ───
     bool importedDhcp = false, importedBind = false, importedDns = false;
-    bool importedHosts = false, importedSec = false;
+    bool importedHosts = false, importedSec = false, importedTime = false;
 
     auto& cfgMgr = ::dhcp::core::Config::instance();
     const auto oldDhcp = cfgMgr.getDhcp();  // to detect network-level changes
@@ -1030,6 +1101,16 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
                 cur.leaseTimeSec = jsonGetInt(seg, "lease_time", cur.leaseTimeSec);
+                {
+                    int64_t maxEntries = jsonGetInt(
+                        seg, "max_lease_entries",
+                        static_cast<int64_t>(cur.maxLeaseEntries));
+                    if (maxEntries != 0) {   // 0 = auto (2x pool size)
+                        if (maxEntries < 8) maxEntries = 8;
+                        if (maxEntries > 512) maxEntries = 512;
+                    }
+                    cur.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
+                }
                 cfgMgr.setDhcp(cur);
                 importedDhcp = true;
             }
@@ -1099,8 +1180,57 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.cacheInternalIgnoreTtl =
                     jsonGetBool(seg, "cache_internal_ignore_ttl",
                                 cur.cacheInternalIgnoreTtl);
+                cur.blockForwardNonAA =
+                    jsonGetBool(seg, "block_forward_non_aa",
+                                cur.blockForwardNonAA);
+                cur.allowOwnSubnet =
+                    jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
                 cfgMgr.setDns(cur);
                 importedDns = true;
+            }
+        }
+    }
+
+    // Time (NTP) server section
+    {
+        size_t s = body.find("\"time\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('{', s);
+            if (open != std::string::npos) {
+                std::string seg = body.substr(open);
+                auto cur = cfgMgr.getTime();
+                cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
+                cur.syncEnabled = jsonGetBool(seg, "sync_enabled", cur.syncEnabled);
+                std::string v = jsonGetStr(seg, "external_ntp");
+                if (!v.empty()) cur.externalNtp = v;
+                v = jsonGetStr(seg, "timezone");
+                if (v.size() > 40) v.resize(40);
+                cur.timezone = v;
+                cur.utcOffsetHours =
+                    jsonGetInt(seg, "utc_offset_hours", cur.utcOffsetHours);
+                if (cur.utcOffsetHours < -12) cur.utcOffsetHours = -12;
+                if (cur.utcOffsetHours > 14) cur.utcOffsetHours = 14;
+                int64_t syncSec = jsonGetInt(seg, "sync_interval_sec",
+                                             static_cast<int64_t>(cur.syncIntervalSec));
+                if (syncSec < 15) syncSec = 15;
+                if (syncSec > 7 * 86400) syncSec = 7 * 86400;
+                cur.syncIntervalSec = static_cast<uint32_t>(syncSec);
+                cur.allowOwnSubnet =
+                    jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
+                {
+                    int64_t rate = jsonGetInt(seg, "rate_limit_per_sec",
+                                              static_cast<int64_t>(cur.rateLimitPerSec));
+                    if (rate < 1) rate = 1;
+                    if (rate > 100) rate = 100;
+                    cur.rateLimitPerSec = static_cast<uint32_t>(rate);
+                }
+                cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
+                cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
+                v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
+                v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
+                cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
+                cfgMgr.setTime(cur);
+                importedTime = true;
             }
         }
     }
@@ -1190,6 +1320,29 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
         if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
     }
+    if (s_time) {
+        auto c = cfgMgr.getTime();
+        s_time->setServerName(c.externalNtp);
+        s_time->setSyncIntervalSec(c.syncIntervalSec);
+        s_time->setUtcOffsetHours(c.utcOffsetHours);
+        s_time->setTimezoneName(c.timezone);
+        s_time->logger().setLogTerminal(c.logTerminal);
+        s_time->logger().setLogRest(c.logRest);
+        s_time->logger().setLogUrl(c.logUrl);
+        s_time->logger().setLogAuth(c.logAuthEnabled,
+                                    c.logAuthUser, c.logAuthPassword);
+        if (c.syncEnabled) {
+            if (!s_time->isSyncRunning()) s_time->startSync();
+            else s_time->restartSync();
+        } else if (s_time->isSyncRunning()) {
+            s_time->stopSync();
+        }
+        if (c.enabled) {
+            if (!s_time->isRunning()) s_time->start();
+        } else if (s_time->isRunning()) {
+            s_time->stop();
+        }
+    }
 
     // ─── 6. Build response ───
     std::string json = "{";
@@ -1203,6 +1356,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     addJsonBool(json, "dhcp", importedDhcp, false);
     addJsonBool(json, "static_bindings", importedBind, true);
     addJsonBool(json, "dns", importedDns, true);
+    addJsonBool(json, "time", importedTime, true);
     addJsonBool(json, "local_hosts", importedHosts, true);
     addJsonBool(json, "security", importedSec, true);
     json += "}";
@@ -1211,11 +1365,11 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
-    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d",
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d",
              curVer.toString().c_str(), fileVerStr.c_str(),
              versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
              importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
-             importedHosts ? 1 : 0, importedSec ? 1 : 0);
+             importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0);
     return ESP_OK;
 }
 
@@ -1844,6 +1998,240 @@ esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
         return ESP_OK;
     }
     httpd_resp_sendstr(req, "{\"status\":\"started\",\"op\":\"load\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/time/settings
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetTimeSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    auto cfg = ::dhcp::core::Config::instance().getTime();
+    std::string json = "{";
+    addJsonBool(json, "enabled", cfg.enabled, false);
+    addJsonBool(json, "sync_enabled", cfg.syncEnabled, true);
+    addJsonString(json, "server_state",
+                  s_time ? s_time->stateString() : "unknown", true);
+    addJsonBool(json, "synced", s_time ? s_time->isSynced() : false, true);
+    addJsonString(json, "now_utc", s_time ? s_time->nowUtcString() : "", true);
+    addJsonString(json, "now_local", s_time ? s_time->nowLocalString() : "", true);
+    addJsonInt(json, "uptime_sec",
+               s_time ? static_cast<int64_t>(s_time->uptimeSec()) : 0, true);
+    addJsonString(json, "external_ntp", cfg.externalNtp, true);
+    addJsonString(json, "timezone", cfg.timezone, true);
+    addJsonInt(json, "utc_offset_hours", cfg.utcOffsetHours, true);
+    addJsonInt(json, "sync_interval_sec",
+               static_cast<int64_t>(cfg.syncIntervalSec), true);
+    addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
+    addJsonInt(json, "rate_limit_per_sec",
+               static_cast<int64_t>(cfg.rateLimitPerSec), true);
+    // Build constant: the lowest date/time the web page accepts for a manual
+    // clock setting (kept at the build date by the version scripts).
+    addJsonString(json, "min_datetime",
+                  ::dhcp::core::Version::instance().minDateTime(), true);
+    addJsonBool(json, "log_terminal", cfg.logTerminal, true);
+    addJsonBool(json, "log_rest", cfg.logRest, true);
+    addJsonString(json, "log_url", cfg.logUrl, true);
+    addJsonBool(json, "log_auth", cfg.logAuthEnabled, true);
+    addJsonString(json, "log_auth_user", cfg.logAuthUser, true);
+    addJsonString(json, "log_auth_password", cfg.logAuthPassword, true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/time/settings
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string body = readBody(req);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    ::dhcp::core::TimeConfig cfg;
+    cfg.enabled = jsonGetBool(body, "enabled", false);
+    cfg.syncEnabled = jsonGetBool(body, "sync_enabled", true);
+    cfg.externalNtp = jsonGetStr(body, "external_ntp");
+    if (cfg.externalNtp.empty()) cfg.externalNtp = "pool.ntp.org";
+    // Timezone id (display only). Keep a safe charset and a bounded length;
+    // an empty value means "custom offset".
+    cfg.timezone = jsonGetStr(body, "timezone");
+    if (cfg.timezone.size() > 40) cfg.timezone.resize(40);
+    {
+        std::string clean;
+        for (char ch : cfg.timezone) {
+            const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                            (ch >= '0' && ch <= '9') ||
+                            ch == '/' || ch == '_' || ch == '+' || ch == '-' ||
+                            ch == ' ';
+            if (ok) clean += ch;
+        }
+        cfg.timezone = clean;
+    }
+    cfg.utcOffsetHours = jsonGetInt(body, "utc_offset_hours", 3);
+    if (cfg.utcOffsetHours < -12) cfg.utcOffsetHours = -12;
+    if (cfg.utcOffsetHours > 14) cfg.utcOffsetHours = 14;
+    int64_t syncSec = jsonGetInt(body, "sync_interval_sec", 86400);
+    if (syncSec < 15) syncSec = 15;              // RFC 4330 minimum
+    if (syncSec > 7 * 86400) syncSec = 7 * 86400;
+    cfg.syncIntervalSec = static_cast<uint32_t>(syncSec);
+    cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
+    {
+        int64_t rate = jsonGetInt(body, "rate_limit_per_sec", 5);
+        if (rate < 1) rate = 1;
+        if (rate > 100) rate = 100;
+        cfg.rateLimitPerSec = static_cast<uint32_t>(rate);
+    }
+    cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
+    cfg.logRest = jsonGetBool(body, "log_rest", false);
+    cfg.logUrl = jsonGetStr(body, "log_url");
+    cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
+    cfg.logAuthUser = jsonGetStr(body, "log_auth_user");
+    cfg.logAuthPassword = jsonGetStr(body, "log_auth_password");
+
+    ::dhcp::core::Config::instance().setTime(cfg);
+
+    // Apply to the running server (start/stop on enable change, update the
+    // SNTP server/interval and the logger settings live).
+    if (s_time) {
+        s_time->setServerName(cfg.externalNtp);
+        s_time->setSyncIntervalSec(cfg.syncIntervalSec);
+        s_time->setUtcOffsetHours(cfg.utcOffsetHours);
+        s_time->setTimezoneName(cfg.timezone);
+        // Own-subnet filter + per-client rate limit (subnet comes from DHCP).
+        s_time->applyAccessFilter();
+        s_time->logger().setLogTerminal(cfg.logTerminal);
+        s_time->logger().setLogRest(cfg.logRest);
+        s_time->logger().setLogUrl(cfg.logUrl);
+        s_time->logger().setLogAuth(cfg.logAuthEnabled,
+                                    cfg.logAuthUser, cfg.logAuthPassword);
+
+        // Clock sync (SNTP client) — independent of serving time.
+        if (cfg.syncEnabled) {
+            if (!s_time->isSyncRunning()) {
+                s_time->startSync();
+            } else {
+                // Re-apply external server / interval changes.
+                s_time->restartSync();
+            }
+        } else if (s_time->isSyncRunning()) {
+            s_time->stopSync();
+        }
+
+        // NTP server (serving LAN clients).
+        if (cfg.enabled && !s_time->isRunning()) {
+            if (s_time->start()) {
+                ESP_LOGI(TAG, "NTP server started via API");
+            } else {
+                ESP_LOGE(TAG, "NTP server failed to start via API");
+            }
+        } else if (!cfg.enabled && s_time->isRunning()) {
+            s_time->stop();
+            ESP_LOGI(TAG, "NTP server stopped via API");
+        }
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/time/now
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetTimeNow(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string json = "{";
+    addJsonString(json, "now_utc",
+                  s_time ? s_time->nowUtcString() : "", false);
+    addJsonString(json, "now_local",
+                  s_time ? s_time->nowLocalString() : "", true);
+    addJsonInt(json, "unix_sec",
+               s_time ? static_cast<int64_t>(s_time->nowUtcSec()) : 0, true);
+    addJsonBool(json, "synced", s_time ? s_time->isSynced() : false, true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/time/set
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string body = readBody(req);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    auto sendError = [&req](const char* status, const char* message) {
+        std::string json = "{\"status\":\"error\",\"message\":\"";
+        json += message;
+        json += "\"}";
+        httpd_resp_set_status(req, status);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, json.c_str());
+        return ESP_OK;
+    };
+
+    if (!s_time) return sendError("500 Internal Server Error", "time service unavailable");
+
+    // The operator types LOCAL time; the offset is taken from the request (the
+    // page sends it, since the zone may not have been saved yet) and falls back
+    // to the configured offset.
+    const std::string datetime = jsonGetStr(body, "datetime");
+    ::dhcp::time::DateTime dt;
+    if (!::dhcp::time::TimeMath::parseDateTime(datetime, dt)) {
+        return sendError("400 Bad Request",
+                         "invalid datetime (expected YYYY-MM-DD HH:MM:SS)");
+    }
+
+    int offsetHours = static_cast<int>(
+        jsonGetInt(body, "utc_offset_hours", s_time->utcOffsetHours()));
+    if (offsetHours < -12) offsetHours = -12;
+    if (offsetHours > 14) offsetHours = 14;
+
+    // Local → UTC (the offset is positive east of Greenwich).
+    const int64_t localSec = static_cast<int64_t>(::dhcp::time::TimeMath::toUnixSec(dt));
+    const int64_t utcSec = localSec - static_cast<int64_t>(offsetHours) * 3600;
+    if (utcSec <= 0) {
+        return sendError("400 Bad Request",
+                         "datetime out of range (before 1970-01-01 UTC)");
+    }
+
+    if (!s_time->setUtcTime(static_cast<uint32_t>(utcSec))) {
+        return sendError("500 Internal Server Error", "failed to set the clock");
+    }
+
+    std::string json = "{\"status\":\"ok\"";
+    addJsonInt(json, "unix_sec", static_cast<int64_t>(s_time->nowUtcSec()), true);
+    addJsonString(json, "now_utc", s_time->nowUtcString(), true);
+    addJsonString(json, "now_local", s_time->nowLocalString(), true);
+    addJsonBool(json, "synced", s_time->isSynced(), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
     return ESP_OK;
 }
 

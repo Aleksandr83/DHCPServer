@@ -351,6 +351,9 @@ bool DhcpServer::start()
     // Load static bindings
     reloadStaticBindings();
 
+    // Lease/offer table cap (DoS hardening) — auto or configured.
+    applyLeaseLimit();
+
     state_ = DhcpServerState::RUNNING;
     stopRequested_ = false;
 
@@ -630,6 +633,15 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                     }
                 }
                 if (ack) {
+                    if (!canAddLeaseEntry(assignIp)) {
+                        // Lease table at its cap: refuse instead of ACKing an
+                        // address we could not track (the client retries).
+                        if (logTerminal_) {
+                            ESP_LOGW(TAG, "DHCP REQUEST — sending NAK (lease table full)");
+                        }
+                        sendDhcpNak(msg->chaddr, msg->xid, msg->giaddr);
+                        break;
+                    }
                     if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending ACK");
                     sendDhcpAck(msg->chaddr, msg->xid, assignIp, msg->giaddr);
                     addLease(msg->chaddr, assignIp);
@@ -698,8 +710,15 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
         return;
     }
 
-    // Reserve the offered IP so concurrent DISCOVERs don't get the same one
-    reserveOffer(clientMac, offerIp);
+    // Reserve the offered IP so concurrent DISCOVERs don't get the same one.
+    // When the lease table is at its cap the reservation fails and no OFFER is
+    // sent (the client retries; nothing is leaked).
+    if (!reserveOffer(clientMac, offerIp)) {
+        ESP_LOGW(TAG, "No OFFER for %02x:%02x:%02x:%02x:%02x:%02x: lease table full",
+                 clientMac[0], clientMac[1], clientMac[2],
+                 clientMac[3], clientMac[4], clientMac[5]);
+        return;
+    }
 
     DhcpMessage msg;
     memset(&msg, 0, sizeof(msg));
@@ -999,6 +1018,50 @@ uint32_t DhcpServer::ipStrToU32(const std::string& ip) const
 // Lease management
 // ─────────────────────────────────────────────────────
 
+void DhcpServer::applyLeaseLimit()
+{
+    const auto cfg = core::Config::instance().getDhcp();
+    maxLeaseEntries_ = cfg.maxLeaseEntries;
+
+    uint32_t limit = 0;
+    if (cfg.maxLeaseEntries == 0) {
+        // Auto: twice the pool size so a full pool plus its offers fit, with
+        // sane bounds for tiny and huge ranges.
+        const uint32_t start = ipStrToU32(cfg.startIp);
+        const uint32_t end = ipStrToU32(cfg.endIp);
+        const uint32_t pool = (end > start) ? (ntohl(end) - ntohl(start) + 1) : 0;
+        limit = pool * 2;
+        if (limit < 8) limit = 8;
+    } else {
+        limit = cfg.maxLeaseEntries;
+    }
+    if (limit < 8) limit = 8;
+    if (limit > 512) limit = 512;
+    maxLeaseEntriesEffective_ = limit;
+
+    ESP_LOGI(TAG, "Lease table cap: %u entries%s (%u in the table now)",
+             (unsigned)maxLeaseEntriesEffective_,
+             cfg.maxLeaseEntries == 0 ? ", auto (2x pool)" : " (configured)",
+             (unsigned)leases_.size());
+}
+
+bool DhcpServer::canAddLeaseEntry(uint32_t ip)
+{
+    if (leases_.find(ip) != leases_.end()) return true;  // update, not insert
+    // A table that only looks full because of stale offers frees itself here.
+    if (leases_.size() >= maxLeaseEntriesEffective_) {
+        removeExpiredLeases();
+    }
+    if (leases_.size() < maxLeaseEntriesEffective_) return true;
+
+    ++leaseLimitRejects_;
+    ESP_LOGW(TAG, "Lease table full (%u entries, cap %u) — refusing " IP_FMT
+                  ", %u refused so far",
+             (unsigned)leases_.size(), (unsigned)maxLeaseEntriesEffective_,
+             IP_FMT_ARGS(ip), (unsigned)leaseLimitRejects_);
+    return false;
+}
+
 void DhcpServer::addLease(const uint8_t* mac, uint32_t ip)
 {
     DhcpLease lease;
@@ -1015,7 +1078,7 @@ void DhcpServer::addLease(const uint8_t* mac, uint32_t ip)
     }
 }
 
-void DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
+bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
 {
     // Reserve the offered IP for a short hold so concurrent DISCOVERs from
     // different clients don't get offered the same address. The reservation
@@ -1026,8 +1089,12 @@ void DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
     auto existing = leases_.find(ip);
     if (existing != leases_.end() &&
         existing->second.expiry > getCurrentTimeSec() + kOfferHoldSec) {
-        return;
+        return true;
     }
+
+    // Hard cap: a DHCP starvation flood (random MACs) must not grow the table
+    // without bound. The caller skips the OFFER when this returns false.
+    if (!canAddLeaseEntry(ip)) return false;
 
     DhcpLease lease;
     memcpy(lease.mac, mac, 6);
@@ -1040,6 +1107,7 @@ void DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
                  IP_FMT_ARGS(ip),
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
+    return true;
 }
 
 void DhcpServer::removeExpiredLeases()

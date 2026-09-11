@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="time">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Server — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="time.title">Time Server</h1>
+
+        <div class="card" id="time-status-card">
+            <strong data-i18n="time.server_status">Server Status:</strong>
+            <span id="time-server-state" class="status-badge status-stopped">--</span>
+            <span id="time-synced" style="margin-left:1rem;font-size:0.85rem;"></span>
+            <div id="time-now" style="margin-top:0.4rem;color:var(--text-secondary);font-size:0.85rem;"></div>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="time.sync_enabled">Sync clock (NTP client)</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-sync-enabled" onchange="toggleTimeSync()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="time.enable_disable">Enable NTP server</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-enabled" onchange="toggleTimeEnable()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="time.allow_own_subnet">Allow only own subnet</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="time.external_ntp">External NTP server</label>
+            <input type="text" id="time-external-ntp" placeholder="pool.ntp.org">
+
+            <label data-i18n="time.timezone" style="margin-top:0.8rem;display:block;">Timezone</label>
+            <select id="time-timezone" onchange="onTimezoneChange()"></select>
+
+            <div id="time-offset-row" style="display:none;margin-top:0.6rem;">
+                <label data-i18n="time.utc_offset">Custom offset (hours from UTC)</label>
+                <input type="number" id="time-utc-offset" min="-12" max="14" step="1" placeholder="3">
+            </div>
+
+            <label data-i18n="time.sync_interval" style="margin-top:0.8rem;display:block;">Sync interval (hours)</label>
+            <input type="number" id="time-sync-hours" min="1" max="168" step="1" placeholder="24">
+
+            <label data-i18n="time.rate_limit" style="margin-top:0.8rem;display:block;">Replies per second per IP</label>
+            <input type="number" id="time-rate-limit" min="1" max="100" step="1" placeholder="5">
+
+            <button class="btn btn-primary" onclick="saveTimeSettings()" data-i18n="time.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+
+        <div class="card" id="time-manual-card">
+            <strong data-i18n="time.manual_title">Set date/time manually</strong>
+
+            <label data-i18n="time.manual_date" style="margin-top:0.8rem;display:block;">Date (YYYY-MM-DD)</label>
+            <input type="text" id="time-set-date" maxlength="10" inputmode="numeric"
+                   autocomplete="off" placeholder="2026-09-11">
+
+            <label data-i18n="time.manual_time" style="margin-top:0.8rem;display:block;">Time (HH:MM:SS)</label>
+            <input type="text" id="time-set-time" maxlength="8" inputmode="numeric"
+                   autocomplete="off" placeholder="18:32:05">
+
+            <button class="btn btn-primary" onclick="setDeviceTime()" data-i18n="time.manual_set" style="margin-top:0.8rem;">Set</button>
+            <button class="btn" onclick="useComputerTime()" data-i18n="time.manual_from_pc" style="margin-top:0.8rem;margin-left:0.5rem;">Use computer time</button>
+            <p id="time-manual-status" class="test-conn-result" style="margin-top:0.6rem;"></p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Curated timezone list (fixed offsets, no DST): all Russian zones +
+        // neighbours + popular world zones. `id` matches the value stored by
+        // the backend (TimeConfig.timezone).
+        const TIMEZONES = [
+            { id: 'UTC', abbr: 'UTC', off: 0 },
+            { id: 'Europe/London', abbr: 'GMT', off: 0 },
+            { id: 'Europe/Berlin', abbr: 'CET', off: 1 },
+            { id: 'Europe/Paris', abbr: 'CET', off: 1 },
+            { id: 'Europe/Warsaw', abbr: 'CET', off: 1 },
+            { id: 'Europe/Kyiv', abbr: 'EET', off: 2 },
+            { id: 'Europe/Chisinau', abbr: 'EET', off: 2 },
+            { id: 'Europe/Athens', abbr: 'EET', off: 2 },
+            { id: 'Europe/Riga', abbr: 'EET', off: 2 },
+            { id: 'Europe/Tallinn', abbr: 'EET', off: 2 },
+            { id: 'Europe/Kaliningrad', abbr: 'EET', off: 2 },
+            { id: 'Europe/Moscow', abbr: 'MSK', off: 3 },
+            { id: 'Europe/Minsk', abbr: 'MSK', off: 3 },
+            { id: 'Europe/Istanbul', abbr: 'TRT', off: 3 },
+            { id: 'Asia/Yerevan', abbr: 'AMT', off: 4 },
+            { id: 'Asia/Baku', abbr: 'AZT', off: 4 },
+            { id: 'Asia/Tbilisi', abbr: 'GET', off: 4 },
+            { id: 'Asia/Dubai', abbr: 'GST', off: 4 },
+            { id: 'Europe/Samara', abbr: 'SAMT', off: 4 },
+            { id: 'Asia/Yekaterinburg', abbr: 'YEKT', off: 5 },
+            { id: 'Asia/Tashkent', abbr: 'UZT', off: 5 },
+            { id: 'Asia/Karachi', abbr: 'PKT', off: 5 },
+            { id: 'Asia/Almaty', abbr: 'ALMT', off: 5 },
+            { id: 'Asia/Omsk', abbr: 'OMST', off: 6 },
+            { id: 'Asia/Krasnoyarsk', abbr: 'KRAT', off: 7 },
+            { id: 'Asia/Bangkok', abbr: 'ICT', off: 7 },
+            { id: 'Asia/Shanghai', abbr: 'CST', off: 8 },
+            { id: 'Asia/Irkutsk', abbr: 'IRKT', off: 8 },
+            { id: 'Asia/Tokyo', abbr: 'JST', off: 9 },
+            { id: 'Asia/Seoul', abbr: 'KST', off: 9 },
+            { id: 'Asia/Yakutsk', abbr: 'YAKT', off: 9 },
+            { id: 'Australia/Sydney', abbr: 'AEST', off: 10 },
+            { id: 'Asia/Vladivostok', abbr: 'VLAT', off: 10 },
+            { id: 'Asia/Magadan', abbr: 'MAGT', off: 11 },
+            { id: 'Pacific/Auckland', abbr: 'NZST', off: 12 },
+            { id: 'Asia/Kamchatka', abbr: 'PETT', off: 12 },
+            { id: 'America/Sao_Paulo', abbr: 'BRT', off: -3 },
+            { id: 'America/Argentina/Buenos_Aires', abbr: 'ART', off: -3 },
+            { id: 'America/New_York', abbr: 'EST', off: -5 },
+            { id: 'America/Chicago', abbr: 'CST', off: -6 },
+            { id: 'America/Denver', abbr: 'MST', off: -7 },
+            { id: 'America/Los_Angeles', abbr: 'PST', off: -8 },
+            { id: 'Pacific/Honolulu', abbr: 'HST', off: -10 },
+        ];
+        const CUSTOM_TZ = '__custom__';
+
+        function findZone(id) {
+            return TIMEZONES.find(z => z.id === id) || null;
+        }
+
+        function fillTimezoneSelect() {
+            const sel = document.getElementById('time-timezone');
+            if (!sel) return;
+            const prev = sel.value;
+            sel.innerHTML = '';
+            const zones = TIMEZONES.slice().sort(
+                (a, b) => (a.off - b.off) || a.id.localeCompare(b.id));
+            for (const z of zones) {
+                const o = document.createElement('option');
+                o.value = z.id;
+                o.dataset.offset = z.off;
+                o.dataset.abbr = z.abbr;
+                o.textContent = z.id + ' (' + z.abbr + ')';
+                sel.appendChild(o);
+            }
+            const custom = document.createElement('option');
+            custom.value = CUSTOM_TZ;
+            custom.textContent = tr('time.custom_offset');
+            sel.appendChild(custom);
+            if (prev) sel.value = prev;
+        }
+
+        function onTimezoneChange() {
+            const sel = document.getElementById('time-timezone');
+            const row = document.getElementById('time-offset-row');
+            if (sel && row) row.style.display = (sel.value === CUSTOM_TZ) ? 'block' : 'none';
+        }
+
+        // Offset (in hours from UTC) currently selected on the page — the
+        // timezone select wins, the hidden custom-offset input is used when
+        // "custom" is chosen. Shared by readTimeForm() and setDeviceTime(),
+        // so an unsaved timezone change is applied consistently.
+        function currentOffsetHours() {
+            const sel = document.getElementById('time-timezone');
+            if (!sel) return 3;
+            if (sel.value === CUSTOM_TZ) {
+                const typed = parseInt(document.getElementById('time-utc-offset').value, 10);
+                return isNaN(typed) ? 0 : typed;
+            }
+            const opt = sel.selectedOptions[0];
+            const off = opt ? parseInt(opt.dataset.offset, 10) : NaN;
+            return isNaN(off) ? 0 : off;
+        }
+
+        // Time Server General page — owns {enabled, sync_enabled, external_ntp,
+        // timezone, utc_offset_hours, sync_interval_sec}. The Logging sub-page
+        // owns the rest of the settings object; every save merges with the
+        // current server state via saveTimePartial().
+        function readTimeForm() {
+            const hours = parseInt(document.getElementById('time-sync-hours').value, 10);
+            const sel = document.getElementById('time-timezone');
+            const isCustom = sel.value === CUSTOM_TZ;
+            return {
+                enabled: document.getElementById('time-enabled').checked,
+                sync_enabled: document.getElementById('time-sync-enabled').checked,
+                allow_own_subnet: document.getElementById('time-allow-own-subnet').checked,
+                external_ntp: document.getElementById('time-external-ntp').value,
+                // Empty timezone = custom fixed offset.
+                timezone: isCustom ? '' : sel.value,
+                utc_offset_hours: currentOffsetHours(),
+                // The UI edits the interval in hours; the API stores seconds.
+                sync_interval_sec: (isNaN(hours) || hours < 1 ? 24 : hours) * 3600,
+                // Per-client reply limit (1..100/s); the API clamps it as well.
+                rate_limit_per_sec: (() => {
+                    const rate = parseInt(document.getElementById('time-rate-limit').value, 10);
+                    if (isNaN(rate) || rate < 1) return 5;
+                    return rate > 100 ? 100 : rate;
+                })(),
+            };
+        }
+
+        let lastTimeData = null;
+        // The manual date/time fields FOLLOW the device clock: they are
+        // refreshed from `now_local` on every status poll (so a successful NTP
+        // synchronisation is visible immediately), but never while the operator
+        // is editing them — `manualDirty` is raised by the input event and
+        // cleared again once the values have been applied to the device.
+        let manualDirty = false;
+        // Lowest date/time the form accepts — a build constant reported by the
+        // device as `min_datetime` (hour granularity, e.g. "2026-09-11 19:00:00").
+        // Not shown in the UI any more (the user removed the "Minimum: …" line);
+        // it is still enforced here and appears in the rejection message.
+        let minDateTime = '';
+
+        function fillManualTimeFields(data, force) {
+            if (!force && manualDirty) return;
+            const dateEl = document.getElementById('time-set-date');
+            const timeEl = document.getElementById('time-set-time');
+            if (!dateEl || !timeEl) return;
+            const stamp = data.now_local || data.now_utc || '';
+            if (stamp.length < 16) return;
+            dateEl.value = stamp.slice(0, 10);
+            timeEl.value = stamp.slice(11, 19);
+        }
+
+        function setManualStatus(text, ok) {
+            const el = document.getElementById('time-manual-status');
+            if (!el) return;
+            el.textContent = text;
+            el.className = 'test-conn-result ' + (ok ? 'test-conn-ok' : 'test-conn-fail');
+        }
+
+        // Date/time fields are plain TEXT inputs on purpose: the native
+        // <input type="date">/<input type="time"> render in the BROWSER's
+        // locale (MM/DD/YYYY, "08:15 PM") regardless of the page language.
+        // These helpers enforce a locale-independent 24-hour format and accept
+        // the relaxed "2026-9-1 8:05" form, normalising it before sending.
+        // The device re-validates with TimeMath::parseDateTime().
+        function parseDateTimeInput(text) {
+            const m = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/
+                      .exec((text || '').trim());
+            if (!m) return null;
+            const dt = {
+                year: +m[1], month: +m[2], day: +m[3],
+                hour: +m[4], minute: +m[5], second: m[6] ? +m[6] : 0,
+            };
+            if (dt.year < 1970) return null;
+            if (dt.month < 1 || dt.month > 12) return null;
+            const leap = (dt.year % 4 === 0 && dt.year % 100 !== 0) || dt.year % 400 === 0;
+            const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][dt.month - 1];
+            if (dt.day < 1 || dt.day > dim) return null;
+            if (dt.hour > 23 || dt.minute > 59 || dt.second > 59) return null;
+            return dt;
+        }
+
+        const pad2 = n => String(n).padStart(2, '0');
+
+        function formatDateTimeInput(dt) {
+            return dt.year + '-' + pad2(dt.month) + '-' + pad2(dt.day) + ' ' +
+                   pad2(dt.hour) + ':' + pad2(dt.minute) + ':' + pad2(dt.second);
+        }
+
+        // Take the PC clock and apply it right away. `new Date()` is the same
+        // INSTANT everywhere; adding the offset selected on the page (and then
+        // reading the UTC fields) yields that instant expressed in the chosen
+        // timezone — so the device shows the same time as the computer even
+        // when the two machines sit in different zones.
+        function useComputerTime() {
+            const now = new Date();
+            const shifted = new Date(now.getTime() + currentOffsetHours() * 3600000);
+            const stamp = formatDateTimeInput({
+                year: shifted.getUTCFullYear(),
+                month: shifted.getUTCMonth() + 1,
+                day: shifted.getUTCDate(),
+                hour: shifted.getUTCHours(),
+                minute: shifted.getUTCMinutes(),
+                second: shifted.getUTCSeconds(),
+            });
+            document.getElementById('time-set-date').value = stamp.slice(0, 10);
+            document.getElementById('time-set-time').value = stamp.slice(11, 19);
+            // Programmatic fill, not an operator edit: let the fields follow
+            // the device clock again once the value has been applied.
+            manualDirty = false;
+            setDeviceTime();
+        }
+
+        // Set the device clock by hand. The value is LOCAL time in the selected
+        // timezone; POST /api/time/set converts it to UTC on the device.
+        async function setDeviceTime() {
+            const text = document.getElementById('time-set-date').value + ' ' +
+                         document.getElementById('time-set-time').value;
+            const dt = parseDateTimeInput(text);
+            if (!dt) {
+                setManualStatus(tr('time.manual_bad_format'), false);
+                return;
+            }
+            const datetime = formatDateTimeInput(dt);
+            // Same canonical "YYYY-MM-DD HH:MM:SS" form as min_datetime, so a
+            // plain string comparison is chronological.
+            if (minDateTime && datetime < minDateTime) {
+                setManualStatus(tr('time.manual_below_min') + ' ' + minDateTime, false);
+                return;
+            }
+            try {
+                const result = await postJSON('/api/time/set', {
+                    datetime: datetime,
+                    utc_offset_hours: currentOffsetHours(),
+                });
+                if (result.status === 'error') {
+                    setManualStatus(tr('time.manual_fail') + ': ' + (result.message || ''), false);
+                    return;
+                }
+                // Show what was actually applied (the device answers with its
+                // own clock, so the fields stay in sync with the device).
+                const applied = (result.now_local || '').slice(0, 19);
+                manualDirty = false;
+                if (applied.length === 19) { fillManualTimeFields({ now_local: applied }, true); }
+                setManualStatus(tr('time.manual_ok') + ' ' + (result.now_local || ''), true);
+                await loadTimeSettings();
+            } catch (e) {
+                setManualStatus(tr('time.manual_fail') + ': ' + e, false);
+            }
+        }
+
+        function updateTimeStatus(data) {
+            lastTimeData = data;
+            if (data.min_datetime) minDateTime = data.min_datetime;
+            const el = document.getElementById('time-server-state');
+            if (!el) return;
+            const state = data.server_state || 'unknown';
+            const labels = { running: tr('status.running'), stopped: tr('status.stopped'), error: tr('status.error'), unknown: tr('status.unknown') };
+            const classes = { running: 'status-ok', stopped: 'status-stopped', error: 'status-err', unknown: '' };
+            el.textContent = labels[state] || state;
+            el.className = 'status-badge ' + (classes[state] || '');
+
+            const syncEl = document.getElementById('time-synced');
+            if (syncEl) {
+                syncEl.textContent = data.synced ? tr('time.synced') : tr('time.not_synced');
+                syncEl.style.color = data.synced ? '#22c55e' : '#f59e0b';
+            }
+            const nowEl = document.getElementById('time-now');
+            if (nowEl) {
+                if (state === 'running') {
+                    const zoneLabel = data.timezone
+                        ? (findZone(data.timezone) ? findZone(data.timezone).id + ' (' + findZone(data.timezone).abbr + ')' : data.timezone)
+                        : ('UTC' + (data.utc_offset_hours >= 0 ? '+' : '') + data.utc_offset_hours);
+                    // Day-first, minute precision for display — the status is
+                    // polled every 5 s, so a seconds field would only tick in
+                    // jumps (the device clock keeps full precision).
+                    const stamp = formatDeviceTimeDisplay(data.now_local || data.now_utc);
+                    nowEl.textContent = tr('time.now') + ' ' + zoneLabel + ' ' + (stamp || '--');
+                } else {
+                    nowEl.textContent = '';
+                }
+            }
+        }
+
+        async function loadTimeSettings() {
+            const data = await fetchJSON('/api/time/settings');
+            document.getElementById('time-enabled').checked = data.enabled === true;
+            document.getElementById('time-sync-enabled').checked = data.sync_enabled === true;
+            document.getElementById('time-external-ntp').value = data.external_ntp || '';
+            const sel = document.getElementById('time-timezone');
+            const zone = data.timezone ? findZone(data.timezone) : null;
+            if (zone) {
+                sel.value = zone.id;
+            } else {
+                sel.value = CUSTOM_TZ;
+            }
+            document.getElementById('time-utc-offset').value =
+                (data.utc_offset_hours !== undefined && data.utc_offset_hours !== null) ? data.utc_offset_hours : 3;
+            onTimezoneChange();
+            const hours = Math.round((data.sync_interval_sec || 86400) / 3600);
+            document.getElementById('time-sync-hours').value = hours;
+            document.getElementById('time-allow-own-subnet').checked = data.allow_own_subnet === true;
+            document.getElementById('time-rate-limit').value = data.rate_limit_per_sec || 5;
+            updateTimeStatus(data);
+            fillManualTimeFields(data, false);
+        }
+
+        async function toggleTimeEnable() {
+            const checked = document.getElementById('time-enabled').checked;
+            const result = await saveTimePartial({ enabled: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('time-enabled').checked = !checked;
+            } else {
+                await loadTimeSettings();
+            }
+        }
+
+        async function toggleTimeSync() {
+            const checked = document.getElementById('time-sync-enabled').checked;
+            const result = await saveTimePartial({ sync_enabled: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('time-sync-enabled').checked = !checked;
+            } else {
+                await loadTimeSettings();
+            }
+        }
+
+        // "Allow only own subnet": the NTP server then answers only clients
+        // inside the device's subnet (device IP + netmask from the DHCP page);
+        // everyone else gets no reply at all.
+        async function toggleAllowOwnSubnet() {
+            const checked = document.getElementById('time-allow-own-subnet').checked;
+            const result = await saveTimePartial({ allow_own_subnet: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('time-allow-own-subnet').checked = !checked;
+            } else {
+                await loadTimeSettings();
+            }
+        }
+
+        async function saveTimeSettings() {
+            const result = await saveTimePartial(readTimeForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadTimeSettings();
+            alert('Time settings saved!');
+        }
+
+        // Re-render the timezone <option> labels after the dictionary loads
+        // (and on every language switch), keeping the current selection.
+        document.addEventListener('i18n-applied', () => {
+            fillTimezoneSelect();
+            onTimezoneChange();
+            if (lastTimeData) updateTimeStatus(lastTimeData);
+        });
+
+        // Any manual edit suspends the automatic refresh of the date/time
+        // fields until the values are applied to the device.
+        for (const id of ['time-set-date', 'time-set-time']) {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('input', () => { manualDirty = true; });
+        }
+
+        fillTimezoneSelect();
+        loadTimeSettings();
+
+        // Periodic status refresh (every 5 s) — shows the live device time and
+        // keeps the manual fields in step with the clock (unless being edited).
+        setInterval(async () => {
+            try {
+                const data = await fetchJSON('/api/time/settings');
+                updateTimeStatus(data);
+                fillManualTimeFields(data, false);
+            } catch (e) { /* ignore */ }
+        }, 5000);
+    </script>
+</body>
+</html>

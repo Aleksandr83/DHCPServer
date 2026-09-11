@@ -70,6 +70,29 @@ idf.py build
 > `CONFIG_ESP32P4_REV_MIN_100=y`, CPU capped at 360 MHz). Without these, the
 > bootloader refuses to run on rev v1.3 silicon.
 
+> **No separate `idf.py reconfigure` here.** `idf.py set-target` already does a
+> full reconfigure (it regenerates `sdkconfig` and re-runs CMake), and
+> `idf.py build` re-runs CMake by itself whenever `CMakeLists.txt` or the
+> `sdkconfig*` files change — that is why Kconfig edits are picked up without
+> any extra step.
+
+### When you do need `idf.py reconfigure`
+
+After **adding or removing a source file** in an existing `src/` directory
+(e.g. the new `src/time/TimeMath.cpp`). ESP-IDF resolves the component's
+`SRC_DIRS` with a plain `file(GLOB ...)` **without `CONFIGURE_DEPENDS`**, so a
+new `.cpp` stays invisible to Ninja until CMake is re-run (the only
+`CMAKE_CONFIGURE_DEPENDS` entry is for `idf_component.yml`).
+
+```powershell
+idf.py reconfigure
+idf.py build
+```
+
+A new *directory* under `src/` additionally needs the name added to
+`DHCPSERVER_SRC_DIRS` in [`src/CMakeLists.txt`](../src/CMakeLists.txt) — that
+edit changes `CMakeLists.txt`, so CMake re-runs on its own.
+
 ---
 
 ## Flashing the firmware
@@ -177,4 +200,5 @@ no `fat` row the firmware still boots normally.
 | Web UI shows plain "Not Found" | SPIFFS not mounted (check boot log for `SPIFFS mount failed` / `too large for spiffs_page_ix`) or web UI not uploaded yet — run [`scripts/upload_web_p4.ps1`](../scripts/upload_web_p4.ps1). |
 | `SPIFFS mount failed (ESP_ERR_INVALID_ARG)` + `spiffs partition is too large for spiffs_page_ix type` | The `spiffs` partition exceeds the page-count limit. Shrink the partition to ≤ 16 MB (keep page 256) or raise `CONFIG_SPIFFS_PAGE_SIZE` to 1024 (see [Partition table](#partition-table)). |
 | `File not found: /spiffs/...` in the web server log | The file really is missing from SPIFFS — re-run the web-UI upload script. |
+| A new `.cpp` is ignored — `undefined reference to ...` at link time | The `SRC_DIRS` glob was frozen at configure time — run `idf.py reconfigure`, then `idf.py build` (see [When you do need `idf.py reconfigure`](#when-you-do-need-idfpy-reconfigure)). |
 | Web UI upload geometry mismatch wipes data | Image geometry must match the firmware's `CONFIG_SPIFFS_*` (the script uses the defaults above). If it doesn't, SPIFFS auto-formats on mount. |

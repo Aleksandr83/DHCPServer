@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="time">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time Server Logging — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="time_logging.title">Time Server Logging</h1>
+
+        <div class="card toggle-row">
+            <span data-i18n="time_logging.log_terminal">Log to Terminal</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-log-terminal" onchange="toggleTimeLogTerminal()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card toggle-row">
+            <span data-i18n="time_logging.log_rest">Log to External REST</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-log-rest" onchange="toggleTimeLogRest()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
+        <div class="card">
+            <label data-i18n="time_logging.log_url">Logging URL (REST)</label>
+            <input type="text" id="time-log-url" placeholder="https://dhcpserverweb/api/v1/ntp/log">
+
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="time_logging.log_auth">Authorization required</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="time-log-auth" onchange="toggleTimeLogAuth()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div id="time-log-auth-fields" class="auth-fields" style="display:none;">
+                <div class="auth-pair">
+                    <div class="auth-field">
+                        <label data-i18n="time_logging.log_auth_user">Login</label>
+                        <input type="text" id="time-log-auth-user" autocomplete="off">
+                    </div>
+                    <div class="auth-field">
+                        <label data-i18n="time_logging.log_auth_pass">Password</label>
+                        <input type="password" id="time-log-auth-pass" autocomplete="new-password">
+                    </div>
+                </div>
+            </div>
+
+            <div class="test-conn-row">
+                <button class="btn btn-primary" onclick="testTimeLogConnection()" data-i18n="time_logging.test_connection">Test connection</button>
+                <span id="time-log-test-result" class="test-conn-result"></span>
+            </div>
+
+            <button class="btn btn-primary" onclick="saveTimeSettings()" data-i18n="time_logging.save" style="margin-top:0.8rem;">Save</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Time Server Logging page — owns the log_* subset of the time settings.
+        // Every save merges with the current server state via saveTimePartial().
+        let savedTimeLog = null;
+
+        function readTimeForm() {
+            return {
+                log_terminal: document.getElementById('time-log-terminal').checked,
+                log_rest: document.getElementById('time-log-rest').checked,
+                log_url: document.getElementById('time-log-url').value,
+                log_auth: document.getElementById('time-log-auth').checked,
+                log_auth_user: document.getElementById('time-log-auth-user').value,
+                log_auth_password: document.getElementById('time-log-auth-pass').value,
+            };
+        }
+
+        async function loadTimeSettings() {
+            const data = await fetchJSON('/api/time/settings');
+            document.getElementById('time-log-terminal').checked = data.log_terminal || false;
+            document.getElementById('time-log-rest').checked = data.log_rest || false;
+            document.getElementById('time-log-url').value = data.log_url || '';
+            document.getElementById('time-log-auth').checked = data.log_auth || false;
+            document.getElementById('time-log-auth-user').value = data.log_auth_user || '';
+            document.getElementById('time-log-auth-pass').value = data.log_auth_password || '';
+            savedTimeLog = {
+                url: data.log_url || '',
+                auth: data.log_auth || false,
+                user: data.log_auth_user || '',
+                pass: data.log_auth_password || ''
+            };
+            updateTimeLogAuthVisibility();
+        }
+
+        function updateTimeLogAuthVisibility() {
+            const fields = document.getElementById('time-log-auth-fields');
+            if (fields) {
+                fields.style.display = document.getElementById('time-log-auth').checked ? 'flex' : 'none';
+            }
+        }
+
+        // Generic single-toggle saver (DRY): flips one boolean field in the
+        // settings object and reverts the checkbox on error.
+        async function toggleTimeField(key, elId) {
+            const el = document.getElementById(elId);
+            const checked = el.checked;
+            const result = await saveTimePartial({ [key]: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                el.checked = !checked;
+            }
+        }
+
+        async function toggleTimeLogTerminal() { await toggleTimeField('log_terminal', 'time-log-terminal'); }
+
+        async function toggleTimeLogRest() { await toggleTimeField('log_rest', 'time-log-rest'); }
+
+        async function toggleTimeLogAuth() {
+            const checked = document.getElementById('time-log-auth').checked;
+            const result = await saveTimePartial({
+                log_auth: checked,
+                log_auth_user: document.getElementById('time-log-auth-user').value,
+                log_auth_password: document.getElementById('time-log-auth-pass').value
+            });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                document.getElementById('time-log-auth').checked = !checked;
+            }
+            updateTimeLogAuthVisibility();
+        }
+
+        async function testTimeLogConnection() {
+            const form = {
+                url: document.getElementById('time-log-url').value,
+                auth: document.getElementById('time-log-auth').checked,
+                user: document.getElementById('time-log-auth-user').value,
+                pass: document.getElementById('time-log-auth-pass').value
+            };
+            await testConnection('time-log-test-result', 'time_log', savedTimeLog, form, 'time_logging');
+        }
+
+        async function saveTimeSettings() {
+            const result = await saveTimePartial(readTimeForm());
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                return;
+            }
+            await loadTimeSettings();
+            alert('Time settings saved!');
+        }
+
+        loadTimeSettings();
+    </script>
+</body>
+</html>
