@@ -210,6 +210,29 @@ static int test_join_parent_basename()
     return 0;
 }
 
+/** `<name>.part` is reserved for uploads: neither creatable nor listed. */
+static int test_upload_part_names()
+{
+    TEST_ASSERT_TRUE(PathUtil::isPartName("movie.mkv.part"));
+    TEST_ASSERT_TRUE(PathUtil::isPartName("a.part"));
+    TEST_ASSERT_FALSE(PathUtil::isPartName(".part"));       // the suffix alone
+    TEST_ASSERT_FALSE(PathUtil::isPartName("part"));
+    TEST_ASSERT_FALSE(PathUtil::isPartName("x.part.txt"));
+    TEST_ASSERT_FALSE(PathUtil::isPartName("x.PART"));      // FAT is case-insensitive, the suffix is not
+
+    TEST_ASSERT_FALSE(PathUtil::isValidName("movie.mkv.part"));
+    TEST_ASSERT_FALSE(PathUtil::isValidName("a.part"));
+    TEST_ASSERT_TRUE(PathUtil::isValidName("part"));
+    TEST_ASSERT_TRUE(PathUtil::isValidName("part.txt"));
+
+    std::string route;
+    TEST_ASSERT_FALSE(PathUtil::normalize("/logs/movie.mkv.part", route));
+    TEST_ASSERT_FALSE(PathUtil::normalizeChild("/logs", "x.part", route));
+    TEST_ASSERT_TRUE(PathUtil::normalize("/logs/movie.mkv", route));
+
+    return 0;
+}
+
 void app_main()
 {
     printf("Running PathUtil tests...\n");
@@ -219,6 +242,7 @@ void app_main()
     failures += test_normalize_rejects();
     failures += test_normalize_limits();
     failures += test_valid_name();
+    failures += test_upload_part_names();
     failures += test_normalize_child();
     failures += test_join_parent_basename();
 

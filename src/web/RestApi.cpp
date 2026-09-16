@@ -2918,6 +2918,29 @@ esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
 // body length is missing (a chunked upload cannot be space-checked), 507 when
 // the volume cannot hold it, 500 when the write or the final rename fails.
 
+/**
+ * @brief Read an unsigned decimal query parameter.
+ *
+ * `offset`/`total` of a resumable upload have to be plain numbers: a client that
+ * sends something else is told so instead of getting a silent zero.
+ *
+ * @return false when the parameter is absent or not a plain number.
+ */
+static bool queryParamU64(httpd_req* req, const char* key, uint64_t& out)
+{
+    std::string raw;
+    if (!queryParam(req, key, raw)) return false;
+    if (raw.empty() || raw.size() > 20) return false;
+
+    uint64_t value = 0;
+    for (char c : raw) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+    out = value;
+    return true;
+}
+
 esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
@@ -2932,6 +2955,21 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
         return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
     }
 
+    // `total` turns the request into one piece of a resumable upload: the client
+    // says how big the finished file will be and where this piece starts, so a
+    // transfer can be paused and continued (see UploadRange). Without it the
+    // body is the whole file, which is what every older client sends.
+    uint64_t offset = 0, total = 0;
+    const bool hasOffset = queryParamU64(req, "offset", offset);
+    const bool hasTotal = queryParamU64(req, "total", total);
+    if (hasOffset && !hasTotal) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"offset requires total\"}");
+        return ESP_OK;
+    }
+
     // The free-space check needs to know the size up front; browsers always
     // send Content-Length for a file body.
     if (req->content_len <= 0) {
@@ -2941,11 +2979,13 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
         return ESP_OK;
     }
 
-    const uint64_t expected = static_cast<uint64_t>(req->content_len);
+    const uint64_t chunk = static_cast<uint64_t>(req->content_len);
 
+    ::dhcp::files::UploadRange range;
     std::unique_ptr<::dhcp::files::IFileSink> sink;
     std::string detail;
-    auto st = s_files->openWrite(volume, path, expected, sink, &detail);
+    auto st = s_files->openWrite(volume, path, hasOffset ? offset : 0,
+                                 hasTotal ? total : 0, chunk, sink, range, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
     }
@@ -2960,7 +3000,7 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
 
     // httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between TCP segments of
     // a multi-chunk body — the same bounded retry as the other upload handlers.
-    uint64_t remaining = expected;
+    uint64_t remaining = chunk;
     int retries = 0;
     bool ok = true;
     while (remaining > 0) {
@@ -2983,15 +3023,52 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
         remaining -= static_cast<uint64_t>(got);
     }
 
-    if (!ok || !sink->commit()) {
+    // A paused or interrupted upload answers with the offset it reached: that is
+    // the number the client continues from, and it comes from the device rather
+    // than from what the client thought it had sent.
+    auto sendPartial = [&req, &range](uint64_t written) {
+        std::string json = "{\"status\":\"partial\"";
+        addJsonInt(json, "offset", static_cast<int64_t>(written), true);
+        addJsonInt(json, "total", static_cast<int64_t>(range.total), true);
+        json += "}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, json.c_str());
+        return ESP_OK;
+    };
+
+    if (!ok || !range.completes()) {
+        const uint64_t written = sink->written();
+
+        // A body that stopped early can only be continued in resumable mode —
+        // and only if the client is still there to hear about it. Without
+        // `total` there is nothing to continue, so the partial file goes.
+        if (!range.resumable) {
+            sink->abort();
+            ESP_LOGE(TAG, "upload into '%s' failed after %llu of %llu bytes",
+                     path.c_str(), (unsigned long long)written,
+                     (unsigned long long)range.total);
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"upload failed\","
+                "\"detail\":\"incomplete or write error\"}");
+            return ESP_OK;
+        }
+
+        sink->keep();
+        ESP_LOGI(TAG, "upload of '%s' kept at %llu of %llu bytes",
+                 path.c_str(), (unsigned long long)written,
+                 (unsigned long long)range.total);
+        return sendPartial(written);
+    }
+
+    if (!sink->commit()) {
         sink->abort();
-        ESP_LOGE(TAG, "upload into '%s' failed after %llu of %llu bytes",
-                 path.c_str(), (unsigned long long)sink->written(),
-                 (unsigned long long)expected);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
-            "{\"status\":\"error\",\"message\":\"upload failed\",\"detail\":\"incomplete or write error\"}");
+            "{\"status\":\"error\",\"message\":\"upload failed\","
+            "\"detail\":\"cannot publish the file\"}");
         return ESP_OK;
     }
 
@@ -3004,6 +3081,68 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
     json += "}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/files/upload/offset
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetFileUploadOffset(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
+    }
+    if (!queryParam(req, "path", path)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    uint64_t offset = 0;
+    std::string detail;
+    auto st = s_files->uploadOffset(volume, path, offset, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    std::string json = "{";
+    addJsonInt(json, "offset", static_cast<int64_t>(offset), false);
+    json += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/files/upload/cancel
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostFileUploadCancel(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
+    }
+    if (!queryParam(req, "path", path)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    std::string detail;
+    auto st = s_files->discardUpload(volume, path, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
     return ESP_OK;
 }
 
@@ -3281,7 +3420,11 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
     }
 
     std::unique_ptr<::dhcp::files::IFileSink> sink;
-    auto st = s_files->openWrite(volume, path, text.size(), sink, &detail);
+    // The editor saves a whole file in one go, so there is nothing to resume:
+    // no `total`, and an empty text is a valid empty file (the same meaning the
+    // upload endpoint always had for one request).
+    ::dhcp::files::UploadRange range;
+    auto st = s_files->openWrite(volume, path, 0, 0, text.size(), sink, range, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
     }

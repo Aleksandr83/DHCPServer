@@ -74,8 +74,13 @@ public:
     FileStatus stat(const std::string& volumeId, const std::string& path,
                     FileEntry& out, std::string* detail = nullptr) override;
     FileStatus openWrite(const std::string& volumeId, const std::string& path,
-                         uint64_t expectedLen, std::unique_ptr<IFileSink>& out,
+                         uint64_t offset, uint64_t totalLen, uint64_t chunkLen,
+                         std::unique_ptr<IFileSink>& out, UploadRange& range,
                          std::string* detail = nullptr) override;
+    FileStatus uploadOffset(const std::string& volumeId, const std::string& path,
+                            uint64_t& offset, std::string* detail = nullptr) override;
+    FileStatus discardUpload(const std::string& volumeId, const std::string& path,
+                             std::string* detail = nullptr) override;
     uint64_t freeBytes(const std::string& volumeId) override;
     FileStatus checkStart(const std::string& volumeId,
                           std::string* detail = nullptr) override;

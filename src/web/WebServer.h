@@ -82,6 +82,8 @@ private:
     static esp_err_t postFileFormatHandler(httpd_req* req) { return RestApi::handlePostFileFormat(req); }
     static esp_err_t getFileDownloadHandler(httpd_req* req) { return RestApi::handleGetFileDownload(req); }
     static esp_err_t postFileUploadHandler(httpd_req* req) { return RestApi::handlePostFileUpload(req); }
+    static esp_err_t getFileUploadOffsetHandler(httpd_req* req) { return RestApi::handleGetFileUploadOffset(req); }
+    static esp_err_t postFileUploadCancelHandler(httpd_req* req) { return RestApi::handlePostFileUploadCancel(req); }
     static esp_err_t getFileTextHandler(httpd_req* req) { return RestApi::handleGetFileText(req); }
     static esp_err_t postFileTextHandler(httpd_req* req) { return RestApi::handlePostFileText(req); }
     static esp_err_t getFileSettingsHandler(httpd_req* req) { return RestApi::handleGetFileSettings(req); }

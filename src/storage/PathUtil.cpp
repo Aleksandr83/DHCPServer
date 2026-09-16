@@ -76,10 +76,21 @@ bool PathUtil::isValidChar(char c)
     }
 }
 
+bool PathUtil::isPartName(const std::string& name)
+{
+    const std::string suffix = kUploadPartSuffix;
+    if (name.size() <= suffix.size()) return false;
+    return name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 bool PathUtil::isValidName(const std::string& name)
 {
     if (name.empty() || name.size() > kMaxSegmentLen) return false;
     if (name == "." || name == "..") return false;
+
+    // `.part` belongs to the upload machinery (see isPartName): accepting the
+    // name would create a file the operator can never see or manage again.
+    if (isPartName(name)) return false;
 
     // FATFS trims trailing dots/spaces on create, so a name that ends with one
     // would never be found again — reject it up front.

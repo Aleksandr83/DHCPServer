@@ -71,6 +71,8 @@ public:
     static esp_err_t handlePostFileFormat(httpd_req* req);
     static esp_err_t handleGetFileDownload(httpd_req* req);
     static esp_err_t handlePostFileUpload(httpd_req* req);
+    static esp_err_t handleGetFileUploadOffset(httpd_req* req);
+    static esp_err_t handlePostFileUploadCancel(httpd_req* req);
     static esp_err_t handleGetFileText(httpd_req* req);
     static esp_err_t handlePostFileText(httpd_req* req);
     static esp_err_t handleGetFileSettings(httpd_req* req);

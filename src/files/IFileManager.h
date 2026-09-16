@@ -8,6 +8,7 @@
 
 #include "IFileSink.h"
 #include "IFileSource.h"
+#include "UploadRange.h"
 #include "../storage/IFileSystem.h"
 
 namespace dhcp {
@@ -207,24 +208,53 @@ public:
                                 std::string* detail = nullptr) = 0;
 
     /**
-     * @brief Open a file for a streamed upload.
+     * @brief Open a file for a streamed upload, optionally continuing one.
      *
-     * Performs the checks that must happen *before* the HTTP body is read:
-     * the volume is mounted, the path is a valid file path, magic/`.part`-like
-     * names inside the volume are accepted, and the free space is at least
-     * @p expectedLen plus a small reserve — otherwise
-     * @ref FileStatus::NoSpace is returned and the caller can answer `507`
-     * without wasting the transfer.
+     * Performs the checks that must happen *before* the HTTP body is read: the
+     * volume is mounted, the path is a valid file path, the chunk lines up with
+     * the temporary file already on the device (see `UploadRange`) and the volume
+     * still has room for the bytes this chunk adds — otherwise the caller can
+     * answer `409`/`507` without wasting the transfer. A request without
+     * @p totalLen carries the whole file in one body and starts from scratch, as
+     * uploads always have.
      *
      * An existing file with the same name is replaced on @ref IFileSink::commit.
+     * A chunk that does not finish the file is kept for the next request
+     * (@ref IFileSink::keep).
      *
-     * @param[in]  expectedLen `Content-Length` of the upload (0 = empty file).
-     * @param[out] out         Sink to push byte windows into; untouched on failure.
+     * @param[in]  offset   Bytes already uploaded (`0` for a new file).
+     * @param[in]  totalLen Size of the finished file; `0` = the body is the whole
+     *                      file, i.e. the client cannot continue it later.
+     * @param[in]  chunkLen `Content-Length` of this request.
+     * @param[out] out      Sink for the body; untouched on failure.
+     * @param[out] range    Checked numbers of this chunk: `completes()` tells
+     *                      whether the file is finished, `endOffset()` where it
+     *                      ends on the device.
      */
     virtual FileStatus openWrite(const std::string& volumeId,
-                                 const std::string& path, uint64_t expectedLen,
-                                 std::unique_ptr<IFileSink>& out,
+                                 const std::string& path,
+                                 uint64_t offset, uint64_t totalLen, uint64_t chunkLen,
+                                 std::unique_ptr<IFileSink>& out, UploadRange& range,
                                  std::string* detail = nullptr) = 0;
+
+    /**
+     * @brief How much of a paused upload is already on the device.
+     *
+     * `0` when nothing was started or the temporary file is gone, so a client
+     * coming back after a pause — or after a reboot — knows where to continue;
+     * the number is the size of `<path>.part`.
+     */
+    virtual FileStatus uploadOffset(const std::string& volumeId, const std::string& path,
+                                    uint64_t& offset, std::string* detail = nullptr) = 0;
+
+    /**
+     * @brief Throw away the temporary file of an upload (the operator cancelled).
+     *
+     * @return @ref FileStatus::Ok when there was nothing to remove: a cancel is
+     *         not an error, whatever state the upload was left in.
+     */
+    virtual FileStatus discardUpload(const std::string& volumeId, const std::string& path,
+                                     std::string* detail = nullptr) = 0;
 
     /** @brief Free bytes of a mounted volume (0 when it is not mounted). */
     virtual uint64_t freeBytes(const std::string& volumeId) = 0;

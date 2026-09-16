@@ -45,6 +45,17 @@ public:
 
     /** @brief Discard the upload (removes the temporary file). */
     virtual void abort() = 0;
+
+    /**
+     * @brief Close the temporary file and leave it for a later continuation.
+     *
+     * Used by a resumable upload: a chunk that does not finish the file keeps
+     * `<name>.part` in place, and the next request continues at that offset (see
+     * `IFileManager::openWrite`). Without this call the sink is still
+     * “unfinished”, so destroying it discards the upload — which is what an
+     * interrupted transfer wants. @ref commit is impossible afterwards.
+     */
+    virtual void keep() = 0;
 };
 
 } // namespace files

@@ -68,6 +68,17 @@ public:
      */
     static bool isValidName(const std::string& name);
 
+    /**
+     * @brief Suffix of the temporary file of an upload (`<name>.part`).
+     *
+     * Reserved: the upload machinery owns `.part` names, so the API refuses to
+     * create one and the explorer does not list them (see @ref isPartName).
+     */
+    static constexpr const char* kUploadPartSuffix = ".part";
+
+    /** @brief True when @p name is the temporary file name of an upload. */
+    static bool isPartName(const std::string& name);
+
     /** @brief True when @p c may appear inside a path segment. */
     static bool isValidChar(char c);
 

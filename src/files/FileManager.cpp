@@ -296,6 +296,10 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
     while ((ent = readdir(dir)) != nullptr) {
         const std::string name = ent->d_name;
         if (name == "." || name == "..") continue;
+        // `<name>.part` is the temporary file of a paused (or abandoned) upload,
+        // and that suffix is reserved for it anyway: it is not operator data, so
+        // it is neither listed nor offered for open/rename/delete.
+        if (storage::PathUtil::isPartName(name)) continue;
 
         FileEntry e;
         e.name = name;
@@ -497,8 +501,9 @@ FileStatus FileManager::openRead(const std::string& volumeId,
 }
 
 FileStatus FileManager::openWrite(const std::string& volumeId,
-                                  const std::string& path, uint64_t expectedLen,
-                                  std::unique_ptr<IFileSink>& out,
+                                  const std::string& path,
+                                  uint64_t offset, uint64_t totalLen, uint64_t chunkLen,
+                                  std::unique_ptr<IFileSink>& out, UploadRange& range,
                                   std::string* detail)
 {
     storage::IFileSystem* vol = nullptr;
@@ -516,27 +521,94 @@ FileStatus FileManager::openWrite(const std::string& volumeId,
         return FileStatus::AlreadyExists;
     }
 
+    // How much of the file is already on the device decides whether this chunk
+    // continues the upload or has to start it over. The arithmetic lives in
+    // UploadRange; a client that lost track asks uploadOffset for the truth.
+    const std::string partPath = full + storage::PathUtil::kUploadPartSuffix;
+    uint64_t partSize = 0;
+    struct stat stPart = {};
+    if (::stat(partPath.c_str(), &stPart) == 0) {
+        partSize = static_cast<uint64_t>(stPart.st_size);
+    }
+
+    const std::string reason = UploadRange::check(partSize, offset, chunkLen,
+                                                  totalLen != 0, totalLen, range);
+    if (!reason.empty()) {
+        ESP_LOGW(TAG, "upload of %s refused: %s", rel.c_str(), reason.c_str());
+        if (detail) *detail = reason;
+        return FileStatus::Conflict;
+    }
+
     // Check the space *before* the body is read: a refused upload then costs
-    // the client nothing but a header round-trip.
+    // the client nothing but a header round-trip. A continued upload only needs
+    // room for the part that is still missing.
     const auto info = vol->info();
     if (info.mounted &&
-        info.freeBytes < expectedLen + kFreeSpaceReserve) {
+        info.freeBytes < range.neededBytes() + kFreeSpaceReserve) {
         ESP_LOGW(TAG, "upload of %llu bytes into %s rejected: %llu free",
-                 (unsigned long long)expectedLen, rel.c_str(),
+                 (unsigned long long)range.neededBytes(), rel.c_str(),
                  (unsigned long long)info.freeBytes);
         if (detail) *detail = "volume is full";
         return FileStatus::NoSpace;
     }
 
-    auto sink = std::make_unique<FileSink>(full);
+    auto sink = std::make_unique<FileSink>(full, range.offset);
     if (!sink->isOpen()) {
         if (detail) *detail = errnoText();
         return FileStatus::IoError;
     }
 
-    ESP_LOGI(TAG, "upload started: %s (%llu bytes, volume %s)", rel.c_str(),
-             (unsigned long long)expectedLen, volumeId.c_str());
+    ESP_LOGI(TAG, "upload started: %s (offset %llu of %llu, volume %s)", rel.c_str(),
+             (unsigned long long)range.offset, (unsigned long long)range.total,
+             volumeId.c_str());
     out = std::move(sink);
+    return FileStatus::Ok;
+}
+
+FileStatus FileManager::uploadOffset(const std::string& volumeId, const std::string& path,
+                                     uint64_t& offset, std::string* detail)
+{
+    offset = 0;
+
+    storage::IFileSystem* vol = nullptr;
+    FileStatus st = resolve(volumeId, vol);
+    if (st != FileStatus::Ok) return st;
+
+    std::string rel, full;
+    st = absolute(*vol, path, rel, full);
+    if (st != FileStatus::Ok) return st;
+
+    struct stat stPart = {};
+    if (::stat((full + storage::PathUtil::kUploadPartSuffix).c_str(), &stPart) != 0) {
+        // Nothing was started, or the temporary file is already gone: the client
+        // is told to begin at zero, which is also the answer after a reboot.
+        if (errno == ENOENT) return FileStatus::Ok;
+        if (detail) *detail = errnoText();
+        return FileStatus::IoError;
+    }
+
+    offset = static_cast<uint64_t>(stPart.st_size);
+    return FileStatus::Ok;
+}
+
+FileStatus FileManager::discardUpload(const std::string& volumeId, const std::string& path,
+                                      std::string* detail)
+{
+    storage::IFileSystem* vol = nullptr;
+    FileStatus st = resolve(volumeId, vol);
+    if (st != FileStatus::Ok) return st;
+
+    std::string rel, full;
+    st = absolute(*vol, path, rel, full);
+    if (st != FileStatus::Ok) return st;
+
+    if (::unlink((full + storage::PathUtil::kUploadPartSuffix).c_str()) != 0 &&
+        errno != ENOENT) {
+        if (detail) *detail = errnoText();
+        return FileStatus::IoError;
+    }
+
+    ESP_LOGI(TAG, "discarded the partial upload of %s", rel.c_str());
     return FileStatus::Ok;
 }
 

@@ -164,6 +164,8 @@ void WebServer::registerRoutes()
     reg("/api/files/format",         HTTP_POST,  postFileFormatHandler);
     reg("/api/files/download",       HTTP_GET,   getFileDownloadHandler);
     reg("/api/files/upload",         HTTP_POST,  postFileUploadHandler);
+    reg("/api/files/upload/offset",  HTTP_GET,   getFileUploadOffsetHandler);
+    reg("/api/files/upload/cancel",  HTTP_POST,  postFileUploadCancelHandler);
     reg("/api/files/text",           HTTP_GET,   getFileTextHandler);
     reg("/api/files/text",           HTTP_POST,  postFileTextHandler);
     reg("/api/files/settings",       HTTP_GET,   getFileSettingsHandler);

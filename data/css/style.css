@@ -1097,6 +1097,68 @@ th {
     border-top: 1px solid var(--border);
 }
 
+/* ─── Upload controls (pause / cancel) ─────────────── */
+/* Icon-only buttons in the upload progress row: that row already carries the file
+   name and the percentage, so text here would crowd it out. The icons are inline
+   SVG painted with `currentColor`, so they follow the button colour. */
+.files-progress-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    margin-bottom: 0.3rem;
+}
+
+/* Pushed next to the percentage rather than centred: while a transfer runs the
+   eye is on the value, and the buttons belong to it. */
+.files-progress-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    margin-left: auto;
+    margin-right: 0.5rem;
+}
+
+.files-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.files-icon-btn:hover {
+    color: var(--accent);
+    background: var(--bg-secondary);
+}
+
+.files-icon-btn svg {
+    display: block;
+    width: 14px;
+    height: 14px;
+}
+
+/* One button, two meanings: "pause" while a transfer runs and "resume" once the
+   operator has stopped it. The tooltip is switched in JS (from the dictionary),
+   the icon here — `display` alone keeps the layout from jumping. */
+.files-icon-btn .icon-play {
+    display: none;
+}
+
+.files-icon-btn.is-paused .icon-pause {
+    display: none;
+}
+
+.files-icon-btn.is-paused .icon-play {
+    display: block;
+}
+
 /* ─── Footer ───────────────────────────────────────── */
 
 .footer {

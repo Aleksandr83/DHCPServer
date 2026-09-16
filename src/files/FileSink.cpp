@@ -14,13 +14,18 @@ namespace {
 const char* TAG = "FileSink";
 }
 
-FileSink::FileSink(std::string finalPath)
+FileSink::FileSink(std::string finalPath, uint64_t initialSize)
     : finalPath_(std::move(finalPath))
     , partPath_(finalPath_ + ".part")
+    , written_(initialSize)
 {
-    file_ = fopen(partPath_.c_str(), "wb");
+    // Appending is what a continued upload needs: the sink is opened with the
+    // size the caller checked against the file, so "ab" writes exactly where the
+    // previous chunk ended. A fresh upload truncates whatever was left behind.
+    const char* mode = (initialSize > 0) ? "ab" : "wb";
+    file_ = fopen(partPath_.c_str(), mode);
     if (file_ == nullptr) {
-        ESP_LOGE(TAG, "cannot create %s", partPath_.c_str());
+        ESP_LOGE(TAG, "cannot open %s (%s)", partPath_.c_str(), mode);
     }
 }
 
@@ -28,8 +33,9 @@ FileSink::~FileSink()
 {
     // Safety net: an object destroyed without commit() must not leave a
     // half-written file behind (the destination may not exist yet, but the
-    // .part file must go).
-    if (!committed_) abort();
+    // .part file must go) — unless the upload was explicitly kept for a later
+    // continuation.
+    if (!committed_ && !kept_) abort();
 }
 
 bool FileSink::write(const uint8_t* data, size_t len)
@@ -85,6 +91,16 @@ bool FileSink::commit()
     ESP_LOGI(TAG, "uploaded %s (%llu bytes)", finalPath_.c_str(),
              (unsigned long long)written_);
     return true;
+}
+
+void FileSink::keep()
+{
+    if (committed_ || kept_) return;
+
+    closeFile();
+    kept_ = true;
+    ESP_LOGI(TAG, "kept %s (%llu bytes) for a later continuation",
+             partPath_.c_str(), (unsigned long long)written_);
 }
 
 void FileSink::abort()

@@ -1,4 +1,9 @@
 # Directories shared by all targets.
+#
+# `idf_component_register(SRC_DIRS …)` collects the sources when the project is
+# configured, so a *new* file (or a new directory added to this list) only enters
+# the build after `idf.py reconfigure` — touching this file has the same effect,
+# because CMake re-runs when a CMakeLists is newer than its cache.
 set(DHCPSERVER_SRC_DIRS
     "."
     "core"

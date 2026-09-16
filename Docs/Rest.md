@@ -999,6 +999,10 @@ Paths are percent-decoded and then validated by the same policy as every other
 file endpoint (see below): `..`, illegal characters and names ending with a dot
 or a space are rejected (`400`).
 
+> `<name>.part` files are **not** listed: that suffix belongs to uploads in
+> progress (see [POST /api/files/upload](#post-apifilesupload)), and the API
+> refuses to create such a name, so it can never be operator data.
+
 **Response `200 OK`:**
 ```json
 {
@@ -1127,7 +1131,8 @@ A client disconnect aborts the transfer silently (logged on the device).
 
 Upload a file. The **raw request body** (`application/octet-stream`, not
 multipart) is streamed into a windowed write, so the size is limited only by
-the free space of the volume.
+the free space of the volume. The file may also be sent in pieces and continued
+later (see *Resumable uploads* below).
 
 **Query parameters**
 
@@ -1135,6 +1140,8 @@ the free space of the volume.
 |------|----------|-------------|
 | `volume` | yes | Volume id (`fat`, `sd`) |
 | `path` | yes | Volume-relative path of the destination **file** (incl. the name) |
+| `total` | no | Size of the finished file. Sending it turns the request into one **piece** of a resumable upload |
+| `offset` | no | Where this piece starts; requires `total`, and must match the bytes already on the device |
 
 ```bash
 curl -u admin:admin -X POST \
@@ -1143,25 +1150,97 @@ curl -u admin:admin -X POST \
      'http://192.168.1.201/api/files/upload?volume=fat&path=/logs/report.txt'
 ```
 
-**Response `200 OK`:**
+**Response `200 OK`** — the whole file arrived, or a piece finished it:
 ```json
 { "status": "ok", "bytes": 20480, "path": "/logs/report.txt" }
 ```
 
-> **Atomic publish** — the body is written to `<name>.part` and only renamed
-> onto the destination after the whole body arrived (an existing file is
-> replaced; the web UI asks for confirmation before starting). An interrupted
-> upload therefore never leaves a truncated file under the real name, and the
-> leftover `.part` file is removed.
->
-> The free space is checked **before** the body is read, using
-> `Content-Length`: a request that cannot fit is refused immediately instead of
-> transferring megabytes for nothing.
+**Response `200 OK`** — a piece that did *not* finish the file (the bytes are
+kept, the client continues from `offset`):
+```json
+{ "status": "partial", "offset": 589824, "total": 1048576 }
+```
 
-**Errors:** `400` invalid path or the destination is a directory · `404`
-unknown volume · `409` volume not mounted · `411` `Content-Length` missing
-(cannot be space-checked) · `507` not enough free space · `500` write or
-final rename failed.
+> **Atomic publish** — the body is written to `<name>.part` and only renamed
+> onto the destination after the whole file arrived (an existing file is
+> replaced; the web UI asks for confirmation before starting). An interrupted
+> upload therefore never leaves a truncated file under the real name.
+>
+> **Resumable uploads** — a client that sends `total` may stop at any moment (a
+> pause in the UI, a connection that dropped) and continue later: the bytes that
+> arrived stay in `<name>.part` and
+> [`GET /api/files/upload/offset`](#get-apifilesuploadoffset) reports how many
+> there are. The next request carries `offset` = that number and the **rest** of
+> the file (the body may be shorter or longer than one TCP segment, and the
+> client may take as many requests as it likes). A chunk that does not line up
+> with the device is refused with `409`, so a client that lost track asks for the
+> offset instead of guessing. Without `total` the body is the whole file — which
+> is what every older client sends — and a body that stopped early is an error
+> and publishes nothing.
+>
+> `.part` is reserved for this: the API refuses to create such a name and the
+> listing hides it ([GET /api/files/list](#get-apifileslist)).
+>
+> The free space is checked **before** the body is read: a request that cannot
+> fit is refused immediately instead of transferring megabytes for nothing. A
+> continued upload is only asked for the part that is still missing.
+
+**Errors:** `400` invalid path, the destination is a directory, or `offset`
+without `total` · `404` unknown volume · `409` volume not mounted, or the chunk
+does not line up with the file on the device (use
+[`GET /api/files/upload/offset`](#get-apifilesuploadoffset) and resend from
+there) · `411` `Content-Length` missing (cannot be space-checked) · `507` not
+enough free space · `500` write or final rename failed (a resumable upload
+answers `partial` instead when the body simply stopped early).
+
+---
+
+## GET /api/files/upload/offset
+
+How much of a paused upload is already on the device — the number the next
+[upload](#post-apifilesupload) continues from. It is the size of
+`<name>.part`, and `0` when nothing was started (or the temporary file is
+gone, e.g. after a reboot).
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | yes | Volume-relative path of the destination file |
+
+**Response `200 OK`:**
+```json
+{ "offset": 589824 }
+```
+
+**Errors:** `400` invalid path · `404` unknown volume · `409` volume not mounted.
+
+---
+
+## POST /api/files/upload/cancel
+
+Throw away the temporary file of an upload. Sent by the explorer when the
+operator cancels a transfer (and before a fresh upload of the same name, so a
+leftover `.part` of an earlier file cannot be continued by mistake).
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | yes | Volume-relative path of the destination file |
+
+**Response `200 OK`:**
+```json
+{ "status": "ok" }
+```
+
+> A cancel is never an error: when there is nothing to remove (the upload had
+already finished, or never started) the answer is the same `200`.
+
+**Errors:** `400` invalid path · `404` unknown volume · `409` volume not
+mounted · `500` the file could not be removed.
 
 ---
 
