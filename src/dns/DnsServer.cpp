@@ -1,5 +1,6 @@
 #include "DnsServer.h"
 #include "../core/Config.h"
+#include "../core/JobRegistry.h"
 #include "../core/Subnet.h"
 
 #include <cstdio>
@@ -205,6 +206,12 @@ bool DnsServer::startPersistJob(bool save)
         return false;
     }
     ESP_LOGI(TAG, "Persist job started: %s", save ? "save" : "load");
+    // Long file I/O over a cache of up to 20 MB: visible in the scheduler page.
+    // In one call, so a stop can only take effect when it returns; the file is
+    // written in full or not published at all.
+    ::dhcp::core::JobRegistry::instance().begin(
+        save ? "cache_save" : "cache_load",
+        save ? "jobs.cache_save" : "jobs.cache_load", "");
     return true;
 }
 
@@ -231,7 +238,11 @@ void DnsServer::onPersistProgress(uint32_t done, uint32_t total, void* ctx)
                    portMAX_DELAY);
     self->persistDone_ = done;
     self->persistTotal_ = total;
+    const bool save = self->persistSave_;
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->persistJobMutex_));
+
+    ::dhcp::core::JobRegistry::instance().progress(
+        save ? "cache_save" : "cache_load", done, total, "cache.dat");
 }
 
 void DnsServer::persistJobTask(void* arg)
@@ -242,9 +253,10 @@ void DnsServer::persistJobTask(void* arg)
         return;
     }
 
+    bool ok = false;
     if (self->persistSave_) {
         size_t written = 0;
-        bool ok = self->internalCache_.saveToFile(
+        ok = self->internalCache_.saveToFile(
             self->kCacheDatPath, &written,
             &DnsServer::onPersistProgress, self);
         if (ok) {
@@ -256,7 +268,7 @@ void DnsServer::persistJobTask(void* arg)
         }
     } else {
         size_t loaded = 0;
-        bool ok = self->internalCache_.loadFromFile(
+        ok = self->internalCache_.loadFromFile(
             self->kCacheDatPath, &loaded,
             &DnsServer::onPersistProgress, self);
         if (ok) {
@@ -266,6 +278,14 @@ void DnsServer::persistJobTask(void* arg)
             ESP_LOGD(TAG, "No cache file to restore (%s)", self->kCacheDatPath);
         }
     }
+
+    // A failed *load* is not a failure the operator cares about: the usual reason
+    // is that there is no cache.dat yet (the DNS page shows the details).
+    ::dhcp::core::JobRegistry::instance().finish(
+        self->persistSave_ ? "cache_save" : "cache_load",
+        (ok || !self->persistSave_) ? ::dhcp::core::JobState::Done
+                                    : ::dhcp::core::JobState::Failed,
+        "cache.dat");
 
     // Mark the job done (busy=false, keep last done/total so the UI can
     // report "finished at N").

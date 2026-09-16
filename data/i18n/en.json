@@ -59,6 +59,7 @@
     "settings_export": "Export",
     "settings_import": "Import",
     "settings_device": "Device Management",
+    "jobs": "Task Scheduler",
     "security": "Security",
     "help": "Help",
     "version": "Version"
@@ -403,5 +404,29 @@
     "progress": "files",
     "success": "All files uploaded successfully.",
     "failed": "files failed:"
+  },
+  "jobs": {
+    "title": "Task Scheduler",
+    "desc": "Long-running operations of every subsystem in one list: volume checks, file uploads, DNS cache writes, formatting, connection tests.",
+    "one_off": "A one-off operation leaves the list as soon as it ends; a scheduled one stays together with its interval. A paused upload stays until it is continued or discarded.",
+    "empty": "Nothing is running right now.",
+    "elapsed": "Elapsed: ",
+    "repeat": "Repeat: ",
+    "cancel": "Cancel",
+    "cancel_failed": "Could not cancel the operation.",
+    "cancel_done": "The operation has already finished.",
+    "unreachable": "The list of operations is unavailable: the device did not answer.",
+    "stopping": "stopping…",
+    "state_running": "running",
+    "state_paused": "paused",
+    "state_done": "done",
+    "state_failed": "failed",
+    "state_cancelled": "cancelled",
+    "file_check": "Volume check",
+    "upload": "File upload",
+    "cache_save": "DNS cache save",
+    "cache_load": "DNS cache load",
+    "format": "Volume format",
+    "test_connection": "Connection test"
   }
 }

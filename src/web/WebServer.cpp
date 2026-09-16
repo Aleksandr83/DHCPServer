@@ -174,6 +174,9 @@ void WebServer::registerRoutes()
     reg("/api/files/check",          HTTP_POST,  postFileCheckHandler);
     reg("/api/files/check/cancel",   HTTP_POST,  postFileCheckCancelHandler);
     reg("/api/files/check",          HTTP_GET,   getFileCheckHandler);
+    // Task scheduler: one list for every long-running operation.
+    reg("/api/jobs",                 HTTP_GET,   getJobsHandler);
+    reg("/api/jobs/cancel",          HTTP_POST,  postJobCancelHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -201,6 +204,7 @@ void WebServer::registerRoutes()
     reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_device.html", HTTP_GET, staticFileHandler);
+    reg("/pages/jobs.html", HTTP_GET, staticFileHandler);
     reg("/pages/version.html", HTTP_GET, staticFileHandler);
 }
 

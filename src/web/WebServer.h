@@ -91,6 +91,8 @@ private:
     static esp_err_t postFileCheckHandler(httpd_req* req) { return RestApi::handlePostFileCheck(req); }
     static esp_err_t postFileCheckCancelHandler(httpd_req* req) { return RestApi::handlePostFileCheckCancel(req); }
     static esp_err_t getFileCheckHandler(httpd_req* req) { return RestApi::handleGetFileCheck(req); }
+    static esp_err_t getJobsHandler(httpd_req* req) { return RestApi::handleGetJobs(req); }
+    static esp_err_t postJobCancelHandler(httpd_req* req) { return RestApi::handlePostJobCancel(req); }
 
     httpd_handle_t server_ = nullptr;
     ::dhcp::web::AuthManager auth_;

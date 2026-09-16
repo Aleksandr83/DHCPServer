@@ -1,6 +1,7 @@
 #ifndef DHCP_FILES_FILEMANAGER_H
 #define DHCP_FILES_FILEMANAGER_H
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -68,6 +69,8 @@ public:
                       std::string* detail = nullptr) override;
     FileStatus format(const std::string& volumeId,
                       std::string* detail = nullptr) override;
+    FileStatus powerCycle(const std::string& volumeId, uint32_t offMs,
+                          std::string* detail = nullptr) override;
     FileStatus openRead(const std::string& volumeId, const std::string& path,
                         std::unique_ptr<IFileSource>& out,
                         std::string* detail = nullptr) override;
@@ -120,6 +123,17 @@ private:
 
     std::vector<std::unique_ptr<storage::IFileSystem>> volumes_;
     uint32_t lastRetryMs_ = 0;
+
+    /**
+     * @brief True while a format owns a volume.
+     *
+     * A format runs in its own task (the REST layer starts it outside the httpd
+     * task), so the periodic refresh pass — and a volume check — can wake up in
+     * the middle of it. Both look at this flag and stay away: the volume is being
+     * unmounted, erased and mounted again, and a liveness probe would take it
+     * apart under the format.
+     */
+    std::atomic<bool> formatting_{false};
 
     // Volume check job (one at a time, like the DNS cache persist job). The
     // handles are `void*` so this header stays free of FreeRTOS includes.

@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 
 #include "../core/Config.h"
+#include "../core/JobRegistry.h"
 #include "../core/Subnet.h"
 #include "../storage/PathUtil.h"
 #include "FileSink.h"
@@ -110,6 +111,7 @@ int httpStatusFor(FileStatus status)
         case FileStatus::AlreadyExists: return 409;
         case FileStatus::NotEmpty:      return 409;
         case FileStatus::Conflict:      return 409;
+        case FileStatus::Busy:          return 409;
         case FileStatus::TooLarge:      return 413;
         case FileStatus::NotText:       return 415;
         case FileStatus::NoSpace:       return 507;
@@ -128,6 +130,7 @@ const char* messageFor(FileStatus status)
         case FileStatus::AlreadyExists: return "already exists";
         case FileStatus::NotEmpty:      return "directory is not empty";
         case FileStatus::Conflict:      return "file changed on the volume";
+        case FileStatus::Busy:          return "the volume is busy with another operation";
         case FileStatus::TooLarge:      return "file is too large for the editor";
         case FileStatus::NotText:       return "file is not a text file";
         case FileStatus::NoSpace:       return "not enough free space on the volume";
@@ -205,6 +208,13 @@ void FileManager::refresh()
     // a full SDMMC init attempt (it is not cheap and logs a failure each time).
     if ((uint32_t)(now - lastRetryMs_) < kRetryMs) return;
 
+    // A format owns the volume for as long as it runs: it unmounts, erases and
+    // re-creates the filesystem, and this pass — driven by the UI polling
+    // /api/status — would walk right into the middle of that (the liveness probe
+    // would even unmount the volume under the format). The volumes keep their
+    // last reported state until the format is over.
+    if (formatting_.load()) return;
+
     for (auto& vol : volumes_) {
         if (vol->isMounted()) {
             // Mounted is not the same as still there: the volume itself knows
@@ -250,6 +260,15 @@ FileStatus FileManager::resolve(const std::string& volumeId,
     vol = find(volumeId);
     if (vol == nullptr) return FileStatus::NotFound;
     if (!vol->isMounted()) return FileStatus::NotMounted;
+
+    // A format owns the volume from the moment it starts: it unmounts, erases and
+    // mounts it again, so nothing else may touch it meanwhile. Every volume
+    // operation comes through here, which makes this the one place that has to
+    // know — the request that arrives during a format gets a clear 409 instead of
+    // reaching into a filesystem that is being taken apart (transfers run in
+    // tasks of their own, so this can really happen now).
+    if (formatting_.load()) return FileStatus::Busy;
+
     return FileStatus::Ok;
 }
 
@@ -423,18 +442,56 @@ FileStatus FileManager::remove(const std::string& volumeId, const std::string& p
 
 FileStatus FileManager::format(const std::string& volumeId, std::string* detail)
 {
-    storage::IFileSystem* vol = nullptr;
-    FileStatus st = resolve(volumeId, vol);
-    if (st != FileStatus::Ok) return st;
+    // Deliberately **not** `resolve()`: formatting is the operation for a card
+    // whose filesystem is unusable — an interrupted format is the classic way to
+    // get one — and such a card cannot be mounted, so demanding a mounted volume
+    // would leave it with no way back at all (the format needs a mount, the mount
+    // needs a filesystem, and only a format could create one). The volume object
+    // is enough: the filesystem creates the filesystem while mounting.
+    storage::IFileSystem* vol = find(volumeId);
+    if (vol == nullptr) return FileStatus::NotFound;
 
     // Only removable media: the internal FAT partition must never be wiped
     // through the API (it holds cache.dat and is reformatted on demand by its
     // own mount options).
     if (vol->id() != "sd") return FileStatus::Unsupported;
 
-    if (!vol->format()) {
+    // One format at a time, and not while a check walks the volume.
+    if (formatting_.load()) {
+        if (detail) *detail = "a format is already running";
+        return FileStatus::Busy;
+    }
+    if (checkReport().busy) {
+        if (detail) *detail = "a volume check is running";
+        return FileStatus::Busy;
+    }
+
+    // Own the volume for the duration: the periodic refresh pass must not probe
+    // or unmount it while the filesystem is being re-created (see refresh()).
+    formatting_.store(true);
+    const bool ok = vol->format();
+    formatting_.store(false);
+
+    if (!ok) {
         if (detail) *detail = vol->lastError();
         return FileStatus::IoError;
+    }
+    return FileStatus::Ok;
+}
+
+FileStatus FileManager::powerCycle(const std::string& volumeId, uint32_t offMs,
+                                   std::string* detail)
+{
+    // Deliberately **not** `resolve()`: this is called while a format owns the
+    // volume — that is exactly the situation it exists for — so the busy check
+    // that every other operation goes through would refuse it.
+    storage::IFileSystem* vol = find(volumeId);
+    if (vol == nullptr) return FileStatus::NotFound;
+
+    if (!vol->powerCycle(offMs)) {
+        if (detail) *detail = vol->lastError();
+        return vol->lastError().empty() ? FileStatus::Unsupported
+                                        : FileStatus::IoError;
     }
     return FileStatus::Ok;
 }
@@ -637,6 +694,13 @@ FileStatus FileManager::checkStart(const std::string& volumeId, std::string* det
 
     if (!supported()) return FileStatus::Unsupported;
 
+    // The check reads every file of the volume; a format running at the same
+    // time would erase what is being read.
+    if (formatting_.load()) {
+        if (detail) *detail = "a format is running";
+        return FileStatus::Busy;
+    }
+
     bool started = false;
     if (checkMutex_ != nullptr) {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(checkMutex_), portMAX_DELAY);
@@ -657,7 +721,7 @@ FileStatus FileManager::checkStart(const std::string& volumeId, std::string* det
     if (!started) {
         if (detail) *detail = "a check is already running";
         ESP_LOGW(TAG, "check refused: another one is running");
-        return FileStatus::Conflict;
+        return FileStatus::Busy;
     }
 
     const BaseType_t res = xTaskCreate(checkTask, "file_check", 6144, this,
@@ -678,6 +742,11 @@ FileStatus FileManager::checkStart(const std::string& volumeId, std::string* det
 
     ESP_LOGI(TAG, "check started: volume=%s, budget=%d MB", volumeId.c_str(),
              (int)CONFIG_FILES_CHECK_MAX_MB);
+    // The walk is the longest operation the device offers, so it announces itself
+    // in the registry: the scheduler page shows it and can stop it from there.
+    ::dhcp::core::JobRegistry::instance().begin(
+        "file_check", "jobs.file_check", volumeId,
+        static_cast<uint32_t>(kCheckBudgetBytes));
     return FileStatus::Ok;
 }
 
@@ -690,6 +759,10 @@ void FileManager::checkCancel()
         ESP_LOGI(TAG, "check cancel requested");
     }
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(checkMutex_));
+
+    // Whichever endpoint asked (the Files page has its own cancel route), the
+    // scheduler page must show the operation as stopping.
+    ::dhcp::core::JobRegistry::instance().requestCancel("file_check");
 }
 
 CheckReport FileManager::checkReport()
@@ -723,6 +796,9 @@ void FileManager::checkSetProgress(const std::string& current, uint32_t dirs,
     checkState_.badEntries = badEntries;
     checkState_.bytes = bytes;
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(checkMutex_));
+
+    ::dhcp::core::JobRegistry::instance().progress(
+        "file_check", static_cast<uint32_t>(bytes), 0, current);
 }
 
 void FileManager::checkFinish(const CheckReport& report)
@@ -734,6 +810,15 @@ void FileManager::checkFinish(const CheckReport& report)
     checkState_.finished = true;
     checkState_.current.clear();
     xSemaphoreGive(static_cast<SemaphoreHandle_t>(checkMutex_));
+
+    // Errors *found* are a result, not a failure: the walk did its job. Only a
+    // check the operator stopped is reported as cancelled.
+    ::dhcp::core::JobRegistry::instance().finish(
+        "file_check",
+        report.cancelled ? ::dhcp::core::JobState::Cancelled
+                         : ::dhcp::core::JobState::Done,
+        report.badEntries > 0 ? std::to_string(report.badEntries) + " damaged"
+                              : std::string{});
 }
 
 void FileManager::checkTask(void* arg)

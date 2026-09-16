@@ -81,6 +81,9 @@ public:
     static esp_err_t handlePostFileCheck(httpd_req* req);
     static esp_err_t handlePostFileCheckCancel(httpd_req* req);
     static esp_err_t handleGetFileCheck(httpd_req* req);
+    // Task scheduler (long-running operations)
+    static esp_err_t handleGetJobs(httpd_req* req);
+    static esp_err_t handlePostJobCancel(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);

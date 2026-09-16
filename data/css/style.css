@@ -1159,6 +1159,108 @@ th {
     display: block;
 }
 
+/* ─── Task scheduler ───────────────────────────────── */
+/* One block per long-running operation (.jobs-item is a .card): what it is and
+   what it works on, how far it is, the current step, when it started, and —
+   where the operation allows it — a stop button. */
+.jobs-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    margin-bottom: 0.35rem;
+}
+
+/* The name owns the free space and ellipsises (a path can be long); the full
+   text stays in the tooltip. */
+.jobs-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.jobs-state {
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.jobs-state-running {
+    color: var(--success);
+    border-color: var(--success);
+}
+
+.jobs-state-paused {
+    color: #d29922;
+    border-color: #d29922;
+}
+
+.jobs-state-failed {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.jobs-state-done,
+.jobs-state-cancelled {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.jobs-actions {
+    display: flex;
+    align-items: center;
+}
+
+.jobs-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.3rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+/* The step currently being worked on (a file being read or written): monospace
+   and ellipsised, so a deep path cannot widen the row. */
+.jobs-detail {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;
+}
+
+.jobs-num {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* A failed operation: same bar, red. */
+.meter-fill.jobs-fill-error {
+    background: linear-gradient(90deg, #f85149, #db61a2);
+}
+
+/* An operation with an unknown total (a volume walk stops on a byte budget, so
+   it has no percentage). Sitting still at zero would read as "stuck", so the
+   filled part sweeps instead — the same signal the check dialog uses. Width is
+   left to the class here (the script clears the inline one). */
+.meter-fill.jobs-fill-indeterminate {
+    width: 35%;
+    animation: jobsSweep 1.4s ease-in-out infinite;
+}
+
+@keyframes jobsSweep {
+    0% { margin-left: 0%; }
+    50% { margin-left: 65%; }
+    100% { margin-left: 0%; }
+}
+
 /* ─── Footer ───────────────────────────────────────── */
 
 .footer {
@@ -1268,5 +1370,14 @@ th {
     }
     .meter-track {
         height: 16px;
+    }
+    /* Scheduler rows: the step, the counters and the time do not fit on one
+       line on a phone — let them wrap under each other. */
+    .jobs-meta {
+        flex-wrap: wrap;
+        gap: 0.25rem 0.75rem;
+    }
+    .jobs-detail {
+        flex-basis: 100%;
     }
 }

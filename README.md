@@ -23,8 +23,9 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 - **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
 - **Time Server (NTP)** — the device syncs its clock from an external NTP server (SNTP) and serves UTC time to LAN clients over NTP (UDP 123; configurable external NTP server, re-sync interval, named timezone selection with a custom-offset fallback; clock sync and serving can be switched on/off independently; optional terminal/REST logging of served requests). Until the clock has been synchronised (or set by hand) the server answers with LI=3/stratum 16 (RFC 5905) instead of a wrong time. The date/time can also be **set manually** from the web interface — typed in the selected timezone or taken from the computer's clock, and values earlier than the firmware build time are refused (the board has no battery-backed RTC)
 - **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). The **file explorer applies the same rule** to `/api/files/*` (a foreign client gets `403`). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
-- **File Explorer** — browse, download, upload, rename, delete and format the **internal FAT data partition** (~21 MB, `/fat`) and a **microSD card** in the board's slot (`/sdcard`; no card is fitted by default, so that volume reports “not mounted”). A card is picked up **and noticed again** while the device runs: a missing one is retried (at most once every few seconds), and a mounted one is asked on the bus whether it is still there (no card-detect line exists on the board), so pulling it out flips the volume to “not mounted” within a poll instead of reporting yesterday's capacities until the next reboot. One “⋯” button on the right holds the file actions (**New file**, **New folder**, **Select all**, **Upload file**, **Upload folder**, **Move ...**, **Delete** for the ticked rows, **Refresh**, **Format card**, **Check for errors**) and a **read-only volume check** walks the whole volume, reading every file to the end — a broken cluster chain is only visible that way — then offers the two actions that can make a card usable again (delete the unreadable entries, or format it). Rows have their own menu (download/open/rename/delete). Uploads are atomic (`<name>.part` + rename) and **resumable**: the progress row carries pause and cancel buttons, and a paused (or interrupted) transfer continues from the byte the device reached instead of starting over — the temporary `*.part` names stay hidden from the explorer and cannot be created through the API. Text files can be edited in the browser, and the home page shows both volumes’ used/free space next to the RAM bars
+- **File Explorer** — browse, download, upload, rename, delete and format the **internal FAT data partition** (~21 MB, `/fat`) and a **microSD card** in the board's slot (`/sdcard`; no card is fitted by default, so that volume reports “not mounted”). A card is picked up **and noticed again** while the device runs: a missing one is retried (at most once every few seconds), and a mounted one is asked on the bus whether it is still there (no card-detect line exists on the board), so pulling it out flips the volume to “not mounted” within a poll instead of reporting yesterday's capacities until the next reboot. One “⋯” button on the right holds the file actions (**New file**, **New folder**, **Select all**, **Upload file**, **Upload folder**, **Move ...**, **Delete** for the ticked rows, **Refresh**, **Format card**, **Check for errors**) and a **read-only volume check** walks the whole volume, reading every file to the end — a broken cluster chain is only visible that way — then offers the two actions that can make a card usable again (delete the unreadable entries, or format it). Formatting also works on a card that cannot be mounted (an interrupted format leaves one without a filesystem, and the format is the only thing that can give it back), and a card that stopped answering mid-format can be brought back by stopping the operation: its supply is cut for five seconds, which breaks the stuck driver call. Rows have their own menu (download/open/rename/delete). Uploads are atomic (`<name>.part` + rename) and **resumable**: the progress row carries pause and cancel buttons, and a paused (or interrupted) transfer continues from the byte the device reached instead of starting over — the temporary `*.part` names stay hidden from the explorer and cannot be created through the API. Text files can be edited in the browser, and the home page shows both volumes’ used/free space next to the RAM bars
 - **Onboard Ethernet 10/100** — internal EMAC + IP101GRI PHY over RMII (no WiFi — ESP32-P4 has no radio)
+- **Task Scheduler** — every long-running operation of the device in one list (Settings ▾ Task Scheduler): volume check, file uploads, DNS cache writes, formatting, connection tests. Each operation gets its own block with its state, progress (an indeterminate bar while the total is unknown), the file or volume it is working on and the elapsed time, and **any unfinished one can be stopped from there** — the list only holds operations that are still running or waiting, so there is no "stoppable" flag to consult and no dead button (a paused upload drops its `.part`, a check ends at its next entry, a **format even on a card that stopped answering**: the operation ends at once and the card's supply is cut for five seconds, which breaks the stuck call). The firmware keeps the list (`core::JobRegistry`), so a subsystem only has to announce itself — a finished one-off operation leaves the list at once, and one scheduled to repeat stays with its interval. **Long operations run outside the web server's task**, so a card that takes minutes to erase, a multi-gigabyte upload, or a large download does not freeze the interface for anyone else (in a second browser the pages and the `/api/status` polling keep working)
 - **Web Interface** — dark theme, RU/EN localization, DHCP/DNS/Time sub-pages
 - **REST API** — full device management over HTTP with Basic auth + rate limiting
 - **OTA Updates** — firmware update via web interface, dual OTA partitions for safe upgrades
@@ -246,6 +247,7 @@ Access: `http://192.168.1.201` (default static IP)
 | Settings ▾ Import | `/pages/settings_import.html` | Restore settings from an exported JSON file |
 | Settings ▾ Export | `/pages/settings_export.html` | Download the current settings as a JSON file |
 | Settings ▾ Device | `/pages/settings_device.html` | Reboot, factory reset (erases all settings) |
+| Settings ▾ Task Scheduler | `/pages/jobs.html` | Long-running operations of the whole device: state, progress, current step, elapsed time, a stop button for every unfinished one (polls `GET /api/jobs` every 2 s) |
 | Help ▾ Version | `/pages/version.html` | Firmware version info, OTA firmware upload, web-file (SPIFFS) upload |
 
 ### Language
@@ -283,17 +285,22 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/web/file?path=<rel>` | Upload a web (SPIFFS) file |
 | GET | `/api/files/volumes` | Explorer volumes (id, mount point, mounted/present, capacity, last mount error) |
 | GET | `/api/files/list?volume=<id>&path=<dir>` | Directory listing + free space |
-| GET | `/api/files/download?volume=<id>&path=<file>` | Download a file |
-| POST | `/api/files/upload?volume=<id>&path=<file>` | Upload a file (raw body, atomic; `total`/`offset` make it resumable) |
+| GET | `/api/files/download?volume=<id>&path=<file>` | Download a file (chunked; runs outside the server task, so a large download does not block other clients) |
+| POST | `/api/files/upload?volume=<id>&path=<file>` | Upload a file (raw body, atomic, resumable with `total`/`offset`; read outside the server task, so a folder upload does not block other clients) |
 | GET | `/api/files/upload/offset?volume=<id>&path=<file>` | How much of a paused upload is already on the device |
 | POST | `/api/files/upload/cancel?volume=<id>&path=<file>` | Throw away the temporary file of an upload |
 | POST | `/api/files/mkdir` | Create a directory |
 | POST | `/api/files/rename` | Rename / move |
 | POST | `/api/files/delete` | Delete a file or directory (`recursive` for a non-empty one) |
-| POST | `/api/files/format` | Format the microSD card (`confirm: true`) |
+| POST | `/api/files/format` | Format the microSD card (`confirm: true`); runs outside the server task, so a long erase does not block the UI and can be stopped from the scheduler |
 | GET | `/api/files/text?volume=<id>&path=<file>` | Read a text file for the editor |
 | POST | `/api/files/text` | Save a text file (`mtime` guards against overwriting a newer version) |
 | GET/POST | `/api/files/settings` | Explorer access policy (LAN-only filter on/off + state) |
+| POST | `/api/files/check` | Start a read-only volume check (“Check for errors”) |
+| GET | `/api/files/check` | Report/progress of that check, polled while it walks |
+| POST | `/api/files/check/cancel` | Ask the running check to stop |
+| GET | `/api/jobs` | Long-running operations of the device (the scheduler page) |
+| POST | `/api/jobs/cancel` | Ask an unfinished operation to stop (`{"id": …}`) |
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
 | GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
 | GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
@@ -370,7 +377,7 @@ DHCPServer/
 │   ├── css/style.css
 │   ├── js/app.js
 │   ├── i18n/{ru,en}.json
-│   └── pages/              # DHCP / DNS / Time / Settings (incl. files.html) / Help sub-pages
+│   └── pages/              # DHCP / DNS / Time / Settings (incl. files.html, jobs.html) / Help sub-pages
 ├── test/                   # Unit tests (host-style, no board needed)
 ├── Docs/                   # Documentation
 │   ├── images/              # Board photos and screenshots
@@ -427,6 +434,7 @@ Test files:
 - `test/test_pathutil.cpp` — file-explorer path policy (escape attempts, illegal names) — host-runnable
 - `test/test_uploadrange.cpp` — chunk arithmetic of a resumable upload (continue, complete, mismatched offset) — host-runnable
 - `test/test_filesink.cpp` — the temporary file of an upload: keep, continue, publish, discard (needs `-I test/stubs` for the logging stub) — host-runnable
+- `test/test_jobregistry.cpp` — rules of the job list behind the scheduler page (one-off removal, repeats, paused operations, cancellation) — host-runnable
 - `test/test_multipart.cpp` — `MultipartExtractor` for OTA bodies (any chunk size) — host-runnable
 - `test/test_filejson.cpp` — file-explorer/storage JSON payloads + structural comma checks — host-runnable
 

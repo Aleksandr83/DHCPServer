@@ -6,6 +6,7 @@
 #include "../core/Version.h"
 #include "../core/Config.h"
 #include "../core/CpuMonitor.h"
+#include "../core/JobRegistry.h"
 #include "../wifi/IWiFiManager.h"
 #include "../dhcp/IDhcpServer.h"
 #include "../dhcp/DhcpServer.h"
@@ -20,6 +21,8 @@
 #include <cstring>
 #include <sstream>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "esp_log.h"
@@ -1954,6 +1957,20 @@ void testConnectionTask(void* arg)
 {
     auto* ctx = static_cast<TestConnCtx*>(arg);
 
+    // A few seconds at most, but it is exactly the kind of operation the
+    // scheduler page exists for: something is happening, and it can be seen.
+    auto& jobs = ::dhcp::core::JobRegistry::instance();
+    jobs.begin("test_connection", "jobs.test_connection", ctx->url);
+
+    // The request itself is one call and cannot be interrupted in the middle,
+    // but a stop that arrived before it started is honoured here.
+    if (jobs.cancelRequested("test_connection")) {
+        jobs.finish("test_connection", ::dhcp::core::JobState::Cancelled, ctx->url);
+        xSemaphoreGive(ctx->done);
+        vTaskDelete(nullptr);
+        return;
+    }
+
     esp_http_client_config_t cfg = {};
     cfg.url = ctx->url.c_str();
     cfg.method = (ctx->method == "POST") ? HTTP_METHOD_POST : HTTP_METHOD_GET;
@@ -1971,6 +1988,7 @@ void testConnectionTask(void* arg)
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         ctx->err = ESP_ERR_HTTP_CONNECT;
+        jobs.finish("test_connection", ::dhcp::core::JobState::Failed, "client init");
         xSemaphoreGive(ctx->done);
         vTaskDelete(nullptr);
         return;
@@ -1991,6 +2009,11 @@ void testConnectionTask(void* arg)
         ctx->http = esp_http_client_get_status_code(client);
     }
     esp_http_client_cleanup(client);
+
+    jobs.finish("test_connection",
+                ctx->err == ESP_OK ? ::dhcp::core::JobState::Done
+                                   : ::dhcp::core::JobState::Failed,
+                ctx->url);
 
     xSemaphoreGive(ctx->done);
     vTaskDelete(nullptr);
@@ -2614,6 +2637,63 @@ bool queryParam(httpd_req* req, const char* key, std::string& out)
 } // namespace (file explorer helpers)
 
 // ─────────────────────────────────────────────────────
+// Long transfers outside the server task
+// ─────────────────────────────────────────────────────
+// ESP-IDF's httpd runs a handler **in the server task**: while a handler works,
+// the server accepts nothing else. A transfer that lasts — a big file in, a big
+// file out — therefore stops every other client for its whole duration: in a
+// second browser the pages load slowly and the /api/status polling freezes (the
+// home page bars stop moving). It is not a bandwidth problem but a scheduling
+// one, and it is the same reason the format moved out of the server task.
+//
+// `httpd_req_async_handler_begin()` hands the client's socket to the caller, and
+// the work continues in a task of its own: the server stays free for everyone
+// else and the answer still goes out on the same connection when the work is
+// done. The machinery is defined further down, next to the transfers that use it
+// (and next to the format, which shares it); declared here because the file
+// handlers come first in this file.
+
+namespace {
+
+/**
+ * @brief A request that is answered from a task of its own.
+ *
+ * Derive from this and keep it **first** in the work item, so a task can treat
+ * its argument as both. @ref finish is the only way to close such a request —
+ * after it, neither the async handle nor the original one may be used.
+ */
+struct AsyncRequest {
+    httpd_req_t* req = nullptr;   ///< Async copy — owns the client's socket
+
+    virtual ~AsyncRequest() = default;
+
+    /** @brief Give the socket back to the server (the answer is already sent). */
+    void finish() { httpd_req_async_handler_complete(req); }
+};
+
+/**
+ * @brief Answer a request with an error, on whichever handle is still valid.
+ *
+ * @param[in] req      Request to answer (the async one once it exists).
+ * @param[in] message  Ready-made JSON body.
+ */
+void answerError(httpd_req* req, const char* message);
+
+/**
+ * @brief Take @p req off the server task and run @p body with @p work.
+ *
+ * On any failure the request is answered with @p failMessage (the connection is
+ * still intact as long as the async copy has not been handed over) and @p work
+ * is deleted.
+ *
+ * @return true when the task was started (the answer is then its job).
+ */
+bool runDetached(httpd_req* req, AsyncRequest* work, TaskFunction_t body,
+                 const char* taskName, const char* failMessage);
+
+} // namespace
+
+// ─────────────────────────────────────────────────────
 // GET /api/files/list?volume=<id>&path=<rel>
 // ─────────────────────────────────────────────────────
 // Directory listing: directories first, then files, case-insensitive by name.
@@ -2732,6 +2812,187 @@ esp_err_t RestApi::handlePostFileDelete(httpd_req* req)
     return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
 }
 
+// ─────────────────────────────────────────────────────
+// POST /api/files/format  {"volume":"sd","confirm":true}
+// ─────────────────────────────────────────────────────
+// The format runs in a task of its own rather than in the server's — the same
+// machinery the transfers use (see "Long transfers outside the server task").
+// Erasing and re-creating the filesystem of a failing card can take a long
+// time, and the httpd serves one request at a time: a synchronous format would
+// freeze the whole web interface *and* put its own stop button out of reach,
+// because POST /api/jobs/cancel could not be answered before it returned.
+
+namespace {
+
+/** @brief Work item of an asynchronous format. */
+struct FormatWork : AsyncRequest {
+    ::dhcp::files::IFileManager* files = nullptr;
+    std::string volume;
+};
+
+/**
+ * @brief True while the running format has been stopped from the scheduler.
+ *
+ * The erase is one call into IDF and FatFS, and there is no way to cut it short
+ * from another task — it ends when the driver stops answering (a failing card is
+ * exactly the case that takes long). What *can* end at once is the **operation**:
+ * the scheduler row leaves the list and the record is finished as cancelled the
+ * moment the request arrives, instead of the operator waiting for the card. The
+ * format task then knows, when its call finally returns, that it must not report
+ * a success — the volume it has just re-created is not what anybody is waiting
+ * for any more. It still answers the client that asked for the format, which is
+ * the only thing that has to wait for the driver.
+ *
+ * A flag is enough because only one format can be running (the registry refuses
+ * a second one, and `FileManager::formatting_` keeps every file operation off
+ * the volume meanwhile).
+ */
+std::atomic<bool> g_formatAbandoned{false};
+
+/**
+ * @brief True once the destructive call of the running format has returned.
+ *
+ * The escape hatch below waits a moment before it cuts the card's supply, and
+ * this is what it asks to find out whether there is anything left to break: a
+ * format on a healthy card is over in a moment, and cutting the power of a card
+ * nobody is writing to would only leave the volume unmounted for five seconds.
+ */
+std::atomic<bool> g_formatCallDone{false};
+
+/** @brief Grace before the supply is cut (see @ref powerCutTask). */
+constexpr uint32_t kPowerCutGraceMs = 1000;
+
+/** @brief How long the card stays unpowered to break a stuck call. */
+constexpr uint32_t kPowerCutMs = 5000;
+
+/** @brief Work item of the power cut that breaks a stopped format. */
+struct PowerCutWork {
+    ::dhcp::files::IFileManager* files = nullptr;
+    std::string volume;
+};
+
+/**
+ * @brief Body of the escape hatch: wait a moment, then take the card's supply.
+ *
+ * The erase is one call into IDF and FatFS, so nothing in the firmware can
+ * interrupt it — the hardware can: with the supply gone the transfer in flight
+ * fails, FatFS aborts its write and the call returns with an error. It runs in
+ * a task of its own because the cancel request has to be answered at once (the
+ * scheduler row leaves the list immediately), while the cut and the five-second
+ * wait go on in the background; the volume comes back unmounted, and the next
+ * mount attempt (every five seconds) finds the card again — a failing one with
+ * a working retry path instead of a format nobody can stop.
+ */
+void powerCutTask(void* arg)
+{
+    auto* work = static_cast<PowerCutWork*>(arg);
+
+    vTaskDelay(pdMS_TO_TICKS(kPowerCutGraceMs));
+    if (g_formatCallDone.load()) {
+        ESP_LOGI(TAG, "the stopped format of '%s' had already returned — the "
+                      "card supply is left alone", work->volume.c_str());
+    } else {
+        std::string detail;
+        const auto st = work->files->powerCycle(work->volume, kPowerCutMs, &detail);
+        if (st == ::dhcp::files::FileStatus::Ok) {
+            ESP_LOGW(TAG, "card supply cut for %u ms to break the format of '%s'",
+                     (unsigned)kPowerCutMs, work->volume.c_str());
+        } else {
+            ESP_LOGW(TAG, "cannot cut the supply of '%s' (%s): the format runs "
+                          "until the driver gives up", work->volume.c_str(),
+                     detail.c_str());
+        }
+    }
+
+    delete work;
+    vTaskDelete(nullptr);
+}
+
+/** @brief Start the escape hatch for a format that was stopped. */
+void startPowerCut(::dhcp::files::IFileManager* files, const std::string& volume)
+{
+    auto* work = new PowerCutWork{files, volume};
+    if (xTaskCreate(powerCutTask, "sd_power_cut", 3072, work,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        delete work;
+        ESP_LOGW(TAG, "cannot start the card power cut task");
+    }
+}
+
+/** @brief Answer the format request on its async handle and release the socket. */
+void formatAnswer(httpd_req_t* req, bool cancelled, ::dhcp::files::FileStatus st,
+                  const std::string& detail)
+{
+    if (cancelled) {
+        answerError(req,
+            "{\"status\":\"error\",\"message\":\"format cancelled\","
+            "\"detail\":\"stopped from the task scheduler\"}");
+    } else {
+        sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+    }
+}
+
+/** @brief Body of an asynchronous format: the work, the record, the answer. */
+void formatTask(void* arg)
+{
+    auto* work = static_cast<FormatWork*>(arg);
+    auto& jobs = ::dhcp::core::JobRegistry::instance();
+
+    std::string detail;
+    auto st = ::dhcp::files::FileStatus::Ok;
+    // A stop that arrived before the erase started prevents it altogether — the
+    // only case in which the card is left untouched.
+    bool cancelled = jobs.cancelRequested("format");
+
+    if (!cancelled) {
+        st = work->files->format(work->volume, &detail);
+        // The escape hatch waits for this flag before cutting the card's supply:
+        // whatever happens next, the destructive call is behind us and there is
+        // nothing left to break.
+        g_formatCallDone.store(true);
+        // The destructive call cannot be cut short while it runs, so a stop that
+        // arrived meanwhile is honoured here, at the end of that step: the
+        // volume stays in the state the call left it — usually unmounted, which
+        // is exactly what an operator with a failing card wants — and the
+        // operation ends as cancelled instead of pretending it succeeded.
+        cancelled = jobs.cancelRequested("format");
+    }
+
+    // Stopped from the scheduler while the call ran: the record is already gone
+    // (the cancel route finished it, so the row left the list at once) and the
+    // only thing left to do is to tell the client that asked for the format.
+    const bool abandoned = g_formatAbandoned.exchange(false);
+    if (abandoned) {
+        ESP_LOGW(TAG, "format of volume '%s' stopped from the scheduler: the "
+                      "erase returned afterwards", work->volume.c_str());
+        formatAnswer(work->req, /*cancelled*/ true, st, detail);
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (cancelled) {
+        ESP_LOGW(TAG, "format of volume '%s' cancelled from the scheduler",
+                 work->volume.c_str());
+        jobs.finish("format", ::dhcp::core::JobState::Cancelled, work->volume);
+    } else if (st == ::dhcp::files::FileStatus::Ok) {
+        ESP_LOGW(TAG, "volume '%s' formatted from the web UI", work->volume.c_str());
+        jobs.finish("format", ::dhcp::core::JobState::Done, work->volume);
+    } else {
+        ESP_LOGE(TAG, "format of volume '%s' failed: %s", work->volume.c_str(),
+                 detail.c_str());
+        jobs.finish("format", ::dhcp::core::JobState::Failed, detail);
+    }
+
+    formatAnswer(work->req, cancelled, st, detail);
+    work->finish();
+    delete work;
+    vTaskDelete(nullptr);
+}
+
+} // namespace
+
 esp_err_t RestApi::handlePostFileFormat(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
@@ -2745,64 +3006,181 @@ esp_err_t RestApi::handlePostFileFormat(httpd_req* req)
                               nullptr);
     }
 
-    std::string detail;
-    const auto st = s_files->format(volume, &detail);
-    if (st == ::dhcp::files::FileStatus::Ok) {
-        ESP_LOGW(TAG, "volume '%s' formatted from the web UI", volume.c_str());
+    auto& jobs = ::dhcp::core::JobRegistry::instance();
+    // One format at a time. The record is single-flight, so a second request
+    // would silently take the running one's place — the operator would lose
+    // sight of the erase that is still going on, and two of them on one card are
+    // never wanted.
+    if (jobs.contains("format")) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"a format is already running\"}");
+        return ESP_OK;
     }
-    return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+
+    auto* work = new FormatWork{};
+    work->files = s_files;
+    work->volume = volume;
+
+    if (!jobs.begin("format", "jobs.format", volume)) {
+        delete work;
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"too many operations are running\"}");
+        return ESP_OK;
+    }
+
+    // A fresh start, with nothing left over from a format that was stopped.
+    g_formatAbandoned.store(false);
+    g_formatCallDone.store(false);
+
+    // The record went up first, so a task that cannot even be created does not
+    // leave a stale entry behind (runDetached answers the request itself).
+    if (!runDetached(req, work, formatTask, "file_format",
+                     "{\"status\":\"error\",\"message\":\"cannot start the format\"}")) {
+        jobs.finish("format", ::dhcp::core::JobState::Failed, "no task");
+    }
+    return ESP_OK;   // the answer is sent by the task
 }
+
+namespace {
+
+/** @brief Stack of a detached transfer task (the httpd default is 8192). */
+constexpr uint32_t kTransferStack = 8192;
+
+/**
+ * @brief Transfers allowed to run at once.
+ *
+ * Each one costs a task stack plus its own transfer window (512 KB in PSRAM), so
+ * they are bounded: the file explorer sends one file at a time, and two browsers
+ * mean two. Anything above this is answered with 503 instead of eating the heap.
+ */
+constexpr int kMaxTransfers = 4;
+
+/** @brief Transfers running right now (see @ref kMaxTransfers). */
+std::atomic<int> g_transfers{0};
+
+/**
+ * @brief RAII slot in the transfer budget.
+ *
+ * Constructed where the request arrives, released when the work is done — the
+ * slot has to outlive the handler, so the work item owns it.
+ */
+class TransferSlot {
+public:
+    TransferSlot() : count_(g_transfers.fetch_add(1) + 1) {}
+    ~TransferSlot() { g_transfers.fetch_sub(1); }
+
+    TransferSlot(const TransferSlot&) = delete;
+    TransferSlot& operator=(const TransferSlot&) = delete;
+
+    /** @brief False when the budget is already spent. */
+    bool ok() const { return count_ <= kMaxTransfers; }
+
+private:
+    int count_;
+};
+
+/**
+ * @brief Byte window of one transfer.
+ *
+ * The window is what makes a transfer independent of the file size: **512 KB in
+ * PSRAM** (the agreed size), with a smaller fallback in the internal heap, and
+ * finally `nullptr` — the caller then uses its own 1 KB stack buffer.
+ *
+ * Each transfer allocates its own. It used to be a single static buffer, which
+ * was safe for exactly the reason this stage removed: "the httpd task serves one
+ * request at a time". Two transfers now run side by side, and a shared window
+ * would let them overwrite each other's data mid-flight.
+ */
+class TransferWindow {
+public:
+    TransferWindow()
+    {
+        constexpr size_t kPreferred = 512 * 1024;
+        constexpr size_t kFallback = 64 * 1024;
+
+        buf_ = static_cast<uint8_t*>(heap_caps_malloc(kPreferred, MALLOC_CAP_SPIRAM));
+        if (buf_ != nullptr) {
+            size_ = kPreferred;
+            return;
+        }
+        buf_ = static_cast<uint8_t*>(heap_caps_malloc(kFallback, MALLOC_CAP_DEFAULT));
+        if (buf_ != nullptr) {
+            size_ = kFallback;
+            return;
+        }
+        ESP_LOGW(TAG, "no transfer window available, using a 1 KB stack buffer");
+    }
+
+    ~TransferWindow()
+    {
+        if (buf_ != nullptr) heap_caps_free(buf_);
+    }
+
+    TransferWindow(const TransferWindow&) = delete;
+    TransferWindow& operator=(const TransferWindow&) = delete;
+
+    uint8_t* data() const { return buf_; }
+    size_t size() const { return size_; }
+
+private:
+    uint8_t* buf_ = nullptr;
+    size_t size_ = 0;
+};
+
+/**
+ * @brief Answer a request with an error, on whichever handle is still valid.
+ *
+ * @param[in] req      Request to answer (the async one once it exists).
+ * @param[in] message  Ready-made JSON body.
+ */
+void answerError(httpd_req* req, const char* message)
+{
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, message);
+}
+
+bool runDetached(httpd_req* req, AsyncRequest* work, TaskFunction_t body,
+                 const char* taskName, const char* failMessage)
+{
+    if (httpd_req_async_handler_begin(req, &work->req) != ESP_OK) {
+        ESP_LOGE(TAG, "cannot detach '%s' from the server task", taskName);
+        answerError(req, failMessage);
+        delete work;
+        return false;
+    }
+
+    if (xTaskCreate(body, taskName, kTransferStack, work,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start the task '%s'", taskName);
+        answerError(work->req, failMessage);
+        work->finish();
+        delete work;
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────
 // GET /api/files/download?volume=<id>&path=<rel>
 // ─────────────────────────────────────────────────────
 // Streams the file to the client in chunks (no Content-Length — the response
 // is chunked, exactly like the static-file handler), so a 21 MB file costs
-// only the shared transfer window, not a buffer of its size.
+// only the transfer window, not a buffer of its size.
 //
 // Content-Disposition carries both a plain quoted name (for old clients) and
 // the RFC 5987 UTF-8 form, so a Cyrillic file name survives the round-trip.
+//
+// The streaming happens in a task of its own (see above): a slow client must not
+// hold the server, and a download of a large file is exactly that.
 
 namespace {
-
-/**
- * @brief Shared transfer window for file upload/download.
- *
- * The window is what makes a transfer independent of the file size: **512 KB
- * allocated in PSRAM** (the agreed size), with a smaller fallback in the
- * internal heap when PSRAM is unavailable, and finally `nullptr` — the caller
- * then uses its own 1 KB stack buffer. The httpd task serves one request at a
- * time, so a single shared allocation is safe and saves a 512 KB alloc/free
- * per request.
- */
-uint8_t* ioBuffer(size_t& outSize)
-{
-    static uint8_t* buf = nullptr;
-    static size_t size = 0;
-
-    if (buf == nullptr && size == 0) {
-        constexpr size_t kPreferred = 512 * 1024;
-        constexpr size_t kFallback = 64 * 1024;
-
-        buf = static_cast<uint8_t*>(
-            heap_caps_malloc(kPreferred, MALLOC_CAP_SPIRAM));
-        size = kPreferred;
-        if (buf == nullptr) {
-            buf = static_cast<uint8_t*>(
-                heap_caps_malloc(kFallback, MALLOC_CAP_DEFAULT));
-            size = kFallback;
-        }
-        if (buf == nullptr) {
-            ESP_LOGW(TAG, "no transfer buffer available, using 1 KB window");
-        } else {
-            ESP_LOGI(TAG, "file transfer window: %u KB",
-                     (unsigned)(size / 1024));
-        }
-    }
-
-    outSize = size;
-    return buf;
-}
 
 /**
  * @brief Percent-encode for `filename*=UTF-8''…` (RFC 5987).
@@ -2849,6 +3227,79 @@ std::string asciiName(const std::string& in)
 
 } // namespace
 
+namespace {
+
+/** @brief Work item of one download (see @ref AsyncRequest). */
+struct DownloadWork : AsyncRequest {
+    ::dhcp::files::IFileManager* files = nullptr;
+    std::string volume;
+    std::string path;
+    TransferSlot slot;            ///< Holds a place in the transfer budget
+};
+
+/** @brief Body of a download: open the file, stream it, close the request. */
+void downloadTask(void* arg)
+{
+    auto* work = static_cast<DownloadWork*>(arg);
+    auto* req = work->req;
+
+    std::unique_ptr<::dhcp::files::IFileSource> src;
+    std::string detail;
+    const auto st = work->files->openRead(work->volume, work->path, src, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        sendFileResult(req, st, "{}", &detail);
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    std::string norm;
+    if (!::dhcp::storage::PathUtil::normalize(work->path, norm)) norm = work->path;
+    const std::string name = ::dhcp::storage::PathUtil::basename(norm);
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    const std::string disposition = "attachment; filename=\"" + asciiName(name) +
+                                    "\"; filename*=UTF-8''" + rfc5987Encode(name);
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+
+    TransferWindow window;
+    uint8_t stackBuf[1024];
+    uint8_t* buf = window.data();
+    size_t bufSize = window.size();
+    if (buf == nullptr) {
+        buf = stackBuf;
+        bufSize = sizeof(stackBuf);
+    }
+
+    ESP_LOGI(TAG, "download %s (%llu bytes, volume %s)", norm.c_str(),
+             (unsigned long long)src->size(), work->volume.c_str());
+
+    bool aborted = false;
+    while (true) {
+        const size_t n = src->read(buf, bufSize);
+        if (n == 0) break;   // EOF (or an error — the client sees a short body)
+        if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buf), n) != ESP_OK) {
+            ESP_LOGW(TAG, "download %s aborted by the client", norm.c_str());
+            aborted = true;
+            break;
+        }
+    }
+
+    if (!aborted) {
+        httpd_resp_send_chunk(req, nullptr, 0);   // terminate the chunked body
+        if (src->error()) {
+            ESP_LOGE(TAG, "download %s ended with a read error", norm.c_str());
+        }
+    }
+
+    work->finish();
+    delete work;
+    vTaskDelete(nullptr);
+}
+
+} // namespace
+
 esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
@@ -2861,62 +3312,43 @@ esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
     }
     if (!queryParam(req, "path", path)) path = "/";
 
-    std::unique_ptr<::dhcp::files::IFileSource> src;
-    std::string detail;
-    const auto st = s_files->openRead(volume, path, src, &detail);
-    if (st != ::dhcp::files::FileStatus::Ok) {
-        return sendFileResult(req, st, "{}", &detail);
+    auto* work = new DownloadWork{};
+    work->files = s_files;
+    work->volume = volume;
+    work->path = path;
+
+    if (!work->slot.ok()) {
+        delete work;
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"too many transfers are running\"}");
+        return ESP_OK;
     }
 
-    std::string norm;
-    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
-    const std::string name = ::dhcp::storage::PathUtil::basename(norm);
-
-    httpd_resp_set_type(req, "application/octet-stream");
-    std::string disposition = "attachment; filename=\"" + asciiName(name) +
-                              "\"; filename*=UTF-8''" + rfc5987Encode(name);
-    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
-
-    size_t bufSize = 0;
-    uint8_t* buf = ioBuffer(bufSize);
-    uint8_t stackBuf[1024];
-    if (buf == nullptr) {
-        buf = stackBuf;
-        bufSize = sizeof(stackBuf);
-    }
-
-    ESP_LOGI(TAG, "download %s (%llu bytes, volume %s)", norm.c_str(),
-             (unsigned long long)src->size(), volume.c_str());
-
-    while (true) {
-        const size_t n = src->read(buf, bufSize);
-        if (n == 0) break;   // EOF (or an error — the client sees a short body)
-        if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buf), n) != ESP_OK) {
-            ESP_LOGW(TAG, "download %s aborted by the client", norm.c_str());
-            return ESP_OK;
-        }
-    }
-
-    httpd_resp_send_chunk(req, nullptr, 0);   // terminate the chunked body
-    if (src->error()) {
-        ESP_LOGE(TAG, "download %s ended with a read error", norm.c_str());
-    }
-    return ESP_OK;
+    runDetached(req, work, downloadTask, "file_download",
+                "{\"status\":\"error\",\"message\":\"cannot start the download\"}");
+    return ESP_OK;   // the answer is sent by the task
 }
+
 
 // ─────────────────────────────────────────────────────
 // POST /api/files/upload?volume=<id>&path=<rel>
 // ─────────────────────────────────────────────────────
-// Raw body (`application/octet-stream`), streamed to the volume in windows
-// through the shared PSRAM buffer: the file is written to `<name>.part` and
-// only renamed into place once the whole body arrived, so an interrupted
-// upload never leaves a truncated file under the real name.
+// Raw body (`application/octet-stream`), streamed to the volume in windows: the
+// file is written to `<name>.part` and only renamed into place once the whole
+// body arrived, so an interrupted upload never leaves a truncated file under the
+// real name.
 //
 //   ?volume=fat&path=/logs/2026-09-15.txt
 //
 // Answers 200 {"status":"ok","bytes":N,"path":"…"} on success; 411 when the
 // body length is missing (a chunked upload cannot be space-checked), 507 when
 // the volume cannot hold it, 500 when the write or the final rename fails.
+//
+// The body is read in a task of its own (see "Long transfers outside the server
+// task"): a folder upload is a long series of long requests, and leaving them in
+// the server task froze every other client for the whole transfer.
 
 /**
  * @brief Read an unsigned decimal query parameter.
@@ -2940,6 +3372,281 @@ static bool queryParamU64(httpd_req* req, const char* key, uint64_t& out)
     out = value;
     return true;
 }
+
+namespace {
+
+/**
+ * @brief Registry id of an upload.
+ *
+ * One row per file rather than one per kind: transfers run side by side now, so
+ * two uploads must not share a single record (a pause in one would have shown as
+ * a pause in the other). The path is what makes the id unique — and what makes a
+ * *resumed* upload find its own row again.
+ */
+std::string uploadJobId(const std::string& path)
+{
+    return "upload:" + path;
+}
+
+/**
+ * @brief The upload that is waiting to be continued, if any.
+ *
+ * A paused transfer exists only as a `<name>.part` on the volume — the device
+ * keeps no session for it — so the scheduler page needs someone who remembers
+ * *which* file it was in order to drop it. One record is enough (a pause is
+ * something the client asked for), and it is the only mutable state the
+ * transfer handling keeps, which is why it lives here next to the transfer and
+ * not in the class: the work now happens in tasks, so it is guarded.
+ */
+struct PausedUpload {
+    std::mutex mutex;
+    std::string id;
+    std::string volume;
+    std::string path;
+
+    /** @brief Remember the transfer that just paused. */
+    void remember(const std::string& jobId, const std::string& vol, const std::string& p)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        id = jobId;
+        volume = vol;
+        path = p;
+    }
+
+    /** @brief Forget @p jobId — it started again or was published. */
+    void forget(const std::string& jobId)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (id != jobId) return;   // another transfer is the remembered one
+        id.clear();
+        volume.clear();
+        path.clear();
+    }
+
+    /**
+     * @brief Take the record of @p jobId out, if that is the paused one.
+     * @return false when nothing is paused or it is a different transfer.
+     */
+    bool take(const std::string& jobId, std::string& vol, std::string& p)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (id.empty() || id != jobId) return false;
+        vol = volume;
+        p = path;
+        id.clear();
+        volume.clear();
+        path.clear();
+        return true;
+    }
+};
+
+PausedUpload g_pausedUpload;
+
+/** @brief Remember the transfer that just paused (see @ref PausedUpload). */
+void rememberPausedUpload(const std::string& jobId, const std::string& volume,
+                          const std::string& path)
+{
+    g_pausedUpload.remember(jobId, volume, path);
+}
+
+/** @brief Forget @p jobId — it started again or was published. */
+void forgetPausedUpload(const std::string& jobId)
+{
+    g_pausedUpload.forget(jobId);
+}
+
+/**
+ * @brief Take the record of the paused upload @p jobId, if that is the one.
+ * @return false when nothing is paused or it is a different transfer.
+ */
+bool takePausedUpload(const std::string& jobId, std::string& volume, std::string& path)
+{
+    return g_pausedUpload.take(jobId, volume, path);
+}
+
+/** @brief Work item of one upload (see @ref AsyncRequest). */
+struct UploadWork : AsyncRequest {
+    ::dhcp::files::IFileManager* files = nullptr;
+    std::string volume;
+    std::string path;
+    uint64_t offset = 0;
+    uint64_t total = 0;
+    uint64_t chunk = 0;           ///< Bytes of this request (Content-Length)
+    TransferSlot slot;            ///< Holds a place in the transfer budget
+};
+
+/** @brief Body of an upload: read the request body, write it, answer, release. */
+void uploadTask(void* arg)
+{
+    auto* work = static_cast<UploadWork*>(arg);
+    auto* req = work->req;
+    const std::string& volume = work->volume;
+    const std::string& path = work->path;
+    const uint64_t chunk = work->chunk;
+
+    ::dhcp::files::UploadRange range;
+    std::unique_ptr<::dhcp::files::IFileSink> sink;
+    std::string detail;
+    auto st = work->files->openWrite(volume, path, work->offset, work->total,
+                                     chunk, sink, range, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        sendFileResult(req, st, "{}", &detail);
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // The operator can watch and stop this transfer from the scheduler page: it
+    // is the longest operation the device knows, and the registry is where that
+    // page looks. Cancelling it there aborts the request and drops the `.part`
+    // (see the read loop), exactly like the Files page's own button does.
+    auto& jobs = ::dhcp::core::JobRegistry::instance();
+    const std::string jobId = uploadJobId(path);
+    jobs.begin(jobId, "jobs.upload", path, static_cast<uint32_t>(range.total));
+    // A new request for this file replaces whatever was paused before (the
+    // registry is single-flight per id), so the remembered pause goes with it.
+    forgetPausedUpload(jobId);
+    uint64_t reported = 0;
+
+    TransferWindow window;
+    uint8_t stackBuf[1024];
+    uint8_t* buf = window.data();
+    size_t bufSize = window.size();
+    if (buf == nullptr) {
+        buf = stackBuf;
+        bufSize = sizeof(stackBuf);
+    }
+
+    // httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between TCP segments of
+    // a multi-chunk body — the same bounded retry as the other upload handlers.
+    uint64_t remaining = chunk;
+    int retries = 0;
+    bool ok = true;
+    bool stopped = false;
+    while (remaining > 0) {
+        const size_t want = static_cast<size_t>(
+            (remaining < bufSize) ? remaining : bufSize);
+        const int got = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
+        if (got < 0) {
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
+            ok = false;
+            break;
+        }
+        if (got == 0) {
+            ok = false;
+            break;
+        }
+        if (!sink->write(buf, static_cast<size_t>(got))) {
+            ok = false;
+            break;
+        }
+        remaining -= static_cast<uint64_t>(got);
+
+        if (jobs.cancelRequested(jobId)) { stopped = true; break; }
+        // Progress every 64 KB: often enough for the page that watches, cheap
+        // enough not to take the registry mutex once per window.
+        if (sink->written() - reported >= 64 * 1024) {
+            reported = sink->written();
+            jobs.progress(jobId, static_cast<uint32_t>(reported), 0, path);
+        }
+    }
+
+    if (stopped) {
+        const uint64_t written = sink->written();
+        sink->abort();   // the operator cancelled: no `.part` is left behind
+        jobs.finish(jobId, ::dhcp::core::JobState::Cancelled, path);
+        ESP_LOGW(TAG, "upload of '%s' cancelled after %llu bytes (scheduler)",
+                 path.c_str(), (unsigned long long)written);
+        answerError(req,
+            "{\"status\":\"error\",\"message\":\"upload cancelled\","
+            "\"detail\":\"stopped from the task scheduler\"}");
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // A paused or interrupted upload answers with the offset it reached: that is
+    // the number the client continues from, and it comes from the device rather
+    // than from what the client thought it had sent.
+    auto sendPartial = [req, &range](uint64_t written) {
+        JsonWriter w;
+        w.str("status", "partial");
+        w.num("offset", static_cast<int64_t>(written));
+        w.num("total", static_cast<int64_t>(range.total));
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, w.toString().c_str());
+    };
+
+    if (!ok || !range.completes()) {
+        const uint64_t written = sink->written();
+
+        // A body that stopped early can only be continued in resumable mode —
+        // and only if the client is still there to hear about it. Without
+        // `total` there is nothing to continue, so the partial file goes.
+        if (!range.resumable) {
+            sink->abort();
+            jobs.finish(jobId, ::dhcp::core::JobState::Failed, path);
+            ESP_LOGE(TAG, "upload into '%s' failed after %llu of %llu bytes",
+                     path.c_str(), (unsigned long long)written,
+                     (unsigned long long)range.total);
+            answerError(req,
+                "{\"status\":\"error\",\"message\":\"upload failed\","
+                "\"detail\":\"incomplete or write error\"}");
+            work->finish();
+            delete work;
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        sink->keep();
+        // Not finished: the `.part` waits for the client to continue, so the
+        // scheduler page shows the transfer as paused rather than gone — and
+        // remembers where it is, because that page is also the only place from
+        // which a paused transfer can be dropped (nothing else knows its name).
+        jobs.pause(jobId, path);
+        rememberPausedUpload(jobId, volume, path);
+        ESP_LOGI(TAG, "upload of '%s' kept at %llu of %llu bytes",
+                 path.c_str(), (unsigned long long)written,
+                 (unsigned long long)range.total);
+        sendPartial(written);
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (!sink->commit()) {
+        sink->abort();
+        jobs.finish(jobId, ::dhcp::core::JobState::Failed, path);
+        answerError(req,
+            "{\"status\":\"error\",\"message\":\"upload failed\","
+            "\"detail\":\"cannot publish the file\"}");
+        work->finish();
+        delete work;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    std::string norm;
+    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
+    jobs.finish(jobId, ::dhcp::core::JobState::Done, norm);
+    forgetPausedUpload(jobId);
+
+    JsonWriter w;
+    w.str("status", "ok");
+    w.num("bytes", static_cast<int64_t>(sink->written()));
+    w.str("path", norm);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, w.toString().c_str());
+
+    work->finish();
+    delete work;
+    vTaskDelete(nullptr);
+}
+
+} // namespace
 
 esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
 {
@@ -2979,110 +3686,28 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
         return ESP_OK;
     }
 
-    const uint64_t chunk = static_cast<uint64_t>(req->content_len);
+    auto* work = new UploadWork{};
+    work->files = s_files;
+    work->volume = volume;
+    work->path = path;
+    work->offset = hasOffset ? offset : 0;
+    work->total = hasTotal ? total : 0;
+    work->chunk = static_cast<uint64_t>(req->content_len);
 
-    ::dhcp::files::UploadRange range;
-    std::unique_ptr<::dhcp::files::IFileSink> sink;
-    std::string detail;
-    auto st = s_files->openWrite(volume, path, hasOffset ? offset : 0,
-                                 hasTotal ? total : 0, chunk, sink, range, &detail);
-    if (st != ::dhcp::files::FileStatus::Ok) {
-        return sendFileResult(req, st, "{}", &detail);
-    }
-
-    size_t bufSize = 0;
-    uint8_t* buf = ioBuffer(bufSize);
-    uint8_t stackBuf[1024];
-    if (buf == nullptr) {
-        buf = stackBuf;
-        bufSize = sizeof(stackBuf);
-    }
-
-    // httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between TCP segments of
-    // a multi-chunk body — the same bounded retry as the other upload handlers.
-    uint64_t remaining = chunk;
-    int retries = 0;
-    bool ok = true;
-    while (remaining > 0) {
-        const size_t want = static_cast<size_t>(
-            (remaining < bufSize) ? remaining : bufSize);
-        const int got = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
-        if (got < 0) {
-            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
-            ok = false;
-            break;
-        }
-        if (got == 0) {
-            ok = false;
-            break;
-        }
-        if (!sink->write(buf, static_cast<size_t>(got))) {
-            ok = false;
-            break;
-        }
-        remaining -= static_cast<uint64_t>(got);
-    }
-
-    // A paused or interrupted upload answers with the offset it reached: that is
-    // the number the client continues from, and it comes from the device rather
-    // than from what the client thought it had sent.
-    auto sendPartial = [&req, &range](uint64_t written) {
-        std::string json = "{\"status\":\"partial\"";
-        addJsonInt(json, "offset", static_cast<int64_t>(written), true);
-        addJsonInt(json, "total", static_cast<int64_t>(range.total), true);
-        json += "}";
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, json.c_str());
-        return ESP_OK;
-    };
-
-    if (!ok || !range.completes()) {
-        const uint64_t written = sink->written();
-
-        // A body that stopped early can only be continued in resumable mode —
-        // and only if the client is still there to hear about it. Without
-        // `total` there is nothing to continue, so the partial file goes.
-        if (!range.resumable) {
-            sink->abort();
-            ESP_LOGE(TAG, "upload into '%s' failed after %llu of %llu bytes",
-                     path.c_str(), (unsigned long long)written,
-                     (unsigned long long)range.total);
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_sendstr(req,
-                "{\"status\":\"error\",\"message\":\"upload failed\","
-                "\"detail\":\"incomplete or write error\"}");
-            return ESP_OK;
-        }
-
-        sink->keep();
-        ESP_LOGI(TAG, "upload of '%s' kept at %llu of %llu bytes",
-                 path.c_str(), (unsigned long long)written,
-                 (unsigned long long)range.total);
-        return sendPartial(written);
-    }
-
-    if (!sink->commit()) {
-        sink->abort();
-        httpd_resp_set_status(req, "500 Internal Server Error");
+    if (!work->slot.ok()) {
+        delete work;
+        httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
-            "{\"status\":\"error\",\"message\":\"upload failed\","
-            "\"detail\":\"cannot publish the file\"}");
+            "{\"status\":\"error\",\"message\":\"too many transfers are running\"}");
         return ESP_OK;
     }
 
-    std::string norm;
-    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
-
-    std::string json = "{\"status\":\"ok\"";
-    addJsonInt(json, "bytes", static_cast<int64_t>(sink->written()), true);
-    addJsonString(json, "path", norm, true);
-    json += "}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, json.c_str());
-    return ESP_OK;
+    runDetached(req, work, uploadTask, "file_upload",
+                "{\"status\":\"error\",\"message\":\"cannot start the upload\"}");
+    return ESP_OK;   // the answer is sent by the task
 }
+
 
 // ─────────────────────────────────────────────────────
 // GET /api/files/upload/offset
@@ -3139,6 +3764,131 @@ esp_err_t RestApi::handlePostFileUploadCancel(httpd_req* req)
     auto st = s_files->discardUpload(volume, path, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
+    }
+
+    // A paused upload of this file is over: the registry must not keep showing it
+    // as waiting (nothing will continue it). Nothing happens when there is no such
+    // record, which is the normal case for a completed upload.
+    ::dhcp::core::JobRegistry::instance().finish(uploadJobId(path),
+                                                ::dhcp::core::JobState::Cancelled, path);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/jobs — the long-running operations of the device
+// ─────────────────────────────────────────────────────
+// One list for everything that takes minutes: the volume check, the cache
+// persist job, uploads, formatting. The operations announce themselves in
+// JobRegistry (see its comment), the page draws what this endpoint returns and
+// cancels through POST /api/jobs/cancel — so a new long operation needs no
+// endpoint of its own.
+
+esp_err_t RestApi::handleGetJobs(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    // No LAN-only filter: the list holds no file data, and every client that may
+    // see it is authenticated anyway.
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        ::dhcp::web::FileJson::jobs(::dhcp::core::JobRegistry::instance().snapshot()).c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/jobs/cancel  {"id": "file_check"}
+// ─────────────────────────────────────────────────────
+// Asks an unfinished operation to stop. There is no list of "stoppable" kinds:
+// anything the scheduler shows is still running or waiting, so it can be asked.
+// The answer is immediate even when the operation needs a moment to give up
+// (the page shows "stopping…" until the record disappears).
+
+esp_err_t RestApi::handlePostJobCancel(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const std::string body = readBody(req);
+    const std::string id = jsonGetStr(body, "id");
+    if (id.empty()) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"id is required\"}");
+        return ESP_OK;
+    }
+
+    auto& jobs = ::dhcp::core::JobRegistry::instance();
+    if (!jobs.contains(id)) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"no such operation\"}");
+        return ESP_OK;
+    }
+
+    if (!jobs.requestCancel(id)) {
+        // Only an operation that has already ended can say no: everything in the
+        // list is unfinished (a finished one-off is removed, a scheduled one is
+        // done and waiting), so there is no "not stoppable" case left — that was
+        // the old `cancellable` flag, which kept the button off operations the
+        // operator could not stop.
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"the operation has already finished\"}");
+        return ESP_OK;
+    }
+
+    // The registry only records the request: the subsystem that owns the
+    // operation acts on it. Most owners poll the flag themselves (the walk, the
+    // upload's read loop, the format task); the cases that cannot act on it are
+    // settled here, in the layer that knows them.
+    if (id == "file_check" && s_files) {
+        s_files->checkCancel();
+    }
+
+    // A format ends **here and now**, and that is the whole point of this branch.
+    // The erase is one call into IDF and FatFS: while it runs, nothing in the
+    // firmware can cut it short (it returns when the driver stops answering — on
+    // a failing card that is what takes so long). Waiting for it would mean the
+    // row sits at «остановка…» for minutes and the operator cannot retry, which
+    // is exactly what he asked to be rid of. So the operation is finished as
+    // cancelled at once — the row leaves the list, a retry is possible as soon as
+    // the volume is free again — and the card is taken care of by the hardware:
+    // one second later its supply is cut for five, which makes the stuck call
+    // fail and lets the volume come back through the normal mount path.
+    if (id == "format") {
+        // The record carries the volume id, and it is about to go.
+        std::string volume;
+        for (const auto& job : jobs.snapshot()) {
+            if (job.id == id) volume = job.arg;
+        }
+        g_formatAbandoned.store(true);
+        jobs.finish(id, ::dhcp::core::JobState::Cancelled, "stopped");
+        ESP_LOGW(TAG, "format stopped from the scheduler; the erase is broken by "
+                      "cutting the card's supply");
+        if (s_files && !volume.empty()) startPowerCut(s_files, volume);
+    }
+
+    // A *paused* upload has no request in flight to notice the flag. The `.part`
+    // it left behind is dropped here — the same thing the Files page's own cancel
+    // button does — and the record ends with it, because nothing will continue
+    // that transfer. Only one transfer can be paused at a time, and this is where
+    // it was remembered when its request ended.
+    {
+        std::string volume, path;
+        if (takePausedUpload(id, volume, path)) {
+            std::string detail;
+            const auto st = s_files ? s_files->discardUpload(volume, path, &detail)
+                                    : ::dhcp::files::FileStatus::NotMounted;
+            ESP_LOGW(TAG, "paused upload of '%s' dropped on request: %s",
+                     path.c_str(),
+                     st == ::dhcp::files::FileStatus::Ok ? "ok" : detail.c_str());
+            jobs.finish(id, ::dhcp::core::JobState::Cancelled, path);
+        }
     }
 
     httpd_resp_set_type(req, "application/json");

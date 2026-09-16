@@ -9,9 +9,9 @@
  *
  * Both classes are free of ESP-IDF dependencies, so the same tests run on a
  * host:
- *   g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I. \
+ *   g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I test/stubs -I. \
  *       test/test_filejson.cpp src/web/FileJson.cpp src/web/JsonWriter.cpp \
- *       host_main.cpp -o test_filejson
+ *       src/core/JobRegistry.cpp host_main.cpp -o test_filejson
  */
 
 #include <cstdint>
@@ -481,6 +481,68 @@ int test_all_builders_well_formed()
     check.volume = "sd";
     check.errors.push_back({"/a", "b"});
     ASSERT_WELL_FORMED(FileJson::check(check));
+
+    ::dhcp::core::JobInfo job;
+    job.id = "file_check";
+    job.titleKey = "jobs.file_check";
+    ASSERT_WELL_FORMED(FileJson::jobs({job}));
+    ASSERT_WELL_FORMED(FileJson::jobs({}));
+    return 0;
+}
+
+/** `GET /api/jobs`: the list the scheduler page draws. */
+int test_jobs_payload()
+{
+    // Nothing running: an empty array, not a missing field.
+    std::string empty = FileJson::jobs({});
+    TEST_ASSERT_STR_EQ(empty, "{\"jobs\":[]}");
+    ASSERT_WELL_FORMED(empty);
+    // A volume check in progress, with a known total.
+    ::dhcp::core::JobInfo check;
+    check.id = "file_check";
+    check.titleKey = "jobs.file_check";
+    check.arg = "sd";
+    check.detail = "/logs/2026.txt";
+    check.state = ::dhcp::core::JobState::Running;
+    check.done = 30;
+    check.total = 100;
+    check.durationMs = 12345;
+
+    std::string one = FileJson::jobs({check});
+    TEST_ASSERT_STR_EQ(one,
+        "{\"jobs\":[{\"id\":\"file_check\",\"title_key\":\"jobs.file_check\","
+        "\"arg\":\"sd\",\"state\":\"running\",\"done\":30,\"total\":100,"
+        "\"percent\":30,\"detail\":\"/logs/2026.txt\",\"elapsed_ms\":12345,"
+        "\"cancel_requested\":false,\"repeat_sec\":0}]}");
+    ASSERT_WELL_FORMED(one);
+
+    // A paused upload: an unknown total gives `percent: -1` (indeterminate bar),
+    // and a path that needs escaping travels escaped.
+    ::dhcp::core::JobInfo upload;
+    upload.id = "upload";
+    upload.titleKey = "jobs.upload";
+    upload.arg = "/фото/\"big\".mkv";
+    upload.state = ::dhcp::core::JobState::Paused;
+    upload.done = 589824;
+    upload.total = 0;
+    upload.durationMs = 4000;
+    upload.cancelRequested = true;
+
+    std::string two = FileJson::jobs({check, upload});
+    TEST_ASSERT_TRUE(two.find("\"percent\":-1") != std::string::npos);
+    TEST_ASSERT_TRUE(two.find("\"state\":\"paused\"") != std::string::npos);
+    TEST_ASSERT_TRUE(two.find("\"cancel_requested\":true") != std::string::npos);
+    TEST_ASSERT_TRUE(two.find("/фото/\\\"big\\\".mkv") != std::string::npos);
+    ASSERT_WELL_FORMED(two);
+
+    // A finished operation that repeats stays in the list with its interval.
+    ::dhcp::core::JobInfo repeating = check;
+    repeating.state = ::dhcp::core::JobState::Done;
+    repeating.repeatSec = 3600;
+    std::string scheduled = FileJson::jobs({repeating});
+    TEST_ASSERT_TRUE(scheduled.find("\"state\":\"done\"") != std::string::npos);
+    TEST_ASSERT_TRUE(scheduled.find("\"repeat_sec\":3600") != std::string::npos);
+    ASSERT_WELL_FORMED(scheduled);
     return 0;
 }
 
@@ -507,6 +569,7 @@ void app_main()
     failures += test_settings_payload();
     failures += test_volume_array();
     failures += test_check_report();
+    failures += test_jobs_payload();
     failures += test_checker_rejects_broken_documents();
     failures += test_all_builders_well_formed();
 

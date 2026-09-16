@@ -32,6 +32,7 @@ enum class FileStatus {
     TooLarge,       ///< 413 — file does not fit the in-memory editor limit
     NotText,        ///< 415 — the content is binary, not editable as text
     NoSpace,        ///< 507 — the volume is too small for the uploaded data
+    Busy,           ///< 409 — another operation owns the volume (a format)
     IoError,        ///< 500 — the filesystem call failed (see detail)
     Unsupported     ///< 400 — operation not offered for this volume (e.g. format FAT)
 };
@@ -186,6 +187,23 @@ public:
      */
     virtual FileStatus format(const std::string& volumeId,
                               std::string* detail = nullptr) = 0;
+
+    /**
+     * @brief Cut the volume's supply for @p offMs and give it back.
+     *
+     * The escape hatch from a filesystem call that has stopped answering: with
+     * the supply gone the in-flight transfer fails and the call returns. It is
+     * therefore the **one** operation allowed to touch a volume while a format
+     * owns it — it deliberately bypasses the busy check that everything else
+     * goes through — and it leaves the volume unmounted (the medium comes back
+     * reset).
+     *
+     * @return @ref FileStatus::Unsupported when the volume (or the board) cannot
+     *         be switched off, @ref FileStatus::IoError when the switch is not
+     *         usable.
+     */
+    virtual FileStatus powerCycle(const std::string& volumeId, uint32_t offMs,
+                                  std::string* detail = nullptr) = 0;
 
     /**
      * @brief Metadata of a single entry (no need to list the parent).

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "../core/JobRegistry.h"
 #include "../files/IFileManager.h"
 #include "../storage/IFileSystem.h"
 #include "JsonWriter.h"
@@ -112,6 +113,23 @@ public:
      */
     static std::string check(const ::dhcp::files::CheckReport& report);
 
+    /**
+     * @brief Body of `GET /api/jobs` — the long-running operations of the device.
+     *
+     * `{"jobs":[{"id":…,"title_key":…,"arg":…,"state":…,"done":…,
+     * "total":…,"percent":…,"detail":…,"elapsed_ms":…,
+     * "cancel_requested":…,"repeat_sec":…}, …]}`
+     *
+     * Every entry here is an operation that has not finished, so every one of
+     * them can be asked to stop — there is no "cancellable" flag to look at.
+     *
+     * `percent` is **-1** when the operation cannot say (an unknown total): the
+     * page draws an indeterminate bar then, so it never divides by anything
+     * itself. The list is empty when nothing runs — a finished one-off operation
+     * is removed by the registry, a repeating one stays with its `repeat_sec`.
+     */
+    static std::string jobs(const std::vector<::dhcp::core::JobInfo>& jobs);
+
 private:
     /** @brief `[{…}, …]` for the directory listing (comma-safe for 0/1/n entries). */
     static std::string entryArray(const std::vector<::dhcp::files::FileEntry>& entries);
@@ -124,6 +142,12 @@ private:
 
     /** @brief One failure object `{"path":…,"detail":…}`. */
     static std::string checkErrorObject(const ::dhcp::files::CheckError& error);
+
+    /** @brief `[{…}, …]` for the running and scheduled operations. */
+    static std::string jobArray(const std::vector<::dhcp::core::JobInfo>& jobs);
+
+    /** @brief One operation object (see @ref jobs for the fields). */
+    static std::string jobObject(const ::dhcp::core::JobInfo& job);
 };
 
 } // namespace web

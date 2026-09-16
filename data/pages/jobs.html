@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="jobs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Scheduler — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="jobs.title">Task Scheduler</h1>
+
+        <!-- What this page is, and the two rules the list follows, in a block of
+             their own so the list underneath is not pushed down by it. -->
+        <div class="card">
+            <p class="hint" data-i18n="jobs.desc">Long-running operations of every subsystem in one list: volume checks, file uploads, DNS cache writes, formatting, connection tests.</p>
+            <p class="hint" data-i18n="jobs.one_off">A one-off operation leaves the list as soon as it ends; a scheduled one stays together with its interval. A paused upload stays until it is continued or discarded.</p>
+        </div>
+
+        <!-- One block per operation, built by the script below (never with
+             innerHTML: the file paths come from the device and must be inserted
+             as text). -->
+        <div id="jobs-list"></div>
+
+        <div class="card" id="jobs-empty">
+            <p class="hint" data-i18n="jobs.empty">Nothing is running right now.</p>
+        </div>
+
+        <!-- Poll failures: the list above keeps the last values, so this line is
+             what says the readings stopped. -->
+        <p class="test-conn-result" id="jobs-status"></p>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        /* Task Scheduler page: draws `GET /api/jobs` — the device-wide list of
+           long-running operations (volume check, uploads, DNS cache writes,
+           formatting, connection tests). The firmware owns the list; this page
+           only draws it and asks for a stop through `POST /api/jobs/cancel`.
+
+           Polling (2 s) instead of a push channel: the device has none, and the
+           home page already polls at a fixed interval, so the httpd sees the same
+           kind of traffic. A refresh is skipped while the tab is hidden, and the
+           poll is never re-entered, so requests stay sequential.
+
+           Rows are re-used and keyed by job id rather than rebuilt, so a button
+           press is never lost to a redraw and the layout does not flicker on a
+           value that changes every tick. */
+
+        const JOBS_POLL_MS = 2000;
+        /* Constant markup only — device-supplied text goes in through textContent. */
+        const JOBS_CROSS_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" ' +
+            'stroke="currentColor" stroke-width="1.8" stroke-linecap="round">' +
+            '<path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8"></path></svg>';
+        const JOBS_STATES = new Set(['running', 'paused', 'done', 'failed', 'cancelled']);
+
+        const jobsUi = { rows: new Map(), timer: null, inFlight: false, last: [], statusHold: 0 };
+
+        /* Elapsed time and repeat interval as h:mm:ss (m:ss below an hour):
+           digits and colons only, so the value reads the same in any language. */
+        function jobsClock(ms) {
+            const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+            const h = Math.floor(total / 3600);
+            const m = Math.floor((total % 3600) / 60);
+            const s = total % 60;
+            const pad = n => String(n).padStart(2, '0');
+            return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s);
+        }
+
+        /* An unknown state from a newer firmware must not paint nothing: fall
+           back to "running", which only affects the colour and the badge. */
+        function jobsStateId(state) {
+            return JOBS_STATES.has(state) ? state : 'running';
+        }
+
+        /* Bar colour follows the state: cyan while it works, orange while the
+           operator holds it, red when it failed. An operation whose total is
+           unknown (a walk stops on a byte budget) has no percentage to move, so
+           the bar sweeps instead of sitting at zero. */
+        function jobsFillClasses(job) {
+            const classes = ['meter-fill'];
+            if (job.state === 'paused') classes.push('ram-fill');
+            else if (job.state === 'failed') classes.push('jobs-fill-error');
+            else classes.push('ic-fill');
+            if (job.percent < 0 && job.state === 'running') classes.push('jobs-fill-indeterminate');
+            return classes.join(' ');
+        }
+
+        function jobsCreateRow(job) {
+            /* A card of its own: two operations are two separate readings, and
+               a card also gives every row the same frame as the rest of the UI. */
+            const item = document.createElement('div');
+            item.className = 'card jobs-item';
+            item.dataset.id = job.id;      // self-describing DOM (no styling use)
+
+            const head = document.createElement('div');
+            head.className = 'jobs-head';
+
+            const name = document.createElement('span');
+            name.className = 'jobs-name';
+
+            const state = document.createElement('span');
+            state.className = 'jobs-state';
+
+            const actions = document.createElement('span');
+            actions.className = 'jobs-actions';
+
+            /* Icon-only, like the upload row: what is running is already written
+               next to it, and the tooltip (set from the dictionary below) names
+               the action. */
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'files-icon-btn';
+            cancel.innerHTML = JOBS_CROSS_SVG;
+            cancel.addEventListener('click', () => jobsCancel(job.id));
+
+            actions.appendChild(cancel);
+            head.append(name, state, actions);
+
+            const track = document.createElement('div');
+            track.className = 'meter-track';
+            track.style.height = '8px';
+            const fill = document.createElement('div');
+            fill.className = 'meter-fill ic-fill';
+            fill.style.width = '0%';
+            track.appendChild(fill);
+
+            const meta = document.createElement('div');
+            meta.className = 'jobs-meta';
+            const detail = document.createElement('span');
+            detail.className = 'jobs-detail';
+            const repeat = document.createElement('span');
+            repeat.className = 'jobs-num';
+            const progress = document.createElement('span');
+            progress.className = 'jobs-num';
+            const elapsed = document.createElement('span');
+            elapsed.className = 'jobs-num';
+            meta.append(detail, repeat, progress, elapsed);
+
+            item.append(head, track, meta);
+            return { item, name, state, cancel, track, fill, detail, repeat, progress, elapsed };
+        }
+
+        function jobsUpdateRow(row, job) {
+            /* Name = dictionary title + what it works on ("Volume check — sd"). */
+            const title = job.arg ? tr(job.title_key) + ' — ' + job.arg : tr(job.title_key);
+            if (row.name.textContent !== title) {
+                row.name.textContent = title;      // text, not markup: paths are data
+                row.name.title = title;            // the row ellipsises a long path
+            }
+
+            const stateId = jobsStateId(job.state);
+            const badge = tr('jobs.state_' + stateId) +
+                (job.cancel_requested && stateId === 'running' ? ' · ' + tr('jobs.stopping') : '');
+            if (row.state.textContent !== badge) row.state.textContent = badge;
+            row.state.className = 'jobs-state jobs-state-' + stateId;
+
+            /* Every operation in this list is unfinished, so every one of them
+               can be asked to stop: what "stopped" means is the owner's business
+               (an upload drops its `.part`, a format can only end once the card
+               answers again). While a request is on its way the button is
+               disabled instead of gone — the row is still stoppable, and the
+               badge says what is happening. */
+            const unfinished = stateId === 'running' || stateId === 'paused';
+            row.cancel.style.display = unfinished ? '' : 'none';
+            row.cancel.disabled = !!job.cancel_requested;
+            const tip = tr('jobs.cancel');
+            if (row.cancel.title !== tip) {
+                row.cancel.title = tip;
+                row.cancel.setAttribute('aria-label', tip);
+            }
+
+            const unknown = job.percent < 0;
+            /* Nothing to fill and nothing running: hide the track instead of
+               showing an empty bar (a paused upload with an unknown total). */
+            row.track.style.display = (unknown && stateId !== 'running') ? 'none' : '';
+            row.fill.className = jobsFillClasses(job);
+            row.fill.style.width = unknown
+                ? '' : Math.max(0, Math.min(100, job.percent)) + '%';
+
+            const progress = unknown
+                ? formatBytes(job.done)
+                : formatBytes(job.done) + ' / ' + formatBytes(job.total) + ' · ' + job.percent + '%';
+            if (row.progress.textContent !== progress) row.progress.textContent = progress;
+            row.progress.title = job.total > 0
+                ? job.done + ' / ' + job.total + ' B' : job.done + ' B';
+
+            if (row.detail.textContent !== job.detail) row.detail.textContent = job.detail || '';
+            row.detail.style.display = job.detail ? '' : 'none';
+
+            row.elapsed.textContent = tr('jobs.elapsed') + jobsClock(job.elapsed_ms);
+            row.repeat.textContent = job.repeat_sec > 0
+                ? tr('jobs.repeat') + jobsClock(job.repeat_sec * 1000) : '';
+            row.repeat.style.display = job.repeat_sec > 0 ? '' : 'none';
+        }
+
+        function jobsRender(list) {
+            const host = document.getElementById('jobs-list');
+            if (!host) return;
+            jobsUi.last = list;
+
+            const empty = document.getElementById('jobs-empty');
+            if (empty) empty.style.display = list.length ? 'none' : '';
+
+            const seen = new Set();
+            let anchor = null;
+            for (const job of list) {
+                seen.add(job.id);
+                let row = jobsUi.rows.get(job.id);
+                if (!row) {
+                    row = jobsCreateRow(job);
+                    jobsUi.rows.set(job.id, row);
+                }
+                jobsUpdateRow(row, job);
+                /* Keep the order the device sent (newest first). */
+                const at = anchor ? anchor.item.nextSibling : host.firstChild;
+                if (row.item !== at) host.insertBefore(row.item, at);
+                anchor = row;
+            }
+            /* Operations that ended are gone from the payload — drop their rows. */
+            for (const [id, row] of jobsUi.rows) {
+                if (!seen.has(id)) {
+                    row.item.remove();
+                    jobsUi.rows.delete(id);
+                }
+            }
+        }
+
+        /* The message line holds what was last said. A message from a cancel
+           press has to survive the poll that follows it — otherwise the answer
+           is cleared a few milliseconds after it appears, which is how a failed
+           cancel used to look like nothing happening at all. */
+        function jobsSetStatus(text, holdMs = 0) {
+            const el = document.getElementById('jobs-status');
+            if (el) el.textContent = text;
+            jobsUi.statusHold = text ? Date.now() + holdMs : 0;
+        }
+
+        async function jobsPoll() {
+            if (jobsUi.inFlight) return;      // one request at a time
+            jobsUi.inFlight = true;
+            try {
+                const data = await fetchJSON('/api/jobs');
+                jobsRender(Array.isArray(data.jobs) ? data.jobs : []);
+                if (Date.now() >= jobsUi.statusHold) jobsSetStatus('');
+            } catch (e) {
+                jobsSetStatus(tr('jobs.unreachable'));
+            } finally {
+                jobsUi.inFlight = false;
+            }
+        }
+
+        async function jobsCancel(id) {
+            jobsSetStatus('');
+            try {
+                const resp = await apiFetch('/api/jobs/cancel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id }),
+                });
+                /* 404/409 mean the operation ended between the last poll and the
+                   press — the row on screen can be up to two seconds old. That is
+                   not a failure of the press, so it gets its own words. */
+                if (resp.status === 404 || resp.status === 409) {
+                    jobsSetStatus(tr('jobs.cancel_done'), 5000);
+                } else if (!resp.ok) {
+                    jobsSetStatus(tr('jobs.cancel_failed'), 5000);
+                }
+            } catch (e) {
+                jobsSetStatus(tr('jobs.cancel_failed'), 5000);
+            }
+            /* Show the request at once instead of waiting for the next tick. */
+            jobsPoll();
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            jobsPoll();
+            jobsUi.timer = setInterval(() => {
+                if (!document.hidden) jobsPoll();
+            }, JOBS_POLL_MS);
+            /* Back to the tab: refresh now rather than at the next tick, so a
+               list that changed while the page was hidden is never stale. */
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) jobsPoll();
+            });
+            /* Language switch: the labels here are built by this script, so the
+               dictionary change has to be re-applied to the existing rows. */
+            document.addEventListener('i18n-applied', () => jobsRender(jobsUi.last));
+        });
+    </script>
+</body>
+</html>

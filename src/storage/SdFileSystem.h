@@ -62,9 +62,25 @@ public:
 private:
     /**
      * @brief One mount attempt with the given bus width.
+     *
+     * @param busWidth       4 or 1 (the driver retries 1-bit after 4-bit).
+     * @param formatIfNeeded Ask IDF to create a filesystem when the card has
+     *                       none. Only @ref format passes true: a plain mount
+     *                       must never format a medium on its own.
      * @return true when the card mounted (and the VFS is registered).
      */
-    bool tryMount(int busWidth);
+    bool tryMount(int busWidth, bool formatIfNeeded);
+
+    /**
+     * @brief The two mount attempts, with or without creating a filesystem.
+     *
+     * Shared by @ref mount (which never formats) and @ref mountWithFormat (used
+     * only by @ref format to rescue a card whose filesystem is gone).
+     */
+    bool mountAttempts(bool formatIfNeeded);
+
+    /** @brief Mount the card, creating a filesystem when it has none. */
+    bool mountWithFormat();
 
     /**
      * @brief Ask the mounted card for its status word (CMD13, `sdmmc_get_status`).
@@ -94,6 +110,30 @@ private:
      */
     void applySlotPower(bool inverted);
 
+public:
+    /**
+     * @brief Cut the card's supply for @p offMs ms and restore it.
+     *
+     * Used to break a driver call that has stopped answering — a format on a
+     * failing card is exactly that: the erase is one call into IDF and FatFS
+     * and returns only when the card does, which it may do minutes later. With
+     * the supply gone the transfer in flight fails at once and the call comes
+     * back with an error.
+     *
+     * The card is unpowered for the whole interval, so it comes back **reset**:
+     * the handle this object holds belongs to the old power-up and the call that
+     * was stuck fails (its own error path releases the card, the diskio slot and
+     * the SDMMC controller, and the next mount() initializes the card again).
+     * Safe to call while another task is inside a filesystem call — that is the
+     * point of it, and the state here is deliberately left alone so that release
+     * still has a handle to work with.
+     *
+     * @return false when this board cannot switch the card's supply.
+     */
+    bool powerCycle(uint32_t offMs) override;
+
+private:
+
     std::string id_;
     std::string mountPoint_;
     std::string error_;
@@ -108,6 +148,18 @@ private:
     int pwrLevel_ = -1;
     /** @brief Try the opposite switch polarity on the next attempt. */
     bool pwrInverted_ = false;
+    /**
+     * @brief Set once the card has mounted with the configured polarity.
+     *
+     * The polarity flip above exists for a board whose switch is wired the other
+     * way round — at bring-up a wrong guess looks exactly like a dead card, so
+     * the firmware tries both. Once a mount has *worked* the wiring is proven,
+     * and flipping afterwards is actively harmful: it leaves the card unpowered
+     * on every second attempt, which on a card that cannot mount anyway (an
+     * interrupted format leaves it without a filesystem) shows up as "card not
+     * mounted" that never comes back.
+     */
+    bool pwrProven_ = false;
     sdmmc_card_t* card_ = nullptr;
     sd_pwr_ctrl_handle_t pwrCtrl_ = nullptr;
 #endif

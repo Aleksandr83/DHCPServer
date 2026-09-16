@@ -102,6 +102,28 @@ public:
      * @return false when the volume does not support formatting.
      */
     virtual bool format() = 0;
+
+    /**
+     * @brief Cut the medium's supply for @p offMs and give it back.
+     *
+     * The only way to break a driver call that has stopped answering: with the
+     * supply gone the transfer in flight fails, the write behind it aborts and
+     * the call returns. A removable medium that has its own power switch can do
+     * this; a flash partition says so by returning false, and so does a volume
+     * whose supply is not switchable at all.
+     *
+     * The medium comes back **reset**: whatever was open is stale. The cycle
+     * itself touches no filesystem state — the call that was stuck fails, and its
+     * own error path releases what it held (card handle, diskio slot, SDMMC
+     * controller), so the next mount() initializes the medium from scratch.
+     *
+     * @return true when the supply was actually cycled.
+     */
+    virtual bool powerCycle(uint32_t offMs)
+    {
+        (void)offMs;
+        return false;
+    }
 };
 
 } // namespace storage

@@ -1093,17 +1093,50 @@ this volume`).
 
 **Response `200 OK`:** `{ "status": "ok" }`
 **Errors:** `400` missing confirmation or unsupported volume · `404` unknown
-volume · `409` volume not mounted (there is nothing to format) · `500` the
-format call failed.
+volume · `409` a format is already running or a volume check is (the volume does
+**not** have to be mounted) · `500` the format failed (the detail carries the
+driver error) or it was stopped from the scheduler.
+
+> **The volume does not have to be mounted.** A card whose filesystem is gone —
+> an interrupted format is the classic way to get one — cannot be mounted, and
+> refusing to format it would leave it with no way back (the format would need a
+> mount, the mount a filesystem, and only a format could create one). The format
+> therefore mounts the card itself, with IDF allowed to create the filesystem it
+> cannot find; a card that still has one is mounted and formatted normally, so a
+> request is never satisfied by a plain mount.
+
+> The format runs **outside the server task**: the request takes the client's
+> socket away from `httpd` (`httpd_req_async_handler_begin`), so the web
+> interface stays reachable while a failing card is being erased — and its own
+> stop button can be reached. The response is still a single answer on the same
+> connection, sent when the work is done (`{"status":"error","message":
+> "format cancelled"}` when the operator stopped it). Two formats cannot run at
+> once, and a volume check is refused while one runs.
+>
+> **Stopping it is a hardware matter**: `POST /api/jobs/cancel` finishes the
+> operation immediately and, one second later, cuts the card's supply for five
+> seconds (the board switches it with a MOSFET — `CONFIG_FILES_SD_PWR_GPIO`).
+> That is what makes the stuck call return: the erase itself cannot be
+> interrupted from software, but an unpowered card fails its transfer at once.
+> The card comes back reset and unusable until it is mounted again (the volume is
+> retried every five seconds), which is the state an operator with a failing card
+> wants.
 
 ---
 
 ## GET /api/files/download
 
 Stream the contents of a file. The response body is **chunked** (no
-`Content-Length`) and written in windows through a shared **512 KB buffer
-allocated in PSRAM** (64 KB in the internal heap when PSRAM is unavailable),
-so the transfer costs the same whether the file is 1 KB or 20 MB.
+`Content-Length`) and written in windows through a **512 KB buffer allocated in
+PSRAM** (64 KB in the internal heap when PSRAM is unavailable), so the transfer
+costs the same whether the file is 1 KB or 20 MB.
+
+> The streaming happens **outside the web server's task**: the handler takes the
+> client's socket with `httpd_req_async_handler_begin()` and a task of its own
+> does the work, so a large (or slow) download does not stop the device from
+> answering anyone else. The window belongs to that transfer — two transfers may
+> run side by side, and a shared buffer would corrupt both. `503` is answered
+> when more than four transfers are already running.
 
 **Query parameters**
 
@@ -1122,7 +1155,8 @@ Content-Disposition: attachment; filename="report.txt"; filename*=UTF-8''report.
 > modern browsers and still yields a usable name in old clients.
 
 **Errors:** `400` invalid path or the path is a directory · `404` unknown
-volume or file · `409` volume not mounted · `500` the file could not be opened.
+volume or file · `409` volume not mounted · `500` the file could not be opened ·
+`503` too many transfers are running at once.
 A client disconnect aborts the transfer silently (logged on the device).
 
 ---
@@ -1133,6 +1167,14 @@ Upload a file. The **raw request body** (`application/octet-stream`, not
 multipart) is streamed into a windowed write, so the size is limited only by
 the free space of the volume. The file may also be sent in pieces and continued
 later (see *Resumable uploads* below).
+
+> The body is read **outside the web server's task** — the request is detached
+> with `httpd_req_async_handler_begin()` and a task of its own does the
+> transfer. This is what keeps a folder upload (hundreds of large requests) from
+> freezing every other client: in the server task it would hold the whole web
+> interface, and in a second browser the pages and the `/api/status` polling
+> would stand still for the duration. The response is unchanged and still
+> arrives on the same connection.
 
 **Query parameters**
 
@@ -1186,12 +1228,19 @@ kept, the client continues from `offset`):
 > continued upload is only asked for the part that is still missing.
 
 **Errors:** `400` invalid path, the destination is a directory, or `offset`
-without `total` · `404` unknown volume · `409` volume not mounted, or the chunk
-does not line up with the file on the device (use
+without `total` · `404` unknown volume · `409` volume not mounted, a format owns
+the volume (`the volume is busy with another operation`), or the chunk does not
+line up with the file on the device (use
 [`GET /api/files/upload/offset`](#get-apifilesuploadoffset) and resend from
 there) · `411` `Content-Length` missing (cannot be space-checked) · `507` not
 enough free space · `500` write or final rename failed (a resumable upload
-answers `partial` instead when the body simply stopped early).
+answers `partial` instead when the body simply stopped early) · `503` too many
+transfers are running at once.
+
+> While an upload runs it appears in [`GET /api/jobs`](#get-apijobs) as one row
+> **per file** (`id` = `upload:<path>`, so two transfers never share a record and
+> a resumed one finds its own again), and can be stopped from there — a running
+> one through its read loop, a paused one by dropping its `.part`.
 
 ---
 
@@ -1437,6 +1486,85 @@ ones), `bytes_read`, `budget_bytes` and `errors` — at most
 > `POST /api/files/delete` with `recursive`) or formatting the card — the two
 > actions that can actually make the volume usable again, both of which destroy
 > data and are therefore confirmed first.
+
+---
+
+## GET /api/jobs
+
+The **long-running operations** of the device — the volume check, the DNS cache
+persist job, a file upload, formatting, a connection test — in one list. Each
+operation announces itself in `JobRegistry` (that is all a new long operation
+has to do: `begin` / `progress` / `finish`), so this endpoint and the scheduler
+page keep working without a new route per operation.
+
+```json
+{
+  "jobs": [
+    {
+      "id": "file_check",
+      "title_key": "jobs.file_check",
+      "arg": "sd",
+      "state": "running",
+      "done": 41943040,
+      "total": 67108864,
+      "percent": 62,
+      "detail": "/logs/2026-09.txt",
+      "elapsed_ms": 41230,
+      "cancel_requested": false,
+      "repeat_sec": 0
+    }
+  ]
+}
+```
+
+> `title_key` is an i18n key and `arg` what the operation works on (a volume id,
+> a file path) — the UI composes the label and needs no knowledge of the
+> operation itself. `percent` is **-1** when the operation cannot say (an unknown
+> `total`), which the page draws as an indeterminate bar.
+>
+> The list answers **"what is running now"**: a finished one-off operation is
+> removed from it immediately, so there is nothing to clean up. An operation
+> that knows it will run again (`repeat_sec > 0`) keeps its record after
+> finishing, and an operation that is **paused** (an upload whose `<name>.part`
+> waits for the client) stays until it is continued or discarded.
+>
+> Everything in the list is **unfinished**, and therefore everything in it can be
+> asked to stop — there is no "cancellable" field, and the page shows the stop
+> button for every entry except one that repeats and has already finished.
+>
+> Unlike `/api/files/*`, this endpoint is not restricted to the allowed subnet:
+> the list carries no file data, and every client that can see it is
+> authenticated anyway.
+
+**Errors:** only the usual `401` (no/bad credentials).
+
+---
+
+## POST /api/jobs/cancel
+
+Asks an unfinished operation to stop. `{"id": "file_check"}` — the id from
+[`GET /api/jobs`](#get-apijobs).
+
+**Response `200 OK`:** `{ "status": "ok" }` — the request is recorded at once
+(the list then shows `cancel_requested`) and performed by the subsystem that owns
+the operation, which decides how quickly it can let go:
+
+| Operation | What a stop does |
+| --- | --- |
+| `file_check` | the walk ends at its next step |
+| `upload:<path>` (running) | the read loop aborts the request and drops the `.part` |
+| `upload:<path>` (paused) | the `.part` is dropped and the record ends with it — nothing would continue that transfer |
+| `format` | the record ends **at once** and, one second later, the card's supply is cut for five seconds — the erase itself is one call into IDF and FatFS and cannot be interrupted in software, but an unpowered card makes the transfer in flight fail, so the call comes back. The volume ends unmounted and is mounted again by the normal retry (every five seconds) |
+| `cache_save` / `cache_load` | honoured before the file I/O starts; the write itself is one call |
+| `test_connection` | honoured before the request goes out |
+
+**Errors:** `400` missing `id` · `404` unknown id · `409` the operation has
+already finished (a repeating one that is waiting for its next run).
+
+> The registry itself never calls into the subsystems: it only records the wish.
+> Two owners are settled by the REST layer instead, because it is where their
+details live — the volume check (its cancel route) and a **paused** upload (its
+>`.part` is the only thing left of it, and the layer remembers where).
 
 ---
 

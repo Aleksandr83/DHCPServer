@@ -91,9 +91,15 @@ VolumeInfo SdFileSystem::info()
 
 bool SdFileSystem::format() { return false; }
 
+bool SdFileSystem::powerCycle(uint32_t)
+{
+    // No slot, no supply to cut (and nothing to break loose from).
+    return false;
+}
+
 #else  // CONFIG_IDF_TARGET_ESP32P4
 
-bool SdFileSystem::tryMount(int busWidth)
+bool SdFileSystem::tryMount(int busWidth, bool formatIfNeeded)
 {
     // Fresh host description per attempt.
     //
@@ -126,7 +132,10 @@ bool SdFileSystem::tryMount(int busWidth)
     slot.flags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;  // debug convenience only
 
     esp_vfs_fat_mount_config_t mcfg = {};
-    mcfg.format_if_mount_failed = false;   // formatting is an explicit action
+    // Formatting is an explicit action, so a plain mount never creates a
+    // filesystem — only `format()` asks for that, to rescue a card whose
+    // filesystem is gone.
+    mcfg.format_if_mount_failed = formatIfNeeded;
     mcfg.max_files = kMaxFiles;
     mcfg.allocation_unit_size = kAllocUnit;
     mcfg.disk_status_check_enable = false;
@@ -136,10 +145,27 @@ bool SdFileSystem::tryMount(int busWidth)
     esp_err_t err = esp_vfs_fat_sdmmc_mount(mountPoint_.c_str(), &host, &slot,
                                             &mcfg, &card);
     if (err == ESP_OK) {
+        // A mount can report success while nothing is mounted: when the VFS path
+        // is still registered from an earlier attempt (a failed format leaves it
+        // behind), the mount code skips registering again, ends up with a NULL
+        // FatFS object and mounts that — which FatFS reads as "unmount". Ask the
+        // volume for its size and take such a mount apart again, so the state is
+        // honest and the next attempt starts from a clean slate.
+        uint64_t total = 0, free = 0;
+        if (esp_vfs_fat_info(mountPoint_.c_str(), &total, &free) != ESP_OK) {
+            ESP_LOGW(TAG, "%s: mount reported success but the volume is not "
+                          "usable — releasing it", id_.c_str());
+            esp_vfs_fat_sdcard_unmount(mountPoint_.c_str(), card);
+            attemptError_ = std::string("mount left no usable volume (") +
+                            (busWidth == 4 ? "4-bit" : "1-bit") + ")";
+            return false;
+        }
         card_ = card;
         mounted_ = true;
         present_ = true;
         error_.clear();
+        // The switch polarity is proven from now on: the slot is powered.
+        pwrProven_ = true;
         ESP_LOGI(TAG, "microSD mounted at %s (%d-bit): %s %llu MB",
                  mountPoint_.c_str(), busWidth,
                  card->cid.name,
@@ -162,7 +188,17 @@ bool SdFileSystem::tryMount(int busWidth)
 bool SdFileSystem::mount()
 {
     if (mounted_) return true;
+    return mountAttempts(false);
+}
 
+bool SdFileSystem::mountWithFormat()
+{
+    if (mounted_) return true;
+    return mountAttempts(true);
+}
+
+bool SdFileSystem::mountAttempts(bool formatIfNeeded)
+{
     // The wiring this attempt will use — logged once, because a wrong value
     // here (menuconfig) looks exactly like broken hardware from the outside.
     if (!configLogged_) {
@@ -207,10 +243,10 @@ bool SdFileSystem::mount()
     // and with a single line the second attempt used to hide the first.
     std::string notes;
 #if CONFIG_FILES_SD_BUS_WIDTH_4
-    if (tryMount(4)) return true;
+    if (tryMount(4, formatIfNeeded)) return true;
     notes = attemptError_;
 #endif
-    if (tryMount(1)) return true;
+    if (tryMount(1, formatIfNeeded)) return true;
     notes += notes.empty() ? attemptError_ : ("; " + attemptError_);
 
     error_ = notes;
@@ -219,12 +255,15 @@ bool SdFileSystem::mount()
     // Nothing answered with this switch polarity. Flip it for the *next* call
     // (the volume is retried every 5 s) instead of requiring a rebuild: a wrong
     // polarity leaves the card unpowered, and that is indistinguishable from a
-    // dead card. The Waveshare board is active-low (P-MOSFET, gate pulled
-    // down), so this normally never fires.
+    // dead card. Only while the wiring is unproven, though — once a mount has
+    // succeeded the polarity is known to be right, and flipping it afterwards
+    // would leave the card unpowered on every second attempt (see pwrProven_).
 #if CONFIG_FILES_SD_PWR_GPIO >= 0
-    pwrInverted_ = !pwrInverted_;
-    ESP_LOGW(TAG, "%s: no answer — switching the slot power to the %s level on the next try",
-             id_.c_str(), pwrInverted_ ? "opposite" : "configured");
+    if (!pwrProven_) {
+        pwrInverted_ = !pwrInverted_;
+        ESP_LOGW(TAG, "%s: no answer — switching the slot power to the %s level on the next try",
+                 id_.c_str(), pwrInverted_ ? "opposite" : "configured");
+    }
 #endif
     return false;
 }
@@ -263,6 +302,45 @@ void SdFileSystem::applySlotPower(bool inverted)
              level ? "high" : "low");
 #else
     (void)inverted;
+#endif
+}
+
+bool SdFileSystem::powerCycle(uint32_t offMs)
+{
+#if CONFIG_FILES_SD_PWR_GPIO >= 0
+    // Make sure the pin is configured before it is used; a card that is not
+    // powered at all would make the cut a no-op.
+    applySlotPower(pwrInverted_);
+    if (pwrLevel_ == -2) {
+        error_ = "the card supply switch is not usable";
+        return false;
+    }
+
+    const bool activeHigh = pwrInverted_ ? !kPwrActiveHigh : kPwrActiveHigh;
+    const gpio_num_t pin = static_cast<gpio_num_t>(CONFIG_FILES_SD_PWR_GPIO);
+    const int onLevel = activeHigh ? 1 : 0;
+    const int offLevel = activeHigh ? 0 : 1;
+
+    ESP_LOGW(TAG, "%s: cutting the card supply for %u ms", id_.c_str(),
+             (unsigned)offMs);
+    gpio_set_level(pin, offLevel);
+    vTaskDelay(pdMS_TO_TICKS(offMs));
+    gpio_set_level(pin, onLevel);
+    // The SD specification asks for ~1 ms after power-up; the same 20 ms margin
+    // the mount path uses.
+    vTaskDelay(pdMS_TO_TICKS(20));
+    pwrLevel_ = onLevel;
+
+    // The state of this object is deliberately left alone: the call that is stuck
+    // in the driver returns with an error in a moment and its own path releases
+    // the card, the diskio slot and the SDMMC controller (see format()). Clearing
+    // the handle here would take that release away from it — and `error_` is left
+    // to that same path, which either reports the failure or clears it.
+    ESP_LOGW(TAG, "%s: card supply restored, the card starts over", id_.c_str());
+    return true;
+#else
+    (void)offMs;
+    return false;   // this board cannot switch the card's supply
 #endif
 }
 
@@ -337,17 +415,86 @@ VolumeInfo SdFileSystem::info()
 
 bool SdFileSystem::format()
 {
+    // A card whose filesystem is gone cannot be mounted — `format_if_mount_failed`
+    // is off for a plain mount on purpose — and refusing to format it would leave
+    // the operator with a card nothing can bring back: the format needs a mounted
+    // card, the mount needs a filesystem, and only a format could create one.
+    // That dead end is easy to reach (an interrupted format is the classic way to
+    // lose a filesystem), so the volume is mounted **for formatting** here: the
+    // same attempt as a normal mount, except that IDF is allowed to create the
+    // filesystem it cannot find.
     if (!mounted_) {
-        error_ = "card is not mounted";
-        return false;
+        ESP_LOGW(TAG, "%s: not mounted — mounting it to recreate the filesystem",
+                 id_.c_str());
+        // A card that still has a usable filesystem mounts first and is then
+        // formatted by the normal path below, so the request is never satisfied
+        // by a plain mount.
+        if (!mount()) {
+            ESP_LOGW(TAG, "%s: mounting to format it (the card has no filesystem)",
+                     id_.c_str());
+            const bool ok = mountWithFormat();
+            if (!ok) {
+                // error_ carries what the driver said (no card / no answer).
+                return false;
+            }
+            ESP_LOGW(TAG, "%s: filesystem created while mounting", id_.c_str());
+            return true;
+        }
     }
 
     ESP_LOGW(TAG, "formatting the microSD card at %s — all data will be lost",
              mountPoint_.c_str());
+
+    // `esp_vfs_fat_sdcard_format()` is a three-step sequence — unmount the FATFS
+    // drive, create a new filesystem, mount it back — and it reports only the
+    // result of the middle step. When a step fails, the pieces stay where they
+    // fell: a mkfs error leaves the volume unmounted with the VFS path still
+    // registered, and when the *mount back* fails the helper has already
+    // released the card handle, the SDMMC host and the VFS path. The two are
+    // indistinguishable from the return value, and getting it wrong means either
+    // a card handle that no longer exists (a use-after-free in the liveness
+    // probe of verify()) or a mount() that reports success while nothing is
+    // mounted (esp_vfs_fat_register answers ESP_ERR_INVALID_STATE for the path
+    // that is still registered, which the mount path treats as fine and then
+    // mounts a NULL FatFS object — FatFS reads that as "unmount").
+    //
+    // A card that does not come back is therefore dropped to "not mounted" and
+    // the next mount() rebuilds the host, the card and the VFS from scratch.
     esp_err_t err = esp_vfs_fat_sdcard_format(mountPoint_.c_str(), card_);
     if (err != ESP_OK) {
         error_ = std::string("format failed: ") + esp_err_to_name(err);
         ESP_LOGE(TAG, "%s: %s", id_.c_str(), error_.c_str());
+        // This branch leaves the card handle, the diskio slot, the VFS path and
+        // **the SDMMC controller** exactly as they were (the helper returns
+        // without touching them). The controller matters most: the driver claims
+        // it during init and `sd_host_claim_controller()` refuses a second
+        // claimant, so without releasing it here every later mount() answers
+        // "no available sd host controller" and the card is dead until the
+        // device is rebooted — which is how a failed format on a marginal card
+        // used to end. `esp_vfs_fat_sdcard_unmount` is the full release
+        // (FATFS drive, diskio slot, host, card handle, VFS path), and here the
+        // handle is still ours to hand over.
+        ESP_LOGW(TAG, "%s: releasing the card after the failed format", id_.c_str());
+        esp_vfs_fat_sdcard_unmount(mountPoint_.c_str(), card_);
+        card_ = nullptr;
+        mounted_ = false;
+        // `present_` is left as it is: the card did answer, it is the filesystem
+        // that did not survive. The next mount attempt decides — and a card that
+        // really is gone fails it and reports itself absent (see mountAttempts).
+        return false;
+    }
+
+    // The re-mount after a successful mkfs can fail silently (see above), so ask
+    // the volume for its size: only a mounted filesystem answers.
+    uint64_t total = 0, free = 0;
+    if (esp_vfs_fat_info(mountPoint_.c_str(), &total, &free) != ESP_OK) {
+        error_ = "card did not come back after formatting";
+        ESP_LOGE(TAG, "%s: %s", id_.c_str(), error_.c_str());
+        // In this branch the helper has already released the card, the host and
+        // the VFS path itself, so there is nothing to hand over — only a handle
+        // that must not be used again.
+        card_ = nullptr;
+        mounted_ = false;
         return false;
     }
 

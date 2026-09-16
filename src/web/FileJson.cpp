@@ -128,5 +128,40 @@ std::string FileJson::check(const ::dhcp::files::CheckReport& report)
     return w.toString();
 }
 
+std::string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
+{
+    JsonWriter w;
+    w.str("id", job.id);
+    w.str("title_key", job.titleKey);
+    w.str("arg", job.arg);
+    w.str("state", ::dhcp::core::jobStateText(job.state));
+    w.num("done", static_cast<int64_t>(job.done));
+    w.num("total", static_cast<int64_t>(job.total));
+    w.num("percent", job.percent());
+    w.str("detail", job.detail);
+    w.num("elapsed_ms", static_cast<int64_t>(job.durationMs));
+    w.boolean("cancel_requested", job.cancelRequested);
+    w.num("repeat_sec", static_cast<int64_t>(job.repeatSec));
+    return w.toString();
+}
+
+std::string FileJson::jobArray(const std::vector<::dhcp::core::JobInfo>& jobs)
+{
+    std::string out = "[";
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        if (i != 0) out += ',';
+        out += jobObject(jobs[i]);
+    }
+    out += ']';
+    return out;
+}
+
+std::string FileJson::jobs(const std::vector<::dhcp::core::JobInfo>& jobs)
+{
+    JsonWriter w;
+    w.literal("jobs", jobArray(jobs));
+    return w.toString();
+}
+
 } // namespace web
 } // namespace dhcp
