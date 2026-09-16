@@ -161,6 +161,14 @@ over-the-air. The dual-OTA layout (`ota_0`/`ota_1`, 5 MB each) lets the device
 fall back to the previous image if the new one fails to boot. The OTA flow only
 updates the **app** — the web interface (SPIFFS) and settings (NVS) are kept.
 
+The page posts the image as a **raw request body** (`application/octet-stream`),
+not as `multipart/form-data`: firmware older than 042 writes whatever it receives
+straight into the OTA partition, so a multipart envelope ends up inside the image
+and `esp_ota_end()` rejects it. Raw bodies are accepted by the old and the new
+handler alike, which is what lets a device stuck on an old build update again;
+042 additionally understands multipart, for `curl -F` (see
+[Rest.md](Rest.md#post-apiotaupload)).
+
 ---
 
 ## Partition table
@@ -202,3 +210,5 @@ no `fat` row the firmware still boots normally.
 | `File not found: /spiffs/...` in the web server log | The file really is missing from SPIFFS — re-run the web-UI upload script. |
 | A new `.cpp` is ignored — `undefined reference to ...` at link time | The `SRC_DIRS` glob was frozen at configure time — run `idf.py reconfigure`, then `idf.py build` (see [When you do need `idf.py reconfigure`](#when-you-do-need-idfpy-reconfigure)). |
 | Web UI upload geometry mismatch wipes data | Image geometry must match the firmware's `CONFIG_SPIFFS_*` (the script uses the defaults above). If it doesn't, SPIFFS auto-formats on mount. |
+| Boot loop: `Guru Meditation Error ... Illegal instruction` right after `sdmmc_init_ocr ... returned 0x107` / `sdmmc_card_init failed (0x107)` | The SD volume code rewrote `sdmmc_host_t::flags`. IDF v6 stores `SDMMC_HOST_FLAG_DEINIT_ARG` there together with the one-argument `deinit_p = sdmmc_host_deinit_slot`; clearing the flag makes the VFS cleanup (`call_host_deinit`) call it through the zero-argument member of the same union, so the slot argument is garbage and the core jumps into unmapped memory. `0x107` is only `ESP_ERR_TIMEOUT` — an empty slot is normal here (no card-detect line). Fix (042, Stage 79): never overwrite the flags, select the width with `sdmmc_slot_config_t::width`. The device never reaches the web UI while it loops → flash over the cable. |
+| microSD inserted, but the home page says “not mounted” and the log shows `ESP_ERR_TIMEOUT` on both attempts (`sdmmc_init_ocr: send_op_cond (1) returned 0x107`) | **The SD IO rail is not powered.** In the MicroSD sheet of the board schematic the pull-ups of the six signals (R8..R13) hang on `ESP_LDO_VO4`, i.e. the SDMMC IO rail is that **on-chip LDO channel**: with the channel off the card sees no valid levels and never answers, although its 3.3 V supply is present (the P-channel MOSFET Q1, SI2301CDS, is on by default through its 10 kOhm gate pull-down R22). `CONFIG_FILES_SD_LDO_CHAN` therefore defaults to **4** (`-1` on a board that feeds the IO rail from 3.3 V), and IDF switches the channel on as soon as the host carries the handle. The slot power switch is `CONFIG_FILES_SD_PWR_GPIO` (default 45, **active low** — a P-MOSFET is on when the gate is low; `FILES_SD_PWR_ACTIVE_HIGH=y` would *remove* the supply). A wrong polarity is retried with the opposite level on the next 5-second attempt and logged (`slot power GPIO 45 driven low/high`). |

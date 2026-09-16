@@ -15,11 +15,13 @@ namespace web {
 WebServer::WebServer(::dhcp::wifi::IWiFiManager& wifi,
                      ::dhcp::dhcp::IDhcpServer& dhcpSrv,
                      ::dhcp::dns::DnsServer& dnsSrv,
-                     ::dhcp::time::TimeServer& timeSrv)
+                     ::dhcp::time::TimeServer& timeSrv,
+                     ::dhcp::files::IFileManager& fileMgr)
     : wifi_(wifi)
     , dhcpSrv_(dhcpSrv)
     , dnsSrv_(dnsSrv)
     , timeSrv_(timeSrv)
+    , fileMgr_(fileMgr)
 {
 }
 
@@ -39,12 +41,12 @@ bool WebServer::start()
     auth_.ensureConfigLoaded();
 
     // Initialize RestApi with subsystem references
-    RestApi::init(&wifi_, &dhcpSrv_, &dnsSrv_, &timeSrv_, &auth_);
+    RestApi::init(&wifi_, &dhcpSrv_, &dnsSrv_, &timeSrv_, &auth_, &fileMgr_);
 
     // Configure HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 57;
+    config.max_uri_handlers = 81;
     // The settings export/import handlers build large JSON and read big POST
     // bodies on the httpd task — the default 4096-byte stack overflows (panic:
     // LoadProhibited in the FreeRTOS scheduler, stack filled with 0xa5). Raise
@@ -153,6 +155,23 @@ void WebServer::registerRoutes()
     reg("/api/time/settings",        HTTP_POST,  postTimeSettingsHandler);
     reg("/api/time/now",             HTTP_GET,   getTimeNowHandler);
     reg("/api/time/set",             HTTP_POST,  postTimeSetHandler);
+    // File explorer (FAT volumes)
+    reg("/api/files/volumes",        HTTP_GET,   getFileVolumesHandler);
+    reg("/api/files/list",           HTTP_GET,   getFileListHandler);
+    reg("/api/files/mkdir",          HTTP_POST,  postFileMkdirHandler);
+    reg("/api/files/rename",         HTTP_POST,  postFileRenameHandler);
+    reg("/api/files/delete",         HTTP_POST,  postFileDeleteHandler);
+    reg("/api/files/format",         HTTP_POST,  postFileFormatHandler);
+    reg("/api/files/download",       HTTP_GET,   getFileDownloadHandler);
+    reg("/api/files/upload",         HTTP_POST,  postFileUploadHandler);
+    reg("/api/files/text",           HTTP_GET,   getFileTextHandler);
+    reg("/api/files/text",           HTTP_POST,  postFileTextHandler);
+    reg("/api/files/settings",       HTTP_GET,   getFileSettingsHandler);
+    reg("/api/files/settings",       HTTP_POST,  postFileSettingsHandler);
+    // Read-only volume check (long-running: POST starts it, GET polls the report)
+    reg("/api/files/check",          HTTP_POST,  postFileCheckHandler);
+    reg("/api/files/check/cancel",   HTTP_POST,  postFileCheckCancelHandler);
+    reg("/api/files/check",          HTTP_GET,   getFileCheckHandler);
 
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
     reg("/", HTTP_GET, staticFileHandler);         // serves login.html
@@ -176,6 +195,7 @@ void WebServer::registerRoutes()
     reg("/pages/ntp_setup.html", HTTP_GET, staticFileHandler);
     reg("/pages/ntp_logging.html", HTTP_GET, staticFileHandler);
     reg("/pages/security.html", HTTP_GET, staticFileHandler);
+    reg("/pages/files.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);
     reg("/pages/settings_device.html", HTTP_GET, staticFileHandler);

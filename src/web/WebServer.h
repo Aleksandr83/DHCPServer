@@ -16,6 +16,7 @@ namespace wifi { class IWiFiManager; }
 namespace dhcp { class IDhcpServer; }
 namespace dns  { class DnsServer; }
 namespace time { class TimeServer; }
+namespace files { class IFileManager; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -29,7 +30,8 @@ public:
     WebServer(::dhcp::wifi::IWiFiManager& wifi,
               ::dhcp::dhcp::IDhcpServer& dhcpSrv,
               ::dhcp::dns::DnsServer& dnsSrv,
-              ::dhcp::time::TimeServer& timeSrv);
+              ::dhcp::time::TimeServer& timeSrv,
+              ::dhcp::files::IFileManager& fileMgr);
     ~WebServer() override;
 
     bool start() override;
@@ -71,6 +73,22 @@ private:
     static esp_err_t postTimeSettingsHandler(httpd_req* req) { return RestApi::handlePostTimeSettings(req); }
     static esp_err_t getTimeNowHandler(httpd_req* req) { return RestApi::handleGetTimeNow(req); }
     static esp_err_t postTimeSetHandler(httpd_req* req) { return RestApi::handlePostTimeSet(req); }
+    // File explorer (FAT volumes)
+    static esp_err_t getFileVolumesHandler(httpd_req* req) { return RestApi::handleGetFileVolumes(req); }
+    static esp_err_t getFileListHandler(httpd_req* req) { return RestApi::handleGetFileList(req); }
+    static esp_err_t postFileMkdirHandler(httpd_req* req) { return RestApi::handlePostFileMkdir(req); }
+    static esp_err_t postFileRenameHandler(httpd_req* req) { return RestApi::handlePostFileRename(req); }
+    static esp_err_t postFileDeleteHandler(httpd_req* req) { return RestApi::handlePostFileDelete(req); }
+    static esp_err_t postFileFormatHandler(httpd_req* req) { return RestApi::handlePostFileFormat(req); }
+    static esp_err_t getFileDownloadHandler(httpd_req* req) { return RestApi::handleGetFileDownload(req); }
+    static esp_err_t postFileUploadHandler(httpd_req* req) { return RestApi::handlePostFileUpload(req); }
+    static esp_err_t getFileTextHandler(httpd_req* req) { return RestApi::handleGetFileText(req); }
+    static esp_err_t postFileTextHandler(httpd_req* req) { return RestApi::handlePostFileText(req); }
+    static esp_err_t getFileSettingsHandler(httpd_req* req) { return RestApi::handleGetFileSettings(req); }
+    static esp_err_t postFileSettingsHandler(httpd_req* req) { return RestApi::handlePostFileSettings(req); }
+    static esp_err_t postFileCheckHandler(httpd_req* req) { return RestApi::handlePostFileCheck(req); }
+    static esp_err_t postFileCheckCancelHandler(httpd_req* req) { return RestApi::handlePostFileCheckCancel(req); }
+    static esp_err_t getFileCheckHandler(httpd_req* req) { return RestApi::handleGetFileCheck(req); }
 
     httpd_handle_t server_ = nullptr;
     ::dhcp::web::AuthManager auth_;
@@ -78,6 +96,7 @@ private:
     ::dhcp::dhcp::IDhcpServer& dhcpSrv_;
     ::dhcp::dns::DnsServer& dnsSrv_;
     ::dhcp::time::TimeServer& timeSrv_;
+    ::dhcp::files::IFileManager& fileMgr_;
 };
 
 } // namespace web

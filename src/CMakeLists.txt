@@ -8,6 +8,7 @@ set(DHCPSERVER_SRC_DIRS
     "time"
     "web"
     "storage"
+    "files"
     "led"
     "menu")
 
@@ -30,7 +31,8 @@ set(DHCPSERVER_REQUIRES
 # ESP32-P4 has no Wi-Fi — Ethernet uses the internal RMII EMAC, and the FAT
 # data partition is served through the FATFS + wear-levelling drivers.
 if(IDF_TARGET STREQUAL "esp32p4")
-    list(APPEND DHCPSERVER_REQUIRES esp_partition fatfs wear_levelling)
+    list(APPEND DHCPSERVER_REQUIRES esp_partition fatfs wear_levelling
+                                    sdmmc esp_driver_sdmmc)
 else()
     list(APPEND DHCPSERVER_SRC_DIRS "wifi")
     list(APPEND DHCPSERVER_REQUIRES enc28j60 esp_wifi)

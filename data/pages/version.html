@@ -21,7 +21,9 @@
             <label data-i18n="update.select">Select .bin file</label>
             <input type="file" id="fw-file" accept=".bin">
 
-            <button class="btn btn-primary" onclick="uploadFirmware()" id="fw-upload-btn" data-i18n="update.upload">Upload</button>
+            <!-- Starts disabled: there is nothing to upload until a file is
+                 chosen, and the script below keeps this state up to date. -->
+            <button class="btn btn-primary" onclick="uploadFirmware()" id="fw-upload-btn" data-i18n="update.upload" disabled>Upload</button>
             <div id="fw-status" style="margin-top:1rem;"></div>
         </div>
 
@@ -33,7 +35,9 @@
             <span id="webui-folder-name" class="hint" data-i18n="webupdate.no_folder">No folder selected</span>
             <p class="hint" data-i18n="webupdate.note">Existing files are overwritten. New pages are only reachable after a firmware update that registers a route for them.</p>
 
-            <button class="btn btn-primary" onclick="uploadWebUi()" id="webui-upload-btn" data-i18n="webupdate.upload">Upload</button>
+            <!-- Starts disabled as well: the folder picker below is the only
+                 thing that can fill the upload queue. -->
+            <button class="btn btn-primary" onclick="uploadWebUi()" id="webui-upload-btn" data-i18n="webupdate.upload" disabled>Upload</button>
             <div id="webui-status" style="margin-top:1rem;"></div>
         </div>
     </main>
@@ -46,32 +50,98 @@
             document.getElementById('fw-version').textContent = data.firmware_version || '--';
         }
 
-        async function uploadFirmware() {
-            const fileInput = document.getElementById('fw-file');
-            const file = fileInput.files[0];
-            if (!file) return alert('Please select a file');
+        // ── Firmware Update ──
+        // The Upload button follows the file input: enabled only while an image
+        // is selected. The card has a single action, so a button that can only
+        // answer "please select a file" is a dead end for the operator.
+        const fwInput = document.getElementById('fw-file');
+        const fwBtn = document.getElementById('fw-upload-btn');
 
-            const btn = document.getElementById('fw-upload-btn');
+        function refreshFwUploadState() {
+            fwBtn.disabled = !(fwInput.files && fwInput.files.length > 0);
+        }
+
+        // One status line per card, and every operation starts from a blank one:
+        // a message on screen must always belong to the last thing the operator
+        // did, never to the attempt before it. The firmware card therefore
+        // clears the line when the picker is opened, when a file is chosen and
+        // when an upload starts.
+        //
+        // Success is transient (see kSuccessClearMs): it has been read by the
+        // time the next action starts, and it used to sit under the button
+        // until the page was reloaded. A failure stays on screen — it carries
+        // the reason — and every new message cancels the pending timeout, so a
+        // stale timer can never blank a line that belongs to a newer operation.
+        const kSuccessClearMs = 5000;
+        let fwStatusTimer = null;
+
+        function fwStatus(html, transient) {
+            const el = document.getElementById('fw-status');
+            if (fwStatusTimer !== null) {
+                clearTimeout(fwStatusTimer);
+                fwStatusTimer = null;
+            }
+            el.innerHTML = html;
+            if (transient) {
+                fwStatusTimer = setTimeout(() => {
+                    el.innerHTML = '';
+                    fwStatusTimer = null;
+                }, kSuccessClearMs);
+            }
+        }
+
+        fwInput.addEventListener('click', () => fwStatus(''));
+        fwInput.addEventListener('change', () => {
+            fwStatus('');                    // the old result no longer applies
+            refreshFwUploadState();
+        });
+        refreshFwUploadState();   // the markup already starts out disabled
+
+        async function uploadFirmware() {
+            const file = fwInput.files[0];
+            if (!file) return;   // not reachable while the button is disabled
+
+            const btn = fwBtn;
             btn.disabled = true;
             btn.textContent = translations?.update?.uploading || 'Uploading...';
+            fwStatus('');        // the run that starts now owns the line
 
-            const formData = new FormData();
-            formData.append('firmware', file);
-
+            // Send the image as the raw request body — deliberately NOT as
+            // multipart/form-data. The OTA endpoint writes the bytes it receives
+            // straight into the flash partition, so with multipart the part
+            // headers land inside the image, the first byte is not the 0xE9
+            // signature, and esp_ota_end() rejects it ("OTA update failed").
+            // A raw body is accepted by both the old and the new firmware (the
+            // new one also tolerates multipart, for curl --data-binary scripts),
+            // which is what lets a device stuck on an older build update again.
             try {
                 const resp = await apiFetch('/api/ota/upload', {
                     method: 'POST',
-                    body: formData,
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: file,
                 });
-                const result = await resp.json();
-                document.getElementById('fw-status').innerHTML =
-                    `<p class="status-ok">${translations?.update?.success || 'Update successful! Rebooting...'}</p>`;
+                // The answer must be checked: a failed update (bad image, no
+                // space, aborted transfer) comes back as 500 + {"status":"error"}
+                // and the device does NOT reboot. Reporting success regardless
+                // is what made an earlier failed OTA look like it worked.
+                let result = null;
+                try { result = await resp.json(); } catch (e) { /* non-JSON */ }
+
+                if (resp.ok && result && result.status === 'ok') {
+                    // The device reboots on success, so this line usually only
+                    // lives until the page reloads — the timer also covers the
+                    // case where the reboot does not happen as expected.
+                    fwStatus(`<p class="status-ok">${translations?.update?.success || 'Update successful! Rebooting...'}</p>`, true);
+                } else {
+                    let msg = (result && result.message) || ('HTTP ' + resp.status);
+                    if (result && result.detail) msg += ' (' + result.detail + ')';
+                    fwStatus(`<p class="status-err">${translations?.update?.failed || 'Update failed'}: ${msg}</p>`);
+                }
             } catch (e) {
-                document.getElementById('fw-status').innerHTML =
-                    `<p class="status-err">Error: ${e.message}</p>`;
+                fwStatus(`<p class="status-err">Error: ${e.message}</p>`);
             } finally {
-                btn.disabled = false;
                 btn.textContent = translations?.update?.upload || 'Upload';
+                refreshFwUploadState();   // a file is still selected → stays enabled
             }
         }
 
@@ -82,9 +152,47 @@
         const webuiInput = document.getElementById('webui-folder');
         const webuiBrowseBtn = document.getElementById('webui-browse-btn');
         const webuiName = document.getElementById('webui-folder-name');
+        const webuiUploadBtn = document.getElementById('webui-upload-btn');
 
-        webuiBrowseBtn.addEventListener('click', () => webuiInput.click());
+        // The success line is transient: the operator has read it by the time
+        // the next action starts, and it would otherwise sit under the button
+        // until the page is reloaded. A failure stays on screen — it lists the
+        // files to retry. The timer is cleared on every new message, so a late
+        // timeout can never blank the progress of a running upload.
+        let webuiStatusTimer = null;
+
+        function webuiStatus(html, transient) {
+            const el = document.getElementById('webui-status');
+            if (webuiStatusTimer !== null) {
+                clearTimeout(webuiStatusTimer);
+                webuiStatusTimer = null;
+            }
+            el.innerHTML = html;
+            if (transient) {
+                webuiStatusTimer = setTimeout(() => {
+                    el.innerHTML = '';
+                    webuiStatusTimer = null;
+                }, kSuccessClearMs);
+            }
+        }
+
+        // Same rule as the firmware Upload button: with nothing selected there
+        // is nothing to send (one request per file), so the button is disabled
+        // instead of being clickable and answering with an alert.
+        function refreshWebUiUploadState() {
+            webuiUploadBtn.disabled =
+                !(webuiInput.files && webuiInput.files.length > 0);
+        }
+
+        refreshWebUiUploadState();   // the markup already starts out disabled
+
+        webuiBrowseBtn.addEventListener('click', () => {
+            webuiStatus('');   // same rule: opening the picker clears the last result
+            webuiInput.click();
+        });
         webuiInput.addEventListener('change', () => {
+            webuiStatus('');   // the old result no longer applies
+            refreshWebUiUploadState();
             const files = Array.from(webuiInput.files || []);
             if (files.length) {
                 // Remove the data-i18n attribute so applyTranslations() does
@@ -100,17 +208,13 @@
         });
 
         async function uploadWebUi() {
-            const fileInput = document.getElementById('webui-folder');
-            const files = Array.from(fileInput.files || []);
-            if (!files.length) {
-                alert(translations?.webupdate?.no_files || 'Select a folder first');
-                return;
-            }
+            const files = Array.from(webuiInput.files || []);
+            if (!files.length) return;   // not reachable while the button is disabled
 
-            const btn = document.getElementById('webui-upload-btn');
+            const btn = webuiUploadBtn;
             const status = document.getElementById('webui-status');
             btn.disabled = true;
-            status.innerHTML = '';
+            webuiStatus('');   // the run that starts now owns the line (and cancels a pending clear)
 
             let okCount = 0;
             let failCount = 0;
@@ -147,8 +251,8 @@
                         `${translations?.webupdate?.progress || 'files'}</p>`;
                 }
             } finally {
-                btn.disabled = false;
                 btn.textContent = translations?.webupdate?.upload || 'Upload';
+                refreshWebUiUploadState();   // the folder is still selected → stays enabled
             }
 
             let html = '';
@@ -157,7 +261,7 @@
             } else {
                 html += `<p class="status-err">${failCount} ${translations?.webupdate?.failed || 'files failed:'} ${failed.join(', ')}</p>`;
             }
-            status.innerHTML = html;
+            webuiStatus(html, failCount === 0);
         }
 
         // Load version on page load

@@ -50,3 +50,103 @@ menu "Time server"
             (e.g. 1970). The device does not enforce it; the web page does.
 
 endmenu
+
+menu "Files (file explorer)"
+
+    comment "microSD card slot (ESP32-P4-ETH: 4-bit SDIO)"
+    depends on IDF_TARGET_ESP32P4
+
+    config FILES_SD_PIN_CLK
+        int "SDMMC CLK GPIO"
+        depends on IDF_TARGET_ESP32P4
+        default 43
+        help
+            Defaults are the pins of the official Waveshare ESP32-P4-Platform
+            SDMMC example and match the ESP32-P4-ETH card slot.
+
+    config FILES_SD_PIN_CMD
+        int "SDMMC CMD GPIO"
+        depends on IDF_TARGET_ESP32P4
+        default 44
+
+    config FILES_SD_PIN_D0
+        int "SDMMC D0 GPIO"
+        depends on IDF_TARGET_ESP32P4
+        default 39
+
+    config FILES_SD_PIN_D1
+        int "SDMMC D1 GPIO (4-bit only)"
+        depends on IDF_TARGET_ESP32P4
+        default 40
+
+    config FILES_SD_PIN_D2
+        int "SDMMC D2 GPIO (4-bit only)"
+        depends on IDF_TARGET_ESP32P4
+        default 41
+
+    config FILES_SD_PIN_D3
+        int "SDMMC D3 GPIO (4-bit only)"
+        depends on IDF_TARGET_ESP32P4
+        default 42
+
+    config FILES_SD_BUS_WIDTH_4
+        bool "Try 4-bit SDIO first (falls back to 1-bit)"
+        depends on IDF_TARGET_ESP32P4
+        default y
+        help
+            With a marginal card or long wiring the 4-bit mount can fail while
+            1-bit still works, so the driver always retries 1-bit.
+
+    config FILES_SD_LDO_CHAN
+        int "On-chip LDO channel powering the SD IO rail (-1 = board feeds 3.3 V)"
+        depends on IDF_TARGET_ESP32P4
+        range -1 4
+        default 4
+        help
+            On the Waveshare ESP32-P4-ETH the pull-ups of the six SD lines
+            (R8..R13 in the MicroSD sheet) are tied to ESP_LDO_VO4, i.e. the
+            SDMMC IO rail is that on-chip LDO channel: with it off the card
+            never sees valid levels and every attempt ends in ESP_ERR_TIMEOUT,
+            even though its VDD is present. IDF turns the channel on as soon as
+            the host carries the handle (sd_pwr_ctrl_new_on_chip_ldo).
+            Set -1 on a board that feeds the IO rail from its 3.3 V supply.
+
+    config FILES_SD_PWR_GPIO
+        int "GPIO switching the card power (-1 = slot always powered)"
+        depends on IDF_TARGET_ESP32P4
+        range -1 54
+        default 45
+        help
+            The Waveshare ESP32-P4-ETH puts the P-channel MOSFET Q1 (SI2301CDS)
+            between the 3.3 V rail and the microSD supply, controlled by GPIO45
+            through a 10 kOhm gate pull-down (R22) — so the slot is powered by
+            default and a HIGH level turns it off. Set -1 on a board that powers
+            the slot permanently.
+
+    config FILES_SD_PWR_ACTIVE_HIGH
+        bool "The switch is enabled by a high level (active-high)"
+        depends on IDF_TARGET_ESP32P4 && FILES_SD_PWR_GPIO >= 0
+        default n
+        help
+            Polarity of that switch. Default off: the Waveshare board uses a
+            P-channel high-side MOSFET with its gate pulled down, so LOW means
+            powered (and the card gets supply even before firmware runs). The
+            firmware tries this level first and falls back to the opposite one
+            on the next mount attempt (every 5 s), so a wrong guess costs a few
+            seconds instead of a rebuild.
+
+    config FILES_CHECK_MAX_MB
+        int "Volume check: how much data one check reads at most (MB)"
+        depends on IDF_TARGET_ESP32P4
+        range 1 512
+        default 64
+        help
+            "Check for errors" reads every file to the end, which is the only
+            way to find a broken cluster chain (a directory entry can look
+            healthy while its data cannot be fetched any more). On a large card
+            a full pass would take a very long time, so one check stops after
+            this many megabytes and says so in its report (checked/truncated)
+            instead of running until someone pulls the card. Raise it on a small
+            card to check everything, lower it if a check must stay short.
+
+endmenu

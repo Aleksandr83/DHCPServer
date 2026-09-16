@@ -10,13 +10,13 @@ aa.bb.xxx.cc.YY.MM.RR
 |---------|------|-------|---------|-------------|
 | `aa` | Global version | 00–99 | `01` | Global firmware version |
 | `bb` | Device/Product code | 00–99 | `02`/`03` | `02` = ESP32 + ENC28J60 (legacy), `03` = ESP32-P4-ETH |
-| `xxx` | Release number | 000–999 | `041` | Major release |
+| `xxx` | Release number | 000–999 | `043` | Major release |
 | `cc` | Sub-release | 00–99 | `00` | Incremented on each reflash |
 | `YY` | Year | 00–99 | `26` | Last 2 digits of year (2026) |
 | `MM` | Month | 01–12 | `09` | Month |
 | `RR` | Region | 2 chars | `RU` | Region code |
 
-**Example (ESP32-P4-ETH):** `01.03.041.00.26.09.RU`
+**Example (ESP32-P4-ETH):** `01.03.043.00.26.09.RU`
 
 > Device code: classic **ESP32 + ENC28J60** builds report `02`; the current
 > **Waveshare ESP32-P4-ETH** target reports `03`. The P4 value is set in

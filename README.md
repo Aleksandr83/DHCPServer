@@ -10,7 +10,7 @@
 
 ## 📖 Description
 
-DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-core RISC-V **ESP32-P4**). The device connects to the local network **over the onboard 10/100 Ethernet** (internal EMAC + **IP101GRI** PHY) — **WiFi/Bluetooth are not available on the ESP32-P4**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, serves time over NTP (and syncs its own clock from an upstream NTP server), and is managed through a web interface (dark theme, RU/EN localization) or a UART terminal menu.
+DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-core RISC-V **ESP32-P4**). The device connects to the local network **over the onboard 10/100 Ethernet** (internal EMAC + **IP101GRI** PHY) — **WiFi/Bluetooth are not available on the ESP32-P4**. It assigns IP addresses through DHCP, proxies DNS queries with caching and logging, serves time over NTP (and syncs its own clock from an upstream NTP server), is managed through a web interface (dark theme, RU/EN localization) that also offers a **file explorer** for the internal FAT data partition and a microSD card, or through a UART terminal menu.
 
 ---
 
@@ -22,7 +22,8 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 - **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache
 - **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
 - **Time Server (NTP)** — the device syncs its clock from an external NTP server (SNTP) and serves UTC time to LAN clients over NTP (UDP 123; configurable external NTP server, re-sync interval, named timezone selection with a custom-offset fallback; clock sync and serving can be switched on/off independently; optional terminal/REST logging of served requests). Until the clock has been synchronised (or set by hand) the server answers with LI=3/stratum 16 (RFC 5905) instead of a wrong time. The date/time can also be **set manually** from the web interface — typed in the selected timezone or taken from the computer's clock, and values earlier than the firmware build time are refused (the board has no battery-backed RTC)
-- **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
+- **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). The **file explorer applies the same rule** to `/api/files/*` (a foreign client gets `403`). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
+- **File Explorer** — browse, download, upload, rename, delete and format the **internal FAT data partition** (~21 MB, `/fat`) and a **microSD card** in the board's slot (`/sdcard`; no card is fitted by default, so that volume reports “not mounted”). A card is picked up **and noticed again** while the device runs: a missing one is retried (at most once every few seconds), and a mounted one is asked on the bus whether it is still there (no card-detect line exists on the board), so pulling it out flips the volume to “not mounted” within a poll instead of reporting yesterday's capacities until the next reboot. One “⋯” button on the right holds the file actions (**New file**, **New folder**, **Select all**, **Upload file**, **Upload folder**, **Move ...**, **Delete** for the ticked rows, **Refresh**, **Format card**, **Check for errors**) and a **read-only volume check** walks the whole volume, reading every file to the end — a broken cluster chain is only visible that way — then offers the two actions that can make a card usable again (delete the unreadable entries, or format it). Rows have their own menu (download/open/rename/delete). Uploads are atomic (`<name>.part` + rename), text files can be edited in the browser, and the home page shows both volumes’ used/free space next to the RAM bars
 - **Onboard Ethernet 10/100** — internal EMAC + IP101GRI PHY over RMII (no WiFi — ESP32-P4 has no radio)
 - **Web Interface** — dark theme, RU/EN localization, DHCP/DNS/Time sub-pages
 - **REST API** — full device management over HTTP with Basic auth + rate limiting
@@ -132,6 +133,11 @@ idf.py -p COMx monitor
 > [`scripts/upload_web_p4.ps1`](scripts/upload_web_p4.ps1) (flash the firmware
 > first, then the web UI).
 
+> ℹ️ After this first cable flash, both parts can be updated **through the
+> browser**: the Version page uploads `build/DHCPServer.bin` over the air (OTA)
+> and replaces the SPIFFS content from a locally picked `data` folder — see
+> [Docs/ESP32-P4-ETH.md](Docs/ESP32-P4-ETH.md#ota-updates).
+
 > ℹ️ `idf.py set-target` already performs a full reconfigure and `idf.py build`
 > re-runs CMake when `CMakeLists.txt`/`sdkconfig*` change, so no separate step
 > is needed. Run `idf.py reconfigure` after **adding or removing a source
@@ -171,13 +177,13 @@ Defined in menuconfig (`Kconfig.projbuild`) or `sdkconfig.defaults`:
 |-------|--------|---------|-------------|
 | `aa` | 00-99 | `01` | Global version |
 | `bb` | 00-99 | `02` / `03` | Device code — `02` = ESP32 + ENC28J60, `03` = ESP32-P4-ETH |
-| `xxx` | 000-999 | `041` | Release number |
+| `xxx` | 000-999 | `043` | Release number |
 | `cc` | 00-99 | `00` | Sub-release |
 | `YY` | 00-99 | `26` | Year (2026) |
 | `MM` | 01-12 | `09` | Month |
 | `RR` | 2 chars | `RU` | Region |
 
-Example: `01.03.041.00.26.09.RU` — see [Docs/FirmwareVersion.md](Docs/FirmwareVersion.md).
+Example: `01.03.043.00.26.09.RU` — see [Docs/FirmwareVersion.md](Docs/FirmwareVersion.md).
 The minimum manual date/time (`CONFIG_FW_MIN_DATETIME`, hour granularity) is a build constant refreshed by the version scripts together with the release.
 
 ### Partition Table
@@ -223,7 +229,7 @@ Access: `http://192.168.1.201` (default static IP)
 
 | Page | Route | Description |
 |------|-------|-------------|
-| Home | `/index.html` | System status: device date/time, DHCP/DNS/NTP state, CPU/RAM, storage, cache stats |
+| Home | `/index.html` | System status: device date/time, DHCP/DNS/NTP state, CPU/RAM, storage (internal FAT + microSD), cache stats |
 | DHCP ▾ Setup | `/pages/dhcp_setup.html` | Server status, IP, address range, lease table cap |
 | DHCP ▾ DNS | `/pages/dhcp_dns.html` | Built-in DNS status, mode/address |
 | DHCP ▾ Static Bindings | `/pages/dhcp_static.html` | Static MAC→IP bindings (enable/DNS) |
@@ -235,6 +241,7 @@ Access: `http://192.168.1.201` (default static IP)
 | DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
 | Time ▾ General | `/pages/ntp_setup.html` | NTP server: on/off, LAN-only filter + reply rate limit, clock sync on/off, external NTP, timezone, sync interval, manual date/time setting (typed or taken from the computer) |
 | Time ▾ Logging | `/pages/ntp_logging.html` | NTP request logging (terminal + external REST URL/auth/Test) |
+| Settings ▾ Files | `/pages/files.html` | File explorer: internal FAT + microSD, download/upload/rename/delete, actions menu (new file, new folder, select all, upload file, upload folder, move/delete the selection, refresh, format card), text editor |
 | Settings ▾ Security | `/pages/security.html` | Web login (username/password), max attempts, lockout period |
 | Settings ▾ Import | `/pages/settings_import.html` | Restore settings from an exported JSON file |
 | Settings ▾ Export | `/pages/settings_export.html` | Download the current settings as a JSON file |
@@ -255,7 +262,7 @@ All endpoints require HTTP Basic Authentication.
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| GET | `/api/status` | System status (network, DHCP, DNS, CPU, RAM, storage usage) |
+| GET | `/api/status` | System status (network, DHCP, DNS, CPU, RAM, uptime, storage volumes) |
 | GET | `/api/version` | Firmware version string |
 | GET | `/api/dhcp/settings` | DHCP configuration |
 | POST | `/api/dhcp/settings` | Update DHCP configuration |
@@ -272,8 +279,19 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/settings/import` | Import settings from JSON |
 | POST | `/api/settings/reset` | Factory reset all settings and reboot |
 | POST | `/api/device/reboot` | Reboot the device |
-| POST | `/api/ota/upload` | Upload firmware (multipart) |
+| POST | `/api/ota/upload` | Upload firmware (raw body; `multipart/form-data` also accepted) |
 | POST | `/api/web/file?path=<rel>` | Upload a web (SPIFFS) file |
+| GET | `/api/files/volumes` | Explorer volumes (id, mount point, mounted/present, capacity, last mount error) |
+| GET | `/api/files/list?volume=<id>&path=<dir>` | Directory listing + free space |
+| GET | `/api/files/download?volume=<id>&path=<file>` | Download a file |
+| POST | `/api/files/upload?volume=<id>&path=<file>` | Upload a file (raw body, atomic) |
+| POST | `/api/files/mkdir` | Create a directory |
+| POST | `/api/files/rename` | Rename / move |
+| POST | `/api/files/delete` | Delete a file or directory (`recursive` for a non-empty one) |
+| POST | `/api/files/format` | Format the microSD card (`confirm: true`) |
+| GET | `/api/files/text?volume=<id>&path=<file>` | Read a text file for the editor |
+| POST | `/api/files/text` | Save a text file (`mtime` guards against overwriting a newer version) |
+| GET/POST | `/api/files/settings` | Explorer access policy (LAN-only filter on/off + state) |
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
 | GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
 | GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
@@ -336,11 +354,12 @@ DHCPServer/
 │   │                       #   internal EMAC + IP101GRI on ESP32-P4-ETH)
 │   ├── dhcp/               # DHCP server
 │   ├── dns/                # DNS proxy, cache, logger
+│   ├── files/              # File explorer facade (volumes, list/upload/rename/delete)
 │   ├── time/               # NTP server + SNTP client + logger + date/time math
-│   ├── web/                # HTTP server, auth, REST API
+│   ├── web/                # HTTP server, auth, REST API, JSON writers, multipart extractor
 │   ├── led/                # LED controller (no-op on ESP32-P4-ETH)
 │   ├── menu/               # Terminal menu
-│   ├── storage/            # SPIFFS wrapper
+│   ├── storage/            # SPIFFS wrapper + FAT/microSD volumes + path policy
 │   └── wifi/               # WiFiManager (ESP32 only — not built on ESP32-P4)
 ├── data/                   # SPIFFS web content
 │   ├── index.html
@@ -349,7 +368,7 @@ DHCPServer/
 │   ├── css/style.css
 │   ├── js/app.js
 │   ├── i18n/{ru,en}.json
-│   └── pages/              # DHCP / DNS / Time / Settings / Help sub-pages
+│   └── pages/              # DHCP / DNS / Time / Settings (incl. files.html) / Help sub-pages
 ├── test/                   # Unit tests (host-style, no board needed)
 ├── Docs/                   # Documentation
 │   ├── images/              # Board photos and screenshots
@@ -376,8 +395,10 @@ Tests live in `test/test_*.cpp`; each file defines its own entry point
 (`app_main`).
 
 Modules with no ESP-IDF dependency are compiled and run **on the PC** (fast,
-no board needed) — this is how `Subnet` and `TimeMath` are verified, with a
-small `host_main.cpp` shim that just calls `esp_test_app_main()`:
+no board needed) — this is how `Subnet`, `TimeMath`, `PathUtil`,
+`MultipartExtractor` and the file-explorer JSON writers (`FileJson` /
+`JsonWriter`) are verified, with a small `host_main.cpp` shim that just calls
+`esp_test_app_main()`:
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I. \
@@ -401,6 +422,9 @@ Test files:
 - `test/test_dhcp.cpp` — DHCP server lifecycle
 - `test/test_dns.cpp` — DNS cache stub
 - `test/test_wifi.cpp` — WiFiManager (needs hardware) and LedController
+- `test/test_pathutil.cpp` — file-explorer path policy (escape attempts, illegal names) — host-runnable
+- `test/test_multipart.cpp` — `MultipartExtractor` for OTA bodies (any chunk size) — host-runnable
+- `test/test_filejson.cpp` — file-explorer/storage JSON payloads + structural comma checks — host-runnable
 
 > No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
 > has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4

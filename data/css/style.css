@@ -79,6 +79,16 @@ body {
     z-index: 1;
 }
 
+/* The page content has to sit ABOVE the footer block: the footer uses
+   `.container` as well (`position: relative; z-index: 1`) and comes later in
+   the DOM, so it wins at equal z-index — a dropdown opened near the bottom of a
+   short page (the toolbar menu, a row menu) was painted UNDER the footer and
+   its lower items could not be clicked at all. The navbar (z-index 100) and the
+   modal backdrops (100) are unaffected. */
+main.container {
+    z-index: 2;
+}
+
 /* ─── Navbar ───────────────────────────────────────── */
 
 .navbar {
@@ -247,6 +257,32 @@ h1 {
     color: var(--text-primary);
 }
 
+/* Title block: the page description on the left, the device uptime on the right.
+   The margins reproduce what the plain <p> had before (its 1 em top/bottom
+   collapse with the h1 above and the status block below), so the rows under it
+   stay exactly where they were. */
+.subtitle-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    flex-wrap: wrap;
+    margin: 1em 0;
+}
+
+.subtitle-row p {
+    margin: 0;
+}
+
+/* "Uptime: 5 ч" — secondary information, figures aligned so the value does not
+   jump when the number of digits changes. */
+.uptime {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
 h2 {
     font-size: 1.5rem;
     margin: 1.5rem 0 0.75rem;
@@ -349,8 +385,16 @@ input:focus, select:focus, textarea:focus {
     color: #fff;
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
     background: var(--accent-hover);
+}
+
+/* A blocked button has to look blocked: no hover feedback, no pointer, and
+   faded enough to read as "nothing to do yet" (e.g. Upload before a file is
+   chosen). */
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .btn-danger {
@@ -358,7 +402,7 @@ input:focus, select:focus, textarea:focus {
     color: #fff;
 }
 
-.btn-danger:hover {
+.btn-danger:hover:not(:disabled) {
     opacity: 0.9;
 }
 
@@ -367,7 +411,7 @@ input:focus, select:focus, textarea:focus {
     color: #fff;
 }
 
-.btn-success:hover {
+.btn-success:hover:not(:disabled) {
     opacity: 0.9;
 }
 
@@ -664,6 +708,15 @@ input:focus, select:focus, textarea:focus {
     background: linear-gradient(90deg, #2dd4bf, #0ea5e9);
 }
 
+/* FAT volumes on the status page (internal data partition + microSD) — pink,
+   so the two storage bars are recognisable next to RAM/PSRAM/cache and the
+   "used" reading is unmistakable. The labels stay short ("FAT", "microSD") on
+   purpose: `.core-label` is only 3.6rem wide and a longer text would run into
+   the bar, so the mount point goes into the tooltip instead. */
+.meter-fill.disk-fill {
+    background: linear-gradient(90deg, #f778ba, #db61a2);
+}
+
 /* Built-in DNS cache sub-statistics line (entries / from-cache / forward) */
 .cache-sub {
     font-size: 0.7rem;
@@ -711,6 +764,337 @@ th {
 .table-wrap th,
 .table-wrap td {
     white-space: nowrap;
+}
+
+/* ─── File explorer (Files page) ───────────────────── */
+
+/* Volume tabs (internal FAT / microSD) */
+.files-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.files-tab {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.files-tab:hover:not(:disabled) {
+    color: var(--text-primary);
+}
+
+.files-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+
+.files-tab:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* Breadcrumb trail */
+.files-breadcrumbs {
+    margin-top: 0.8rem;
+    font-size: 0.9rem;
+    word-break: break-all;
+}
+
+.files-breadcrumbs a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.files-breadcrumbs a:hover {
+    text-decoration: underline;
+}
+
+.files-breadcrumbs span {
+    color: var(--text-secondary);
+}
+
+/* Text editor: monospace, roomy, resizable vertically */
+.files-editor {
+    width: 100%;
+    min-height: 260px;
+    resize: vertical;
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+}
+
+/* Row action buttons in the listing stay compact */
+#files-tbody .btn {
+    padding: 0.25rem 0.55rem;
+    font-size: 0.8rem;
+    margin-right: 0.25rem;
+}
+
+/* Column widths: the name takes the remaining space, the action column is as
+   narrow as the "⋯" button allows (button centred), the size column is a bit
+   wider than before and the date column narrower. `table-layout: fixed` is
+   what actually enforces these numbers — with the default auto layout the
+   browser redistributed the free space and ignored them. */
+#files-table {
+    table-layout: fixed;
+}
+
+/* Selection column: just wide enough for the checkbox. With `table-layout:
+   fixed` every column needs an explicit width, or the browser would take the
+   space from the name column. */
+#files-table th.col-select,
+#files-table td.col-select {
+    width: 34px;
+    padding-left: 4px;
+    padding-right: 4px;
+    text-align: center;
+}
+
+/* A ticked row is tinted as well: the checkbox alone is easy to lose in a long
+   listing, and bulk actions (move/delete) act on exactly these rows. */
+#files-tbody tr.files-row-selected {
+    background: rgba(88, 166, 255, 0.10);
+}
+
+#files-tbody tr.files-row-selected td {
+    color: var(--text-primary);
+}
+
+#files-table th.col-actions,
+#files-table td.col-actions {
+    width: 52px;
+    /* The cell must be able to actually centre the "⋯" button: with the
+       default 12 px side padding the content box (28 px) was narrower than the
+       button (35 px), so the button hugged the left edge and overflowed. */
+    padding-left: 4px;
+    padding-right: 4px;
+    text-align: center;
+}
+
+#files-table th.col-size,
+#files-table td.col-size {
+    width: 112px;
+    text-align: right;
+}
+
+#files-table th.col-date,
+#files-table td.col-date {
+    width: 146px;
+}
+
+/* One "⋯" button per row opens the action menu. The menu is `position: fixed`
+   and placed from the button's bounding rect, because the listing lives in a
+   horizontally scrollable .table-wrap — an absolutely positioned menu would be
+   clipped by that container. */
+.files-menu-btn {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.2rem 0.5rem;
+    font-size: 1rem;
+    line-height: 1.2;
+    cursor: pointer;
+}
+
+.files-menu-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.files-menu {
+    display: none;
+    position: fixed;
+    z-index: 60;
+    min-width: 170px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+    padding: 0.25rem 0;
+}
+
+.files-menu.open {
+    display: block;
+}
+
+.files-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    padding: 0.45rem 0.9rem;
+    font-size: 0.85rem;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.files-menu button:hover {
+    background: var(--bg-secondary);
+    color: var(--accent);
+}
+
+.files-menu button.danger {
+    color: var(--danger);
+}
+
+.files-menu button.danger:hover {
+    color: var(--danger);
+    background: var(--bg-secondary);
+}
+
+/* Separator inside an action menu: the toolbar menu groups "create",
+   "upload", "refresh" and the storage actions, and a line reads faster than a
+   longer list of similar-looking items. */
+.files-menu-sep {
+    height: 1px;
+    margin: 0.25rem 0;
+    background: var(--border);
+}
+
+/* An item that does not apply right now (volume not mounted, action still to
+   come) stays in place but cannot be clicked: hiding it would make the menu
+   change shape as volumes come and go. */
+.files-menu button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.files-menu button:disabled:hover {
+    background: none;
+    color: var(--text-primary);
+}
+
+.files-menu button.danger:disabled:hover {
+    color: var(--danger);
+}
+
+/* Toolbar: the single "⋯" button is pushed to the right. The row is a flex
+   line, so `margin-left: auto` does it without an extra spacer element. */
+.files-menu-wrap {
+    margin-left: auto;
+}
+
+.files-up {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+/* ─── In-page modal dialog ─────────────────────────── */
+/* Native window.prompt()/confirm() are not available in every environment the
+   UI is opened in (embedded browsers block them), so the explorer asks through
+   its own modal instead. */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+}
+
+.modal-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    padding: 1.2rem;
+    width: 100%;
+    max-width: 460px;
+}
+
+.modal-card h3 {
+    margin-bottom: 0.6rem;
+    font-size: 1.05rem;
+}
+
+.modal-card input[type="text"] {
+    width: 100%;
+    margin: 0.4rem 0 0.8rem;
+}
+
+.modal-card .modal-actions {
+    display: flex;
+    gap: 0.6rem;
+    justify-content: flex-end;
+    margin-top: 0.8rem;
+}
+
+/* Directory picker (Move): the path being browsed, then the clickable list of
+   its subfolders. The list scrolls, so a deep folder cannot stretch the modal
+   past the viewport. */
+.files-picker-path {
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+    margin-bottom: 0.5rem;
+}
+
+.files-picker-list {
+    max-height: min(40vh, 320px);
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    padding: 0.25rem;
+}
+
+.files-picker-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.files-picker-item:hover {
+    background: var(--bg-card);
+    color: var(--accent);
+}
+
+.files-picker-item.up {
+    color: var(--accent);
+}
+
+/* One unreadable entry in the check report: monospace and wrapping, so a long
+   path cannot widen the dialog. */
+.files-check-item {
+    padding: 0.35rem 0.6rem;
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--danger);
+    word-break: break-all;
+}
+
+.files-check-item + .files-check-item {
+    border-top: 1px solid var(--border);
 }
 
 /* ─── Footer ───────────────────────────────────────── */

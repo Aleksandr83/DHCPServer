@@ -34,6 +34,9 @@
                 <div class="nav-dropdown">
                     <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.settings">Settings</button>
                     <div class="nav-dropdown-menu">
+                        <!-- Shown only where the build has FAT volumes (ESP32-P4);
+                             app.js reveals it when /api/status reports files_enabled. -->
+                        <a href="/pages/files.html" id="nav-files" data-i18n="nav.files" style="display:none;">Files</a>
                         <a href="/pages/security.html" data-i18n="nav.security">Security</a>
                         <a href="/pages/settings_import.html" data-i18n="nav.settings_import">Import</a>
                         <a href="/pages/settings_export.html" data-i18n="nav.settings_export">Export</a>

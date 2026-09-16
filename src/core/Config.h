@@ -150,6 +150,20 @@ struct TimeConfig {
 };
 
 /**
+ * @brief File explorer configuration (FAT volumes on the ESP32-P4).
+ *
+ * The explorer can serve whole file trees, so it is LAN-only by default, like
+ * the built-in DNS and NTP servers: clients outside the device's own subnet
+ * (address + netmask from the DHCP settings, see core::Subnet) are refused
+ * with `403` instead of being allowed to browse or upload.
+ */
+struct FileConfig {
+    // Answer/accept file operations only from the device's own subnet. ON by
+    // default for the same reason as the DNS/NTP filters.
+    bool allowOwnSubnet = true;
+};
+
+/**
  * @brief Configuration manager using NVS.
  *
  * All settings are persisted in NVS under the "dhcp" namespace.
@@ -201,6 +215,10 @@ public:
     // ─── Time (NTP) server ───────────────────────────
     TimeConfig getTime() const;
     void setTime(const TimeConfig& cfg);
+
+    // ─── File explorer (FAT volumes) ─────────────────
+    FileConfig getFiles() const;
+    void setFiles(const FileConfig& cfg);
 
     // ─── Factory reset ───────────────────────────────
     // Erases the whole "dhcp" NVS namespace. All getters then fall back to

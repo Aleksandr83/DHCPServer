@@ -7,6 +7,7 @@
  */
 
 #include <stdio.h>
+#include <memory>
 #include <string>
 #include <cstring>
 
@@ -20,8 +21,6 @@
 
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_partition.h"
-#include "esp_vfs_fat.h"
-#include "wear_levelling.h"
 #endif
 
 #include "core/Version.h"
@@ -29,10 +28,13 @@
 #include "core/CpuMonitor.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
+#include "files/FileManager.h"
 #include "led/LedController.h"
 #include "menu/TerminalMenu.h"
 #include "dhcp/DhcpServer.h"
 #include "dns/DnsServer.h"
+#include "storage/FatFileSystem.h"
+#include "storage/SdFileSystem.h"
 #include "time/TimeServer.h"
 #include "web/WebServer.h"
 
@@ -51,8 +53,11 @@ static dhcp::led::LedController s_ledController(
 static dhcp::dhcp::DhcpServer   s_dhcpServer;
 static dhcp::dns::DnsServer     s_dnsServer;
 static dhcp::time::TimeServer   s_timeServer;
+// File explorer volumes (internal FAT always; microSD on the ESP32-P4 only).
+static dhcp::files::FileManager s_fileManager;
 static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer,
-                                            s_dnsServer, s_timeServer);
+                                            s_dnsServer, s_timeServer,
+                                            s_fileManager);
 // TerminalMenu needs the AuthManager reference, so it must be constructed
 // after s_webServer (static init order = declaration order).
 static dhcp::menu::TerminalMenu s_terminalMenu(s_netAdapter, s_ledController,
@@ -97,33 +102,17 @@ extern "C" void app_main(void)
     }
 
 #if CONFIG_IDF_TARGET_ESP32P4
-    // ─── Initialize FAT (large RW data partition) ───
-    // Mount the "fat" partition with wear-levelling if it exists in the table.
-    // Non-fatal: older P4 tables without the fat row must still boot normally.
-    {
-        const esp_partition_t* fatPart = esp_partition_find_first(
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "fat");
-        if (fatPart == nullptr) {
-            ESP_LOGW(TAG, "FAT partition not found in table, skipping /fat");
-        } else {
-            esp_vfs_fat_mount_config_t fatCfg = {
-                .format_if_mount_failed = true,
-                .max_files = 10,
-                .allocation_unit_size = CONFIG_WL_SECTOR_SIZE,
-                .disk_status_check_enable = false,
-                .use_one_fat = false,
-            };
-            wl_handle_t wlHandle = WL_INVALID_HANDLE;
-            esp_err_t fret = esp_vfs_fat_spiflash_mount_rw_wl(
-                "/fat", "fat", &fatCfg, &wlHandle);
-            if (fret != ESP_OK) {
-                ESP_LOGE(TAG, "FAT mount failed (%s)", esp_err_to_name(fret));
-            } else {
-                ESP_LOGI(TAG, "FAT mounted at /fat (%u bytes)",
-                         (unsigned)fatPart->size);
-            }
-        }
-    }
+    // ─── File explorer volumes ──────────────────────
+    // The internal FAT data partition (mounted the same way it used to be done
+    // here, now through FatFileSystem) plus the external microSD card. The card
+    // is mounted lazily: FileManager retries in the background, so inserting it
+    // later works without a reboot.
+    s_fileManager.addVolume(
+        std::make_unique<dhcp::storage::FatFileSystem>("fat", "fat", "/fat"));
+    s_fileManager.addVolume(std::make_unique<dhcp::storage::SdFileSystem>());
+    s_fileManager.mountAll();
+    // LAN-only access policy (device address + netmask from the DHCP settings).
+    s_fileManager.applyAccessFilter();
 #endif
 
     // ─── Configure server IP from config ────────────

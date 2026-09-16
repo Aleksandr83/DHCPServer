@@ -19,7 +19,29 @@ Get overall system status.
   "dhcp_running": true,
   "dns_running": true,
   "ntp_running": false,
-  "firmware_version": "01.02.001.00.26.07.RU"
+  "uptime_sec": 4123,
+  "files_enabled": true,
+  "volumes": [
+    {
+      "id": "fat",
+      "mount_point": "/fat",
+      "mounted": true,
+      "present": true,
+      "total_bytes": 21889024,
+      "free_bytes": 18000000,
+      "error": ""
+    },
+    {
+      "id": "sd",
+      "mount_point": "/sdcard",
+      "mounted": false,
+      "present": false,
+      "total_bytes": 0,
+      "free_bytes": 0,
+      "error": "mount failed (1-bit): ESP_ERR_TIMEOUT"
+    }
+  ],
+  "firmware_version": "01.03.043.00.26.09.RU"
 }
 ```
 
@@ -28,6 +50,33 @@ Get overall system status.
 > (`internal_cache_available/size_mb/entries/capacity/used_bytes/free_bytes`,
 > `internal_cache_hits`, `internal_cache_avg_hit_us` — average µs of a
 > successful PSRAM-cache lookup, `internal_forward_count`).
+>
+> `uptime_sec` is the device uptime in seconds since boot, read from the raw
+> `esp_timer` counter and therefore independent of the time service: the home
+> page keeps showing its “Uptime” row even while NTP is disabled, and
+> [`GET /api/time/settings`](#get-apitimesettings) reports the same value
+> because both read one clock.
+>
+> `files_enabled` tells the web UI whether this build/board offers the file
+> explorer at all: `true` only on the ESP32-P4 (internal FAT partition +
+> microSD slot), `false` on the classic ESP32 — the “Files” menu entry is
+> hidden then.
+>
+> `volumes` is the storage state of those partitions (id, mount point,
+> mounted/present flags, capacity, last mount error) — **the same array**
+> [`GET /api/files/volumes`](#get-apifilesvolumes) serves, produced by one
+> shared writer (`FileJson::volumeArray`). The home page draws its storage bars
+> from it, and unlike the `/api/files/*` endpoints this one is not restricted
+> by the LAN-only filter, so a client outside the allowed subnet still sees how
+> much room is left.
+>
+> A mounted volume is verified on the same poll: the microSD card is asked for
+> its status word on the bus (CMD13) and is unmounted when it stops answering,
+> so a card pulled out of a running device shows up as `"mounted": false,
+> "present": false` with `"error": "card removed (ESP_ERR_…)"` within one
+> poll — the board has no card-detect line, and FatFS alone would go on
+> reporting the capacities cached at mount time. A card inserted into the
+> running device appears the same way (the mount is retried).
 
 ---
 
@@ -497,13 +546,41 @@ Update security/authentication configuration.
 
 Upload and install a new firmware binary (OTA update).
 
-**Request:** `multipart/form-data` with field name `firmware`.
+**Request:** one of two body layouts
+
+| Layout | Who sends it | How the image is extracted |
+|--------|--------------|----------------------------|
+| `application/octet-stream` | the web UI (`body: file`) and `curl --data-binary` | the whole body is the image |
+| `multipart/form-data` with a `firmware` part | `curl -F`, older scripts | only the part **payload** is written: the `--boundary` line, the part headers up to the blank line and the trailing `\r\n--boundary--` are MIME envelope |
+
+> The envelope must never reach the OTA partition: an image has to start with
+> the `0xE9` magic byte, otherwise `esp_ota_end()` rejects it. A multipart body
+> written verbatim produced exactly that (and, because the page used to ignore
+> the response, it looked like a successful update). The delimiter is searched
+> across read boundaries, so the parser does not care how the body is chunked.
+
+> The page sends the raw body on purpose: firmware older than 042 writes
+> whatever it receives straight into the partition, so a multipart body is
+> mangled there and OTA cannot install the very fix it needs. A raw body is
+> accepted by both the old and the new handler, so a stuck device still updates.
+
+```bash
+# raw body (as the web UI does it)
+curl -u admin:admin -X POST --data-binary @build/DHCPServer.bin \
+     -H 'Content-Type: application/octet-stream' \
+     http://192.168.1.201/api/ota/upload
+
+# multipart
+curl -u admin:admin -F 'firmware=@build/DHCPServer.bin' \
+     http://192.168.1.201/api/ota/upload
+```
 
 **Response `200 OK`:**
 ```json
 {
   "status": "ok",
-  "message": "Update successful. Rebooting..."
+  "message": "Update successful. Rebooting...",
+  "bytes": 1187344
 }
 ```
 
@@ -511,12 +588,22 @@ Upload and install a new firmware binary (OTA update).
 ```json
 {
   "status": "error",
-  "message": "OTA update failed"
+  "message": "OTA update failed",
+  "detail": "ESP_ERR_OTA_VALIDATE_FAILED",
+  "received": 1187344
 }
 ```
 
-> On success, the device reboots automatically after a 500ms delay.
-> The device uses dual OTA partitions (ota_0 / ota_1) for safe updates.
+> On success the device reboots automatically after a 500 ms delay (the
+> response is sent first, so the client sees the result). On failure the OTA
+> partition is released with `esp_ota_abort()` — the running firmware and the
+> boot selection stay untouched — and `detail` carries `esp_err_to_name()` of
+> the failing step (`ESP_ERR_OTA_VALIDATE_FAILED`, `ESP_ERR_NO_MEM`,
+> `ESP_ERR_INVALID_ARG`, …).
+>
+> The device uses dual OTA partitions (ota_0 / ota_1) for safe updates, so the
+> currently running image is only replaced after the new one has been written
+> and validated completely.
 
 ---
 
@@ -838,3 +925,470 @@ before 1970-01-01 UTC:
 
 **Response `500 Internal Server Error`** — the time service is unavailable or
 `settimeofday()` failed.
+
+---
+
+## GET /api/files/volumes
+
+State of every **file explorer** volume (internal FAT data partition and the
+external microSD card on the ESP32-P4). The response doubles as the poll the web
+UI uses to discover a card that was inserted after boot: the firmware retries a
+failed mount at most once every **5 s** on every call to this endpoint (there is
+no card-detect line on the board).
+
+**Response `200 OK`:**
+```json
+{
+  "enabled": true,
+  "volumes": [
+    {
+      "id": "fat",
+      "mount_point": "/fat",
+      "mounted": true,
+      "present": true,
+      "total_bytes": 22282240,
+      "free_bytes": 22118400,
+      "error": ""
+    },
+    {
+      "id": "sd",
+      "mount_point": "/sdcard",
+      "mounted": false,
+      "present": false,
+      "total_bytes": 0,
+      "free_bytes": 0,
+      "error": "mount failed (4-bit): ESP_ERR_TIMEOUT"
+    }
+  ]
+}
+```
+
+> **Volumes**
+> - `id`: `fat` — the internal FAT data partition (~21 MB, holds `cache.dat`),
+>   `sd` — the microSD card (SDMMC 4-bit, falls back to 1-bit; pins from
+>   Kconfig, `FILES_SD_PIN_*`, default CLK=43, CMD=44, D0..D3=39..42).
+> - `mounted`: the filesystem is registered and usable — the only state in
+>   which the file operations are accepted.
+> - `present`: a medium/partition was found (for the card: a successful mount;
+>   there is no card-detect GPIO, so an empty slot and an unusable card look
+>   the same and are reported through `error`).
+> - `total_bytes` / `free_bytes`: `0` while not mounted.
+> - `error`: last mount error (`""` when mounted) — technical text for the UI,
+>   not localized.
+>
+> `enabled` is `true` only on the ESP32-P4; on the classic ESP32 the array is
+> empty and the web UI hides the “Files” menu entry.
+>
+> The internal FAT is **never** formatted by the firmware beyond its historic
+> `format_if_mount_failed` behaviour; the card is **never** auto-formatted.
+
+---
+
+## GET /api/files/list
+
+Directory listing of a volume.
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | no | Volume-relative directory, `/` = root (default) |
+
+Paths are percent-decoded and then validated by the same policy as every other
+file endpoint (see below): `..`, illegal characters and names ending with a dot
+or a space are rejected (`400`).
+
+**Response `200 OK`:**
+```json
+{
+  "volume": "fat",
+  "path": "/logs",
+  "mounted": true,
+  "total_bytes": 22282240,
+  "free_bytes": 22118400,
+  "truncated": false,
+  "entries": [
+    { "name": "2026",      "is_dir": true,  "size": 0,      "mtime": 1757971200 },
+    { "name": "cache.dat", "is_dir": false, "size": 40960,  "mtime": 1757960000 }
+  ]
+}
+```
+
+> Directories come first, then files; both are sorted case-insensitively by
+> name. The list is capped at **512** entries — `truncated: true` means the
+> directory holds more (the client should narrow the path). `mtime` is Unix
+> seconds (`0` when unknown — the FAT clock may be unset before the first NTP
+> sync).
+
+**Errors:** `400` invalid path · `404` unknown volume or directory ·
+`409` volume not mounted (card missing).
+
+---
+
+## POST /api/files/mkdir
+
+Create a directory.
+
+```json
+{ "volume": "fat", "path": "/logs/2026" }
+```
+
+**Response `200 OK`:** `{ "status": "ok" }`
+**Errors:** `400` invalid path (incl. `/`) · `404` unknown volume / parent
+missing · `409` directory already exists, or the volume is not mounted.
+
+---
+
+## POST /api/files/rename
+
+Rename or move an entry (both paths are inside the same volume).
+
+```json
+{ "volume": "fat", "path": "/a.txt", "to": "/logs/a.txt" }
+```
+
+**Response `200 OK`:** `{ "status": "ok" }`
+**Errors:** `400` invalid path (incl. the volume root, or moving a directory
+into itself) · `404` source/volume missing · `409` destination exists or the
+volume is not mounted.
+
+---
+
+## POST /api/files/delete
+
+Delete a file, or a directory.
+
+```json
+{ "volume": "fat", "path": "/logs", "recursive": true }
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `volume` | yes | Volume id |
+| `path` | yes | File or directory to delete (the volume root is refused) |
+| `recursive` | no | `true` — delete a directory **with all its contents**; when absent/false a non-empty directory is refused |
+
+**Response `200 OK`:** `{ "status": "ok" }`
+**Errors:** `400` invalid path · `404` not found · `409` directory not empty
+(send `recursive: true` to confirm the loss) or the volume is not mounted.
+
+---
+
+## POST /api/files/format
+
+Format a volume — **erases everything on it**. Only offered for the external
+card; the internal FAT partition answers `400` (`operation not supported for
+this volume`).
+
+```json
+{ "volume": "sd", "confirm": true }
+```
+
+`confirm` must be exactly `true` (the web UI asks twice).
+
+**Response `200 OK`:** `{ "status": "ok" }`
+**Errors:** `400` missing confirmation or unsupported volume · `404` unknown
+volume · `409` volume not mounted (there is nothing to format) · `500` the
+format call failed.
+
+---
+
+## GET /api/files/download
+
+Stream the contents of a file. The response body is **chunked** (no
+`Content-Length`) and written in windows through a shared **512 KB buffer
+allocated in PSRAM** (64 KB in the internal heap when PSRAM is unavailable),
+so the transfer costs the same whether the file is 1 KB or 20 MB.
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | yes | Volume-relative path of the **file** (a directory is refused) |
+
+**Response `200 OK`:**
+```
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="report.txt"; filename*=UTF-8''report.txt
+```
+> The name is sent twice: a quoted ASCII form (non-ASCII characters replaced
+> by `_`) and the RFC 5987 UTF-8 form, so a Cyrillic file name survives in
+> modern browsers and still yields a usable name in old clients.
+
+**Errors:** `400` invalid path or the path is a directory · `404` unknown
+volume or file · `409` volume not mounted · `500` the file could not be opened.
+A client disconnect aborts the transfer silently (logged on the device).
+
+---
+
+## POST /api/files/upload
+
+Upload a file. The **raw request body** (`application/octet-stream`, not
+multipart) is streamed into a windowed write, so the size is limited only by
+the free space of the volume.
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | yes | Volume-relative path of the destination **file** (incl. the name) |
+
+```bash
+curl -u admin:admin -X POST \
+     --data-binary @report.txt \
+     -H 'Content-Type: application/octet-stream' \
+     'http://192.168.1.201/api/files/upload?volume=fat&path=/logs/report.txt'
+```
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "bytes": 20480, "path": "/logs/report.txt" }
+```
+
+> **Atomic publish** — the body is written to `<name>.part` and only renamed
+> onto the destination after the whole body arrived (an existing file is
+> replaced; the web UI asks for confirmation before starting). An interrupted
+> upload therefore never leaves a truncated file under the real name, and the
+> leftover `.part` file is removed.
+>
+> The free space is checked **before** the body is read, using
+> `Content-Length`: a request that cannot fit is refused immediately instead of
+> transferring megabytes for nothing.
+
+**Errors:** `400` invalid path or the destination is a directory · `404`
+unknown volume · `409` volume not mounted · `411` `Content-Length` missing
+(cannot be space-checked) · `507` not enough free space · `500` write or
+final rename failed.
+
+---
+
+## GET /api/files/text
+
+Read a file as text for the built-in editor. The whole file travels in one
+JSON document, so it is limited to **512 KB** (`IFileManager::kMaxTextBytes`)
+and must actually be text.
+
+**Query parameters**
+
+| Name | Required | Description |
+|------|----------|-------------|
+| `volume` | yes | Volume id (`fat`, `sd`) |
+| `path` | yes | Volume-relative path of the file |
+
+**Response `200 OK`:**
+```json
+{
+  "volume": "fat",
+  "path": "/notes.txt",
+  "size": 42,
+  "mtime": 1757971200,
+  "truncated": false,
+  "text": "line 1\nline 2\n"
+}
+```
+
+> `mtime` is the value to echo back when saving (see below) — it is the
+> conflict token. `text` is always complete: `truncated` exists for symmetry
+> with the listing and is `false` for this endpoint (a file that does not fit
+> is refused instead of silently clipped).
+
+**Errors:** `400` invalid path or the path is a directory · `404` unknown
+volume or file · `409` volume not mounted · `413` the file is larger than the
+512 KB editor limit (downloading it still works) · `415` the content is binary
+(the response carries no data) · `500` the file could not be read.
+
+> Binary detection: a NUL byte is decisive; otherwise the share of bytes
+> outside tab/CR/LF/printable/UTF-8 must stay below 10 %.
+
+---
+
+## POST /api/files/text
+
+Save a text file from the editor. **The `text` member must be the last one** —
+the envelope fields are read from the part of the body that precedes it, so a
+file whose content contains `"mtime":0` cannot confuse the parser.
+
+```json
+{
+  "volume": "fat",
+  "path": "/notes.txt",
+  "mtime": 1757971200,
+  "text": "line 1\nline 2\n"
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `volume` | yes | Volume id |
+| `path` | yes | Destination file (created when it does not exist) |
+| `text` | yes | Full new content, JSON-escaped (empty string truncates the file) |
+| `mtime` | no | `mtime` from the last `GET`; when present and different on the device the save is refused with `409` instead of overwriting a newer version |
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "size": 42, "mtime": 1757971300 }
+```
+
+The write goes through the same atomic path as an upload (written to
+`<name>.part`, then renamed), so an interrupted save never truncates the file.
+
+**Errors:** `400` invalid path / malformed body · `404` unknown volume ·
+`409` volume not mounted or the file changed on the volume · `413` the text
+exceeds 512 KB · `415` the text contains binary data · `507` no free space ·
+`500` write failed.
+
+---
+
+## GET /api/files/settings
+
+Access policy of the file explorer.
+
+**Response `200 OK`:**
+```json
+{
+  "enabled": true,
+  "allow_own_subnet": true,
+  "subnet_address": "192.168.1.201",
+  "subnet_mask": "255.255.255.0",
+  "filter_active": true,
+  "blocked_count": 0
+}
+```
+
+> `allow_own_subnet` (**default on**) makes every file endpoint answer only
+> clients inside the device's own subnet — the address and netmask come from
+> the DHCP settings (`server_ip` / `subnet`), the same definition the DNS and
+> NTP filters use, so there is no separate address field. `subnet_address`,
+> `subnet_mask`, `filter_active` and `blocked_count` are read-only context for
+> the UI: `filter_active` is `false` when the flag is off **or** the subnet is
+> unusable (a zero/non-contiguous mask) — in that case the filter is skipped
+> with a warning instead of locking the operator out. `blocked_count` counts
+> the refused requests since boot.
+
+---
+
+## POST /api/files/settings
+
+```json
+{ "allow_own_subnet": false }
+```
+
+Applies immediately (no reboot): the toggle is re-evaluated for the running
+manager, and the subnet is re-read from the DHCP settings whenever those
+change. The same value travels in the settings export/import under the `files`
+section.
+
+**Response `200 OK`:** `{ "status": "ok" }`
+**Errors:** `400` empty body · `403` the caller is outside the allowed subnet
+(the endpoint itself is behind the same filter).
+
+---
+
+## POST /api/files/check
+
+Starts a **read-only** check of a volume ("Check for errors").
+
+```json
+{ "volume": "sd" }
+```
+
+The walk reads **every file of the volume to the end** and compares the bytes
+read with the size in the directory entry — the only way to notice that a file
+can no longer be fetched: a directory entry can look perfectly healthy while its
+cluster chain is broken. Nothing is written: no `f_getfree()` repair pass, no
+chain fixing (FatFs has no fsck), so the check cannot change the card on its own.
+
+Reading gigabytes takes minutes, so the walk runs in its own task (one at a
+time) and the handler answers immediately; poll `GET /api/files/check` for the
+progress and the result. Limits: `CONFIG_FILES_CHECK_MAX_MB` (default **64**,
+1..512) bounds the bytes one check reads and `kCheckMaxFiles` (4096) the files;
+hitting either ends the walk with `truncated: true`.
+
+**Response `200 OK`:** `{ "status": "started" }`
+**Errors:** `400` missing/empty `volume` · `403` outside the allowed subnet ·
+`404` unknown volume · `409` not mounted, or **a check is already running** ·
+`500` the check task could not be started.
+
+---
+
+## POST /api/files/check/cancel
+
+Asks a running check to stop (sets a flag; the walk ends at its next step, so
+the answer is immediate). Nothing happens when no check is running.
+
+**Response `200 OK`:** `{ "status": "ok" }`
+
+---
+
+## GET /api/files/check
+
+Snapshot of the running (or last) check — polling it in mid-walk is simply a
+progress report, not an error. Fields: `busy`, `finished`, `truncated` (stopped
+at a limit), `cancelled`, `volume`, `current` (path being read), `dirs`,
+`files` (read completely), `bad_entries` (**every** failure, not just the listed
+ones), `bytes_read`, `budget_bytes` and `errors` — at most
+`kCheckMaxErrors` (64) failures with the volume-relative `path` and a `detail`
+(`errno` text, or `size mismatch (N in the entry, M readable)`).
+
+```json
+{
+  "busy": false,
+  "finished": true,
+  "truncated": false,
+  "cancelled": false,
+  "volume": "sd",
+  "current": "",
+  "dirs": 5,
+  "files": 38,
+  "bad_entries": 1,
+  "bytes_read": 41943040,
+  "budget_bytes": 67108864,
+  "errors": [
+    { "path": "/logs/broken.bin",
+      "detail": "size mismatch (4096 in the entry, 0 readable)" }
+  ]
+}
+```
+
+> **Repairing is the operator's call.** A check only reports; the UI then offers
+> deleting the entries that cannot be read any more (through
+> `POST /api/files/delete` with `recursive`) or formatting the card — the two
+> actions that can actually make the volume usable again, both of which destroy
+> data and are therefore confirmed first.
+
+---
+
+## File-explorer error bodies
+
+Every file endpoint reports failures as
+```json
+{ "status": "error", "message": "directory is not empty", "detail": "…" }
+```
+`message` is a stable English text (the UI shows its own translation),
+`detail` carries the driver/`errno` text when there is one. Status codes:
+`400` invalid path / unsupported operation, `403` client outside the allowed
+subnet (see `GET /api/files/settings`), `404` unknown volume or entry,
+`409` not mounted / already exists / not empty / changed on the volume,
+`413` too large for the editor, `415` binary content, `500` filesystem error,
+`507` not enough free space on the volume.
+
+> **LAN-only by default:** every endpoint in this section (including the
+> settings above) is gated by `allow_own_subnet`. The check uses the **socket**
+> peer address — `X-Forwarded-For` is deliberately ignored, so a client cannot
+> claim to be in the allowed subnet. An unknown client address (should not
+> happen over IPv4 Ethernet) is allowed with a warning, so the operator cannot
+> be locked out of the explorer.
+
+### Path policy (all file endpoints)
+
+Paths are **volume-relative** (`/` is the volume root) and are validated by
+`storage::PathUtil` before any filesystem call:
+
+- `..` is rejected — a request can never escape its volume,
+- `.` and repeated/empty segments are dropped (`/a//b/` → `/a/b`),
+- control characters, `\` and the FAT-illegal set `" * < > ? | :` are rejected,
+- a segment may not end with a dot or a space (FATFS trims those on create),
+- limits: segment ≤ 128 chars, path ≤ 255 chars, depth ≤ 16.

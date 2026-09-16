@@ -14,7 +14,17 @@ clock can never be set to a meaningless value (1970).
 """
 
 import re
+import sys
 from pathlib import Path
+
+# Windows consoles are often a legacy code page (cp1251 on the development
+# machine) that cannot encode the arrows these scripts print. Without this,
+# `inc_firmware_ver.py --rel` raised UnicodeEncodeError *after* the config files
+# had been written but *before* the CONFIG_FW_MIN_DATETIME refresh, so the run
+# looked like a failure and silently skipped that step. Every version script
+# imports this module, so the fix lives here and applies to all of them.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 

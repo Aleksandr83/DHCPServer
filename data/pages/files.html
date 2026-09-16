@@ -1,0 +1,1626 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="files">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Files — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="files.title">Files</h1>
+
+        <!-- Access policy (LAN-only by default) -->
+        <div class="card toggle-row">
+            <span data-i18n="files.allow_own_subnet">Allow only own subnet</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="files-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+        <p class="hint" id="files-subnet-hint"></p>
+
+        <!-- Volumes -->
+        <div class="card">
+            <div class="files-tabs" id="files-tabs"></div>
+            <p class="hint" id="files-volume-info"></p>
+        </div>
+
+        <!-- Toolbar + breadcrumbs -->
+        <div class="card">
+            <!-- All global actions live behind one "⋯" button on the right: the
+                 page is a listing, and the actions (create, upload, format) are
+                 used rarely — they should not push the listing down. The menu
+                 reuses the row-action styles (position: fixed, placed from the
+                 button's rect), and its labels are `data-i18n`, so a language
+                 switch needs no rebuild — only the JS-set tooltip is refreshed. -->
+            <div class="test-conn-row files-toolbar">
+                <div class="files-menu-wrap">
+                    <button class="files-menu-btn" type="button" id="files-actions-btn"
+                            title="Actions" aria-label="Actions">⋯</button>
+                    <div class="files-menu files-toolbar-menu" id="files-actions-menu">
+                        <button type="button" id="files-menu-new-file"
+                                data-i18n="files.new_file">New file</button>
+                        <button type="button" id="files-menu-new-folder"
+                                data-i18n="files.new_folder">New folder</button>
+                        <!-- The label toggles to "Clear selection" once every row
+                             is ticked, so it is set by JS and carries no
+                             `data-i18n` (applyTranslations would overwrite it). -->
+                        <button type="button" id="files-menu-select-all">Select all</button>
+                        <div class="files-menu-sep"></div>
+                        <button type="button" id="files-menu-upload-file"
+                                data-i18n="files.upload">Upload file</button>
+                        <button type="button" id="files-menu-upload-folder"
+                                data-i18n="files.upload_folder">Upload folder</button>
+                        <div class="files-menu-sep"></div>
+                        <!-- Bulk actions: they need a selection, so they stay
+                             disabled (not hidden) until something is ticked. -->
+                        <button type="button" id="files-menu-move"
+                                data-i18n="files.move">Move ...</button>
+                        <button type="button" id="files-menu-delete-selected" class="danger"
+                                data-i18n="files.delete">Delete</button>
+                        <div class="files-menu-sep"></div>
+                        <button type="button" id="files-menu-refresh"
+                                data-i18n="files.refresh">Refresh</button>
+                        <div class="files-menu-sep"></div>
+                        <button type="button" id="files-menu-format" class="danger"
+                                data-i18n="files.format">Format card</button>
+                        <button type="button" id="files-menu-check"
+                                data-i18n="files.check">Check for errors</button>
+                    </div>
+                </div>
+                <input type="file" id="files-upload-input" style="display:none"
+                       onchange="uploadFile(this.files[0])">
+                <!-- `webkitdirectory` gives every file of the picked folder with
+                     its relative path, which is what lets the tree be rebuilt. -->
+                <input type="file" id="files-folder-input" webkitdirectory multiple
+                       style="display:none" onchange="uploadFolder(this.files)">
+            </div>
+
+            <div id="files-progress-row" style="display:none; margin-top:0.6rem;">
+                <div style="display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:0.3rem;">
+                    <span id="files-progress-label"></span>
+                    <span id="files-progress-percent"></span>
+                </div>
+                <div class="meter-track" style="height:8px;">
+                    <div class="meter-fill ic-fill" id="files-progress-bar" style="width:0%;"></div>
+                </div>
+            </div>
+
+            <nav class="files-breadcrumbs" id="files-breadcrumbs"></nav>
+            <p class="test-conn-result" id="files-status"></p>
+        </div>
+
+        <!-- Listing -->
+        <div class="card">
+            <div class="table-wrap">
+                <table id="files-table">
+                    <thead>
+                        <tr>
+                            <!-- Selection column: narrow and caption-less, the
+                                 checkbox carries its own meaning. -->
+                            <th class="col-select"></th>
+                            <th data-i18n="files.col_name">Name</th>
+                            <!-- No header text for the action column: the "⋯"
+                                 button carries the tooltip/aria-label. -->
+                            <th class="col-actions"></th>
+                            <th class="col-size" data-i18n="files.col_size">Size</th>
+                            <th class="col-date" data-i18n="files.col_date">Modified</th>
+                        </tr>
+                    </thead>
+                    <tbody id="files-tbody"></tbody>
+                </table>
+            </div>
+            <p class="hint" id="files-empty" style="display:none;" data-i18n="files.empty">The folder is empty.</p>
+        </div>
+
+        <!-- Text editor -->
+        <div class="card" id="files-editor-card" style="display:none;">
+            <div class="toggle-row" style="margin-bottom:0.5rem;">
+                <span id="files-editor-path"></span>
+                <button class="btn" onclick="closeEditor()" data-i18n="files.editor_close">Close</button>
+            </div>
+            <textarea id="files-editor-text" class="files-editor" spellcheck="false" rows="18"></textarea>
+            <div class="test-conn-row" style="margin-top:0.6rem;">
+                <button class="btn btn-primary" onclick="saveEditor()" data-i18n="files.editor_save">Save</button>
+                <span class="test-conn-result" id="files-editor-status"></span>
+            </div>
+        </div>
+    </main>
+
+    <!-- In-page modal: native prompt()/confirm() are blocked in some embedded
+         browsers, and a menu-driven UI should not depend on them. -->
+    <div class="modal-backdrop" id="files-modal" style="display:none;">        <div class="modal-card" role="dialog" aria-modal="true">
+            <h3 id="files-modal-title"></h3>
+            <p class="hint" id="files-modal-hint" style="display:none;"></p>
+            <input type="text" id="files-modal-input" style="display:none;" maxlength="128">
+            <div class="modal-actions">
+                <button class="btn" id="files-modal-cancel" data-i18n="files.cancel">Cancel</button>
+                <!-- Optional third choice (e.g. Upload folder → "overwrite all"
+                     when names clash); hidden unless a caller asks for it. -->
+                <button class="btn" id="files-modal-extra" style="display:none;"></button>
+                <button class="btn btn-primary" id="files-modal-ok"></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Destination picker of "Move ...": folders are entered by clicking them,
+         the confirmation is the "Move here" button. Folders that are part of
+         the selection are not offered at all — that is what makes "a folder into
+         itself" impossible to pick instead of something to be refused later. -->
+    <div class="modal-backdrop" id="files-picker" style="display:none;">
+        <div class="modal-card" role="dialog" aria-modal="true">
+            <h3 data-i18n="files.picker_title">Move to</h3>
+            <p class="hint" id="files-picker-hint"></p>
+            <div class="files-picker-path" id="files-picker-path"></div>
+            <div class="files-picker-list" id="files-picker-list"></div>
+            <div class="modal-actions">
+                <button class="btn" id="files-picker-cancel" data-i18n="files.cancel">Cancel</button>
+                <button class="btn btn-primary" id="files-picker-ok"
+                        data-i18n="files.move_here">Move here</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Volume check ("Check for errors"): the walk runs on the device, so this
+         dialog polls it and stays cancellable while it works. Its lower row of
+         buttons only appears once something was found — FatFs cannot repair
+         anything, so the only honest offers are "delete the unreadable entries"
+         and "format the card". -->
+    <div class="modal-backdrop" id="files-check" style="display:none;">
+        <div class="modal-card" role="dialog" aria-modal="true">
+            <h3 data-i18n="files.check">Check for errors</h3>
+            <p class="hint" id="files-check-state"></p>
+            <div class="files-picker-path" id="files-check-current"></div>
+            <div class="files-picker-list" id="files-check-errors"></div>
+            <div class="modal-actions">
+                <!-- Label and action depend on the state: cancel while it runs,
+                     close once it is through — set by JS, no `data-i18n`. -->
+                <button class="btn" id="files-check-close">Close</button>
+                <button class="btn" id="files-check-delete" style="display:none;"
+                        data-i18n="files.repair_delete">Delete damaged</button>
+                <button class="btn btn-danger" id="files-check-format" style="display:none;"
+                        data-i18n="files.format">Format card</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        /* ─── State ─────────────────────────────────────── */
+        const filesState = {
+            volume: 'fat',
+            path: '/',
+            volumes: [],
+            current: null,
+            entries: [],
+            // Names ticked in the CURRENT directory (bulk move/delete act on
+            // them). Cleared whenever the listing shows another directory.
+            selected: new Set(),
+            listKey: '',
+            // mtime of the file currently open in the editor (conflict token)
+            editorMtime: -1,
+            editorPath: '',
+        };
+
+        /* ─── Path helpers ──────────────────────────────── */
+        function filesJoin(dir, name) {
+            if (!dir || dir === '/') return '/' + name;
+            return dir.replace(/\/+$/, '') + '/' + name;
+        }
+
+        function filesParent(path) {
+            if (!path || path === '/') return '/';
+            const i = path.lastIndexOf('/');
+            return i <= 0 ? '/' : path.substring(0, i);
+        }
+
+        /* ─── Formatting ────────────────────────────────── */
+        function filesFmtSize(bytes) {
+            if (bytes === undefined || bytes === null) return '';
+            if (bytes < 1024) return bytes + ' B';
+            const kb = bytes / 1024;
+            if (kb < 1024) return kb.toFixed(kb < 10 ? 1 : 0) + ' KB';
+            const mb = kb / 1024;
+            if (mb < 1024) return mb.toFixed(mb < 10 ? 1 : 0) + ' MB';
+            return (mb / 1024).toFixed(2) + ' GB';
+        }
+
+        function filesFmtDate(unixSec) {
+            if (!unixSec) return '—';
+            const d = new Date(unixSec * 1000);
+            if (isNaN(d.getTime()) || d.getFullYear() < 2000) return '—';
+            const p = (n) => String(n).padStart(2, '0');
+            return p(d.getDate()) + '-' + p(d.getMonth() + 1) + '-' + d.getFullYear() +
+                   ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+        }
+
+        /* Success messages clear themselves (the next listing refresh would
+           otherwise leave a stale line); errors stay until something replaces
+           them, so the operator can read them. */
+        let filesStatusTimer = null;
+        function filesStatus(text, kind) {
+            const el = document.getElementById('files-status');
+            el.textContent = text || '';
+            el.className = 'test-conn-result' +
+                (kind === 'ok' ? ' test-conn-ok' : kind === 'fail' ? ' test-conn-fail' : '');
+
+            if (filesStatusTimer) {
+                clearTimeout(filesStatusTimer);
+                filesStatusTimer = null;
+            }
+            if (text && kind === 'ok') {
+                filesStatusTimer = setTimeout(() => { el.textContent = ''; }, 3000);
+            }
+        }
+
+        /* Server error bodies carry a stable English `message`; show it plus the
+           optional technical detail, so nothing is hidden from the operator. */
+        async function filesError(resp) {
+            let msg = 'HTTP ' + resp.status;
+            try {
+                const j = await resp.json();
+                if (j && j.message) msg = j.message;
+                if (j && j.detail) msg += ' (' + j.detail + ')';
+            } catch (e) { /* not JSON */ }
+            return msg;
+        }
+
+        /* ─── Settings (LAN-only policy) ─────────────────── */
+        /* The subnet itself (address/mask) is not repeated here — it belongs to
+           the DHCP page. The line only appears when there is something to warn
+           about: a filter that cannot be applied, or refused requests. */
+        async function loadFilesSettings() {
+            try {
+                const s = await fetchJSON('/api/files/settings');
+                document.getElementById('files-allow-own-subnet').checked = !!s.allow_own_subnet;
+
+                let hint = '';
+                if (s.allow_own_subnet && !s.filter_active) {
+                    hint = tr('files.filter_skipped');
+                }
+                if (s.blocked_count > 0) {
+                    hint += (hint ? '   ·   ' : '') +
+                            tr('files.blocked') + ' ' + s.blocked_count;
+                }
+
+                const hintEl = document.getElementById('files-subnet-hint');
+                hintEl.textContent = hint;
+                hintEl.style.display = hint ? '' : 'none';
+            } catch (e) {
+                console.warn('files settings failed:', e);
+            }
+        }
+
+        async function toggleAllowOwnSubnet() {
+            const cb = document.getElementById('files-allow-own-subnet');
+            const wanted = cb.checked;
+            try {
+                const resp = await apiFetch('/api/files/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ allow_own_subnet: wanted }),
+                });
+                if (!resp.ok) {
+                    cb.checked = !wanted;
+                    filesStatus(tr('files.save_fail') + ': ' + await filesError(resp), 'fail');
+                    return;
+                }
+                filesStatus(tr('files.saved'), 'ok');
+                loadFilesSettings();
+            } catch (e) {
+                cb.checked = !wanted;
+                filesStatus(tr('files.save_fail') + ': ' + e, 'fail');
+            }
+        }
+
+        /* ─── Volumes ────────────────────────────────────── */
+        async function loadVolumes() {
+            let data;
+            try {
+                data = await fetchJSON('/api/files/volumes');
+            } catch (e) {
+                document.getElementById('files-tabs').innerHTML = '';
+                document.getElementById('files-volume-info').textContent =
+                    tr('files.load_fail') + ': ' + e;
+                return [];
+            }
+
+            filesState.volumes = data.volumes || [];
+
+            // Keep the current volume if it still exists, else take the first
+            // mounted one (the card may not be inserted at all).
+            let current = filesState.volumes.find(v => v.id === filesState.volume);
+            if (!current || !current.mounted) {
+                const firstMounted = filesState.volumes.find(v => v.mounted);
+                current = firstMounted || current || filesState.volumes[0];
+            }
+            if (!current) {
+                document.getElementById('files-tabs').innerHTML = '';
+                document.getElementById('files-volume-info').textContent = tr('files.no_volumes');
+                document.getElementById('files-tbody').innerHTML = '';
+                return [];
+            }
+            filesState.volume = current.id;
+            filesState.current = current;
+            renderVolumeTabs();
+            renderVolumeInfo();
+
+            return filesState.volumes;
+        }
+
+        /* Volume tabs and the capacity line are generated text, so they are
+           rendered by their own functions — the language switch re-runs them
+           (see the `i18n-applied` listener below) instead of leaving stale
+           labels on screen. */
+        function renderVolumeTabs() {
+            const tabs = document.getElementById('files-tabs');
+            tabs.innerHTML = '';
+
+            filesState.volumes.forEach(v => {
+                const b = document.createElement('button');
+                b.className = 'files-tab' + (v.id === filesState.volume ? ' active' : '');
+                const label = tr(v.id === 'fat' ? 'files.volume_fat' : 'files.volume_sd');
+                b.textContent = v.mounted ? label : label + ' (' + tr('files.not_inserted') + ')';
+                b.disabled = !v.mounted;
+                b.onclick = () => {
+                    filesState.volume = v.id;
+                    filesState.path = '/';
+                    closeEditor();
+                    loadVolumes().then(loadList);
+                };
+                tabs.appendChild(b);
+            });
+
+            // Which actions make sense for the current volume (formatting is
+            // offered for the card only, everything that writes needs a mount).
+            updateToolbarState();
+        }
+
+        function renderVolumeInfo() {
+            const info = document.getElementById('files-volume-info');
+            const current = filesState.current;
+            if (!current) {
+                info.textContent = tr('files.no_volumes');
+                return;
+            }
+            if (current.mounted) {
+                info.textContent = current.mount_point + '   ·   ' +
+                    tr('files.free_of') + ' ' + filesFmtSize(current.free_bytes) +
+                    ' / ' + filesFmtSize(current.total_bytes);
+            } else {
+                info.textContent = tr('files.not_inserted') +
+                    (current.error ? ' — ' + current.error : '');
+            }
+        }
+
+        /* ─── Listing ────────────────────────────────────── */
+        function renderBreadcrumbs() {
+            const nav = document.getElementById('files-breadcrumbs');
+            nav.innerHTML = '';
+
+            const root = document.createElement('a');
+            root.href = '#';
+            root.textContent = tr('files.root');
+            root.onclick = (e) => { e.preventDefault(); filesState.path = '/'; loadList(); };
+            nav.appendChild(root);
+
+            const parts = filesState.path.split('/').filter(p => p.length > 0);
+            let acc = '';
+            parts.forEach((part, i) => {
+                acc += '/' + part;
+                const sep = document.createElement('span');
+                sep.textContent = ' / ';
+                nav.appendChild(sep);
+
+                const a = document.createElement('a');
+                a.href = '#';
+                a.textContent = part;
+                const target = acc;
+                a.onclick = (e) => {
+                    e.preventDefault();
+                    filesState.path = i === parts.length - 1 ? filesState.path : target;
+                    loadList();
+                };
+                nav.appendChild(a);
+            });
+        }
+
+        function renderRows(entries) {
+            filesState.entries = entries || [];
+            const tbody = document.getElementById('files-tbody');
+            tbody.innerHTML = '';
+
+            // ".." row — always there except at the volume root.
+            if (filesState.path !== '/') {
+                const tr_ = document.createElement('tr');
+                tr_.innerHTML = '<td class="col-select"></td>' +
+                                '<td><a href="#" class="files-up">⬆ ' + tr('files.up') +
+                                '</a></td><td class="col-actions"></td>' +
+                                '<td class="col-size"></td><td class="col-date"></td>';
+                tr_.querySelector('a').onclick = (e) => {
+                    e.preventDefault();
+                    filesState.path = filesParent(filesState.path);
+                    loadList();
+                };
+                tbody.appendChild(tr_);
+            }
+
+            entries.forEach(e => {
+                const row = document.createElement('tr');
+                row.dataset.name = e.name;
+                if (filesState.selected.has(e.name)) row.classList.add('files-row-selected');
+
+                // 0. Selection checkbox
+                const selCell = document.createElement('td');
+                selCell.className = 'col-select';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = filesState.selected.has(e.name);
+                cb.title = tr('files.select');
+                cb.setAttribute('aria-label', tr('files.select'));
+                cb.onclick = (ev) => ev.stopPropagation();
+                cb.onchange = () => setSelected(e.name, cb.checked);
+                selCell.appendChild(cb);
+                row.appendChild(selCell);
+
+                // 1. Name
+                const nameCell = document.createElement('td');
+                if (e.is_dir) {
+                    const a = document.createElement('a');
+                    a.href = '#';
+                    a.textContent = '📁 ' + e.name;
+                    a.onclick = (ev) => {
+                        ev.preventDefault();
+                        filesState.path = filesJoin(filesState.path, e.name);
+                        loadList();
+                    };
+                    nameCell.appendChild(a);
+                } else {
+                    nameCell.textContent = '📄 ' + e.name;
+                }
+                row.appendChild(nameCell);
+
+                // 2. Actions — one "⋯" button that opens the menu
+                const actions = document.createElement('td');
+                actions.className = 'col-actions';
+
+                const menuBtn = document.createElement('button');
+                menuBtn.className = 'files-menu-btn';
+                menuBtn.type = 'button';
+                menuBtn.title = tr('files.col_actions');
+                menuBtn.setAttribute('aria-label', tr('files.col_actions'));
+                menuBtn.textContent = '⋯';
+                menuBtn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    toggleRowMenu(menuBtn);
+                };
+                actions.appendChild(menuBtn);
+
+                // Action menu; its items are built here so the row knows its
+                // own entry (files get Download/Open, directories only the
+                // structural actions).
+                const menu = document.createElement('div');
+                menu.className = 'files-menu';
+
+                const addItem = (label, danger, handler) => {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.textContent = label;
+                    if (danger) b.className = 'danger';
+                    b.onclick = (ev) => {
+                        ev.stopPropagation();
+                        closeRowMenus();
+                        handler();
+                    };
+                    menu.appendChild(b);
+                };
+
+                if (!e.is_dir) {
+                    addItem(tr('files.download'), false, () => downloadEntry(e.name));
+                    addItem(tr('files.edit'), false, () => openEditor(e.name));
+                }
+                addItem(tr('files.rename'), false, () => renameEntry(e.name));
+                addItem(tr('files.delete'), true, () => deleteEntry(e.name, e.is_dir));
+
+                actions.appendChild(menu);
+                row.appendChild(actions);
+
+                // 3. Size (files only — a directory has no size to show)
+                const sizeCell = document.createElement('td');
+                sizeCell.className = 'col-size';
+                sizeCell.textContent = e.is_dir ? '' : filesFmtSize(e.size);
+                row.appendChild(sizeCell);
+
+                // 4. Modification date
+                const dateCell = document.createElement('td');
+                dateCell.className = 'col-date';
+                dateCell.textContent = filesFmtDate(e.mtime);
+                row.appendChild(dateCell);
+
+                // The rest of the row selects as well — one click on the row, the
+                // way a file manager behaves. The exceptions are the things that
+                // already mean something: the name link, the "⋯" button and the
+                // action menu it opens.
+                row.onclick = (ev) => {
+                    if (ev.target.closest('a') || ev.target.closest('button') ||
+                        ev.target.closest('.files-menu') || ev.target === cb) return;
+                    cb.checked = !cb.checked;
+                    setSelected(e.name, cb.checked);
+                };
+
+                tbody.appendChild(row);
+            });
+
+            document.getElementById('files-empty').style.display =
+                entries.length === 0 ? '' : 'none';
+
+            // The listing is what the menu's item states depend on (select all,
+            // move/delete of a selection), so they are refreshed here — every
+            // re-render goes through this function.
+            updateToolbarState();
+        }
+
+        /* ─── Row action menu ───────────────────────────── */
+        /* Placed from the button's bounding rect with `position: fixed`: the
+           listing scrolls horizontally, so a menu positioned inside the table
+           would be clipped. It is flipped upwards when it would run past the
+           bottom of the viewport, and any scroll/resize closes it. */
+        function closeRowMenus() {
+            document.querySelectorAll('.files-menu.open')
+                .forEach(m => m.classList.remove('open'));
+        }
+
+        function toggleRowMenu(btn) {
+            const menu = btn.parentElement.querySelector('.files-menu');
+            if (!menu) return;
+
+            const wasOpen = menu.classList.contains('open');
+            closeRowMenus();
+            if (wasOpen) return;
+
+            menu.classList.add('open');
+
+            const r = btn.getBoundingClientRect();
+            const menuRect = menu.getBoundingClientRect();
+            let top = r.bottom + 4;
+            if (top + menuRect.height > window.innerHeight - 8) {
+                top = Math.max(8, r.top - menuRect.height - 4);
+            }
+            let left = r.right - menuRect.width;
+            if (left < 8) left = 8;
+
+            menu.style.top = top + 'px';
+            menu.style.left = left + 'px';
+        }
+
+        // Clicking anywhere else (or scrolling/resizing) closes the menu.
+        document.addEventListener('click', () => closeRowMenus());
+        window.addEventListener('scroll', () => closeRowMenus(), true);
+        window.addEventListener('resize', () => closeRowMenus());
+
+        /* ─── Toolbar action menu ───────────────────────── */
+        /* The toolbar is one "⋯" button; its menu is static HTML with
+           `data-i18n` labels, so only the tooltip has to be re-set on a
+           language switch (it is an attribute, not a text node). */
+        function updateActionsTitle() {
+            const btn = document.getElementById('files-actions-btn');
+            btn.title = tr('files.actions');
+            btn.setAttribute('aria-label', tr('files.actions'));
+        }
+
+        /* Which items apply right now: everything that writes needs a mounted
+           volume, formatting is offered for the card alone (the internal FAT
+           has no business being reformatted from here). */
+        function updateToolbarState() {
+            const mounted = !!(filesState.current && filesState.current.mounted);
+            const isSd = filesState.volume === 'sd';
+            const set = (id, enabled, hidden) => {
+                const el = document.getElementById(id);
+                el.disabled = !enabled;
+                el.style.display = hidden ? 'none' : '';
+            };
+            set('files-menu-new-file', mounted, false);
+            set('files-menu-new-folder', mounted, false);
+            set('files-menu-upload-file', mounted, false);
+            set('files-menu-upload-folder', mounted, false);
+            set('files-menu-select-all', filesState.entries.length > 0, false);
+            // Bulk actions need a selection: a disabled item says "tick something
+            // first" far better than an error after the click.
+            const hasSelection = filesState.selected.size > 0;
+            set('files-menu-move', mounted && hasSelection, false);
+            set('files-menu-delete-selected', mounted && hasSelection, false);
+            set('files-menu-refresh', true, false);
+            set('files-menu-format', mounted && isSd, !isSd);
+            set('files-menu-check', mounted, false);
+
+            // The select-all item doubles as "clear": once every row is ticked
+            // the only thing left to do is untick them again.
+            const allSelected = filesState.entries.length > 0 &&
+                                filesState.selected.size >= filesState.entries.length;
+            document.getElementById('files-menu-select-all').textContent =
+                allSelected ? tr('files.select_none') : tr('files.select_all');
+        }
+
+        function toggleToolbarMenu() {
+            const btn = document.getElementById('files-actions-btn');
+            const menu = document.getElementById('files-actions-menu');
+
+            const wasOpen = menu.classList.contains('open');
+            closeRowMenus();
+            if (wasOpen) return;
+
+            menu.classList.add('open');
+
+            const r = btn.getBoundingClientRect();
+            const menuRect = menu.getBoundingClientRect();
+            let top = r.bottom + 4;
+            if (top + menuRect.height > window.innerHeight - 8) {
+                top = Math.max(8, r.top - menuRect.height - 4);
+            }
+            let left = r.right - menuRect.width;
+            if (left < 8) left = 8;
+
+            menu.style.top = top + 'px';
+            menu.style.left = left + 'px';
+        }
+
+        function initToolbarMenu() {
+            const on = (id, fn) => document.getElementById(id).addEventListener('click', fn);
+            on('files-actions-btn', (ev) => {
+                ev.stopPropagation();
+                toggleToolbarMenu();
+            });
+            on('files-menu-new-file', () => createFile());
+            on('files-menu-new-folder', () => createFolder());
+            on('files-menu-select-all', () => selectAllToggle());
+            on('files-menu-upload-file', () => pickUpload());
+            on('files-menu-upload-folder', () => pickFolder());
+            on('files-menu-move', () => moveSelected());
+            on('files-menu-delete-selected', () => deleteSelected());
+            on('files-menu-refresh', () => reloadFiles());
+            on('files-menu-format', () => formatVolume());
+            on('files-menu-check', () => startCheck());
+        }
+
+        async function loadList() {
+            // A selection belongs to one directory: browsing elsewhere drops it,
+            // while a refresh of the same listing keeps it (that is what makes a
+            // bulk operation repeatable).
+            const key = filesState.volume + filesState.path;
+            if (key !== filesState.listKey) {
+                filesState.selected.clear();
+                filesState.listKey = key;
+            }
+            renderBreadcrumbs();
+            const url = '/api/files/list?volume=' + encodeURIComponent(filesState.volume) +
+                        '&path=' + encodeURIComponent(filesState.path);
+            let resp;
+            try {
+                resp = await apiFetch(url);
+            } catch (e) {
+                filesStatus(tr('files.load_fail') + ': ' + e, 'fail');
+                return;
+            }
+            if (!resp.ok) {
+                filesStatus(tr('files.load_fail') + ': ' + await filesError(resp), 'fail');
+                document.getElementById('files-tbody').innerHTML = '';
+                return;
+            }
+            const data = await resp.json();
+            filesState.path = data.path || filesState.path;
+            renderBreadcrumbs();
+            renderRows(data.entries || []);
+        }
+
+        async function reloadFiles() {
+            await loadVolumes();
+            await loadList();
+            await loadFilesSettings();
+        }
+
+        /* ─── In-page modal dialog ──────────────────────── */
+        /* Resolves with the typed value (input mode), `true` (confirm mode),
+           `'extra'` (the optional third button) or `null` when the operator
+           cancels / closes the dialog. */
+        let filesModalResolve = null;
+
+        function filesModalOpen({ title, hint, value, okLabel, danger, withInput, extraLabel }) {
+            const modal = document.getElementById('files-modal');
+            const input = document.getElementById('files-modal-input');
+            const hintEl = document.getElementById('files-modal-hint');
+            const ok = document.getElementById('files-modal-ok');
+            const extra = document.getElementById('files-modal-extra');
+
+            document.getElementById('files-modal-title').textContent = title;
+            hintEl.textContent = hint || '';
+            hintEl.style.display = hint ? '' : 'none';
+
+            input.style.display = withInput ? '' : 'none';
+            input.value = withInput ? (value || '') : '';
+
+            ok.textContent = okLabel;
+            ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+            extra.textContent = extraLabel || '';
+            extra.style.display = extraLabel ? '' : 'none';
+
+            modal.style.display = 'flex';
+            if (withInput) {
+                input.focus();
+                input.select();
+            } else {
+                ok.focus();
+            }
+
+            return new Promise(resolve => { filesModalResolve = resolve; });
+        }
+
+        function filesModalClose(result) {
+            document.getElementById('files-modal').style.display = 'none';
+            const resolve = filesModalResolve;
+            filesModalResolve = null;
+            if (resolve) resolve(result);
+        }
+
+        document.getElementById('files-modal-ok').onclick = () => {
+            const input = document.getElementById('files-modal-input');
+            filesModalClose(input.style.display === 'none' ? true : input.value.trim());
+        };
+        document.getElementById('files-modal-extra').onclick = () => filesModalClose('extra');
+        document.getElementById('files-modal-cancel').onclick = () => filesModalClose(null);
+        document.getElementById('files-modal-input').onkeydown = (e) => {
+            if (e.key === 'Enter') document.getElementById('files-modal-ok').click();
+            if (e.key === 'Escape') filesModalClose(null);
+        };
+
+        /* ─── Selection ─────────────────────────────────── */
+        /* The set holds NAMES of the current directory: the table is rebuilt on
+           every refresh, so the checkboxes are always rendered from it. */
+        function setSelected(name, on) {
+            if (on) filesState.selected.add(name);
+            else filesState.selected.delete(name);
+
+            const row = document.querySelector('#files-tbody tr[data-name="' +
+                          CSS.escape(name) + '"]');
+            if (row) row.classList.toggle('files-row-selected', on);
+            updateToolbarState();
+        }
+
+        function selectAllToggle() {
+            const all = filesState.entries.length > 0 &&
+                        filesState.selected.size >= filesState.entries.length;
+            filesState.selected.clear();
+            if (!all) filesState.entries.forEach(e => filesState.selected.add(e.name));
+            renderRows(filesState.entries);
+        }
+
+        /* Only names that are still in the listing: a selection that survived a
+           refresh somewhere else would otherwise fail with a puzzling error. */
+        function selectedEntries() {
+            return filesState.entries.filter(e => filesState.selected.has(e.name));
+        }
+
+        /* ─── Bulk operations ───────────────────────────── */
+        async function deleteSelected() {
+            const entries = selectedEntries();
+            if (entries.length === 0) {
+                filesStatus(tr('files.nothing_selected'), 'fail');
+                return;
+            }
+
+            const confirmed = await filesModalOpen({
+                title: tr('files.delete_selected') + ' (' + entries.length + ')?',
+                hint: tr('files.delete_selected_hint'),
+                danger: true,
+                okLabel: tr('files.delete'),
+            });
+            if (!confirmed) return;
+
+            let done = 0, firstError = '';
+            for (const entry of entries) {
+                // `recursive` is always on: the confirmation above states that
+                // folders go with their contents, and asking once per folder
+                // would turn one decision into a dialog storm.
+                const resp = await apiFetch('/api/files/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: filesState.volume,
+                                           path: filesJoin(filesState.path, entry.name),
+                                           recursive: true }),
+                });
+                if (resp.ok) done++;
+                else if (!firstError) firstError = entry.name + ': ' + await filesError(resp);
+            }
+
+            filesState.selected.clear();
+            let summary = tr('files.delete_done') + ' ' + done + ' / ' + entries.length;
+            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
+            filesStatus(summary, firstError ? 'fail' : 'ok');
+            await loadList();
+        }
+
+        /* ─── Destination picker (Move) ──────────────────── */
+        /* A small directory browser: a folder is entered by clicking it and the
+           confirmation is «Переместить сюда». Only directories are listed (a file
+           is not a destination), and every folder that is part of the selection
+           is left out — that makes "a folder into itself" impossible to pick
+           rather than something to be refused after the fact. */
+        let pickerResolve = null;
+        let pickerPath = '/';
+
+        function pickerForbidden() {
+            return new Set(selectedEntries()
+                .filter(e => e.is_dir)
+                .map(e => filesJoin(filesState.path, e.name)));
+        }
+
+        function pickerMessage(list, text) {
+            const p = document.createElement('p');
+            p.className = 'hint';
+            p.textContent = text;
+            list.appendChild(p);
+        }
+
+        async function pickerEnter(path) {
+            pickerPath = path;
+            const pathEl = document.getElementById('files-picker-path');
+            pathEl.textContent = path === filesState.path
+                ? path + '   (' + tr('files.picker_source') + ')' : path;
+
+            const list = document.getElementById('files-picker-list');
+            list.innerHTML = '';
+
+            // "⬆ Вверх" — everywhere except at the volume root. It is the first
+            // row so a deep folder can always be left again.
+            if (path !== '/') {
+                const up = document.createElement('button');
+                up.type = 'button';
+                up.className = 'files-picker-item up';
+                up.textContent = '⬆ ' + tr('files.up');
+                up.onclick = () => pickerEnter(filesParent(path));
+                list.appendChild(up);
+            }
+
+            // The source directory is never a destination: moving into itself
+            // would be a no-op, and the button says so instead of failing later.
+            document.getElementById('files-picker-ok').disabled =
+                (path === filesState.path);
+
+            const entries = await folderListing(path);
+            if (entries === null) {
+                pickerMessage(list, tr('files.load_fail'));
+                return;
+            }
+            const forbidden = pickerForbidden();
+            const dirs = entries.filter(e => e.is_dir &&
+                !forbidden.has(filesJoin(path, e.name)));
+            if (dirs.length === 0) {
+                pickerMessage(list, tr('files.picker_no_dirs'));
+                return;
+            }
+            dirs.forEach(e => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'files-picker-item';
+                b.textContent = '📁 ' + e.name;
+                b.onclick = () => pickerEnter(filesJoin(path, e.name));
+                list.appendChild(b);
+            });
+        }
+
+        function movePickerOpen(count) {
+            document.getElementById('files-picker-hint').textContent =
+                tr('files.picker_selected') + ': ' + count;
+            document.getElementById('files-picker').style.display = 'flex';
+            pickerEnter(filesState.path);
+            return new Promise(resolve => { pickerResolve = resolve; });
+        }
+
+        function movePickerClose(result) {
+            document.getElementById('files-picker').style.display = 'none';
+            const resolve = pickerResolve;
+            pickerResolve = null;
+            if (resolve) resolve(result);
+        }
+
+        document.getElementById('files-picker-cancel').onclick = () => movePickerClose(null);
+        document.getElementById('files-picker-ok').onclick = () => movePickerClose(pickerPath);
+        document.getElementById('files-picker').onclick = (ev) => {
+            // Only a click on the backdrop itself (not inside the card) closes it.
+            if (ev.target === document.getElementById('files-picker')) movePickerClose(null);
+        };
+
+        /* The destination is picked from the volume itself, so it exists by
+           construction; what is still checked before anything moves is the names
+           already taken there, because FatFs' rename refuses an existing name and
+           the firmware maps that to a plain I/O error. */
+        async function moveSelected() {
+            const entries = selectedEntries();
+            if (entries.length === 0) {
+                filesStatus(tr('files.nothing_selected'), 'fail');
+                return;
+            }
+
+            const target = await movePickerOpen(entries.length);
+            if (!target || target === filesState.path) return;
+
+            const destEntries = await folderListing(target);
+            if (destEntries === null) {
+                filesStatus(tr('files.move_no_dir') + ': ' + target, 'fail');
+                return;
+            }
+            const taken = new Set(destEntries.map(e => e.name.toLowerCase()));
+
+            let done = 0, firstError = '';
+            for (const entry of entries) {
+                const from = filesJoin(filesState.path, entry.name);
+                if (taken.has(entry.name.toLowerCase())) {
+                    if (!firstError) firstError = entry.name + ': ' + tr('files.move_exists');
+                    continue;
+                }
+                const resp = await apiFetch('/api/files/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: filesState.volume, path: from,
+                                           to: filesJoin(target, entry.name) }),
+                });
+                if (resp.ok) done++;
+                else if (!firstError) firstError = entry.name + ': ' + await filesError(resp);
+            }
+
+            filesState.selected.clear();
+            let summary = tr('files.move_done') + ' ' + done + ' / ' + entries.length;
+            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
+            filesStatus(summary, firstError ? 'fail' : 'ok');
+            await loadList();
+        }
+
+        /* ─── Volume check ("Check for errors") ──────────── */
+        /* The walk happens on the device and can take minutes, so the dialog
+           FOLLOWS it through `GET /api/files/check` — a snapshot endpoint, so a
+           poll in mid-walk is simply progress — and the operator can stop it
+           with one call. Nothing is written by the check itself: FatFs has no
+           fsck, so the only honest "repair" it can offer afterwards is removing
+           the entries that cannot be read any more, or formatting the card. */
+        let checkTimer = null;
+        let checkLast = {};
+
+        function renderCheck(r) {
+            checkLast = r;
+            const stateEl = document.getElementById('files-check-state');
+            const listEl = document.getElementById('files-check-errors');
+            const closeBtn = document.getElementById('files-check-close');
+            const delBtn = document.getElementById('files-check-delete');
+            const fmtBtn = document.getElementById('files-check-format');
+
+            document.getElementById('files-check-current').textContent = r.current || '';
+            listEl.innerHTML = '';
+
+            const counters = tr('files.check_dirs') + ' ' + (r.dirs || 0) + '   ·   ' +
+                             tr('files.check_files') + ' ' + (r.files || 0) + '   ·   ' +
+                             filesFmtSize(r.bytes_read || 0) + ' / ' +
+                             filesFmtSize(r.budget_bytes || 0);
+
+            if (r.busy) {
+                stateEl.className = 'test-conn-result';
+                stateEl.textContent = tr('files.check_running') + ': ' + counters;
+                closeBtn.textContent = tr('files.check_cancel');
+            } else {
+                closeBtn.textContent = tr('files.close');
+                if (r.cancelled) {
+                    stateEl.className = 'test-conn-result test-conn-fail';
+                    stateEl.textContent = tr('files.check_cancelled') + ': ' + counters;
+                } else if (!r.bad_entries) {
+                    stateEl.className = 'test-conn-result test-conn-ok';
+                    stateEl.textContent = tr('files.check_clean') + ': ' + counters +
+                        (r.truncated ? '   ·   ' + tr('files.check_truncated') : '');
+                } else {
+                    stateEl.className = 'test-conn-result test-conn-fail';
+                    stateEl.textContent = tr('files.check_found') + ': ' + r.bad_entries +
+                        '   ·   ' + counters +
+                        (r.truncated ? '   ·   ' + tr('files.check_truncated') : '');
+                    (r.errors || []).forEach(e => {
+                        const row = document.createElement('div');
+                        row.className = 'files-check-item';
+                        row.textContent = e.path + ' — ' + e.detail;
+                        listEl.appendChild(row);
+                    });
+                }
+            }
+
+            // The repair offers appear only after a finished check that found
+            // something; formatting is offered for the card alone.
+            const canRepair = !r.busy && r.finished && r.bad_entries > 0;
+            delBtn.style.display = canRepair ? '' : 'none';
+            fmtBtn.style.display = (canRepair && r.volume === 'sd') ? '' : 'none';
+        }
+
+        function stopCheckPolling() {
+            if (checkTimer) {
+                clearInterval(checkTimer);
+                checkTimer = null;
+            }
+        }
+
+        function closeCheck() {
+            stopCheckPolling();
+            document.getElementById('files-check').style.display = 'none';
+        }
+
+        async function pollCheck() {
+            let report;
+            try {
+                report = await fetchJSON('/api/files/check');
+            } catch (e) {
+                return;              // a hiccup: the next tick tries again
+            }
+            renderCheck(report);
+            if (!report.busy) stopCheckPolling();
+        }
+
+        async function startCheck() {
+            document.getElementById('files-check').style.display = 'flex';
+
+            // A check may already be running (the page was reloaded): follow it
+            // instead of asking for a second walk over the same card.
+            let current = null;
+            try { current = await fetchJSON('/api/files/check'); } catch (e) { /* ignore */ }
+            if (current && current.busy) {
+                renderCheck(current);
+                stopCheckPolling();
+                checkTimer = setInterval(pollCheck, 700);
+                return;
+            }
+
+            const volume = filesState.volume;
+            const empty = { busy: true, finished: false, volume: volume, current: '',
+                            dirs: 0, files: 0, bad_entries: 0, bytes_read: 0,
+                            budget_bytes: 0, errors: [] };
+            renderCheck(empty);
+
+            let resp;
+            try {
+                resp = await apiFetch('/api/files/check', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: volume }),
+                });
+            } catch (e) {
+                renderCheck({ ...empty, busy: false, finished: true });
+                document.getElementById('files-check-state').className =
+                    'test-conn-result test-conn-fail';
+                document.getElementById('files-check-state').textContent =
+                    tr('files.check_start_fail') + ': ' + e;
+                return;
+            }
+            if (!resp.ok) {
+                const msg = await filesError(resp);
+                renderCheck({ ...empty, busy: false, finished: true });
+                document.getElementById('files-check-state').className =
+                    'test-conn-result test-conn-fail';
+                document.getElementById('files-check-state').textContent =
+                    tr('files.check_start_fail') + ': ' + msg;
+                return;
+            }
+
+            stopCheckPolling();
+            checkTimer = setInterval(pollCheck, 700);
+        }
+
+        /* FatFs cannot repair a filesystem, so the one "repair" that keeps the
+           volume usable is removing the entries that can no longer be read (the
+           other offer is formatting the whole card). Only the paths the report
+           carried are deleted — a wholesale failure lists the first
+           `kCheckMaxErrors` entries and says so through the counter. */
+        async function deleteDamaged(volume, paths) {
+            if (paths.length === 0) return;
+
+            const confirmed = await filesModalOpen({
+                title: tr('files.repair_delete') + ' (' + paths.length + ')?',
+                hint: tr('files.repair_hint'),
+                danger: true,
+                okLabel: tr('files.delete'),
+            });
+            if (!confirmed) return;
+
+            let done = 0, firstError = '';
+            for (const path of paths) {
+                const resp = await apiFetch('/api/files/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: volume, path: path, recursive: true }),
+                });
+                if (resp.ok) done++;
+                else if (!firstError) firstError = path + ': ' + await filesError(resp);
+            }
+
+            let summary = tr('files.delete_done') + ' ' + done + ' / ' + paths.length;
+            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
+            filesStatus(summary, firstError ? 'fail' : 'ok');
+            await loadList();
+        }
+
+        document.getElementById('files-check-close').onclick = async () => {
+            if (checkLast.busy) {
+                try {
+                    await apiFetch('/api/files/check/cancel', { method: 'POST' });
+                } catch (e) { /* the walk also stops on its own at the limit */ }
+                closeCheck();
+                filesStatus(tr('files.check_cancelled'), 'ok');
+                return;
+            }
+            closeCheck();
+        };
+
+        document.getElementById('files-check-delete').onclick = () => {
+            const paths = (checkLast.errors || []).map(e => e.path);
+            const volume = checkLast.volume || filesState.volume;
+            closeCheck();
+            deleteDamaged(volume, paths);
+        };
+
+        document.getElementById('files-check-format').onclick = () => {
+            closeCheck();
+            formatVolume();
+        };
+
+        /* ─── Operations ─────────────────────────────────── */
+        /* An empty file is created through the TEXT endpoint: it is the only
+           write that creates a missing file (the editor save), and it applies
+           the same rules as any other write — atomic `<name>.part` + rename,
+           the free-space reserve and the volume's name policy. */
+        async function createFile() {
+            const name = await filesModalOpen({
+                title: tr('files.new_file'),
+                withInput: true,
+                value: '',
+                okLabel: tr('files.create'),
+            });
+            if (!name) return;
+
+            // `text` must be the LAST member: the firmware reads volume/path
+            // from the part of the body before it.
+            const resp = await apiFetch('/api/files/text', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ volume: filesState.volume,
+                                       path: filesJoin(filesState.path, name),
+                                       text: '' }),
+            });
+            if (!resp.ok) {
+                filesStatus(tr('files.fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            filesStatus(tr('files.ok'), 'ok');
+            loadList();
+        }
+
+        async function createFolder() {
+            const name = await filesModalOpen({
+                title: tr('files.new_folder'),
+                withInput: true,
+                value: '',
+                okLabel: tr('files.create'),
+            });
+            if (!name) return;
+
+            const resp = await apiFetch('/api/files/mkdir', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ volume: filesState.volume,
+                                       path: filesJoin(filesState.path, name) }),
+            });
+            if (!resp.ok) {
+                filesStatus(tr('files.fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            filesStatus(tr('files.ok'), 'ok');
+            loadList();
+        }
+
+        function pickUpload() {
+            const input = document.getElementById('files-upload-input');
+            input.value = '';
+            input.click();
+        }
+
+        function pickFolder() {
+            const input = document.getElementById('files-folder-input');
+            input.value = '';
+            input.click();
+        }
+
+        /* Raw-body upload through XHR: fetch() cannot report upload progress,
+           and a single-file POST keeps the firmware's free-space check exact.
+           `batch` ({ done, total } in bytes, optional) switches the bar to the
+           progress of the WHOLE folder upload: the file counter is already in
+           the label, so "how much of the batch is left" is the more useful
+           reading there. Without it the bar is that one file.
+           Resolves with an error message, or '' when the file arrived. */
+        function uploadOne(file, target, label, batch) {
+            const url = '/api/files/upload?volume=' + encodeURIComponent(filesState.volume) +
+                        '&path=' + encodeURIComponent(target);
+
+            const row = document.getElementById('files-progress-row');
+            const bar = document.getElementById('files-progress-bar');
+            const pct = document.getElementById('files-progress-percent');
+
+            const base = batch ? batch.done : 0;
+            const total = batch ? batch.total : file.size;
+            const showProgress = (loaded) => {
+                const sent = base + loaded;
+                // A zero-byte total (empty file, empty batch) has no percentage:
+                // show an empty bar while it runs and 100 % once it is through.
+                const p = total > 0 ? Math.min(100, Math.round(sent * 100 / total))
+                                    : (loaded >= file.size ? 100 : 0);
+                bar.style.width = p + '%';
+                pct.textContent = p + '%';
+            };
+
+            row.style.display = '';
+            showProgress(0);
+            document.getElementById('files-progress-label').textContent = label;
+
+            return new Promise(resolve => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', url, true);
+                xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                const auth = getAuthHeaders();
+                Object.keys(auth).forEach(k => xhr.setRequestHeader(k, auth[k]));
+
+                // The request is over either way, so the batch counter moves on
+                // in one place and a failed file cannot stall the bar.
+                const finish = (msg) => {
+                    row.style.display = 'none';
+                    if (batch) batch.done += file.size;
+                    resolve(msg);
+                };
+
+                xhr.upload.onprogress = (ev) => {
+                    if (!ev.lengthComputable) return;
+                    showProgress(ev.loaded);
+                };
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) { finish(''); return; }
+                    let msg = 'HTTP ' + xhr.status;
+                    try {
+                        const j = JSON.parse(xhr.responseText);
+                        if (j.message) msg = j.message;
+                        if (j.detail) msg += ' (' + j.detail + ')';
+                    } catch (e) { /* not JSON */ }
+                    finish(msg);
+                };
+                xhr.onerror = () => finish('network error');
+                xhr.send(file);
+            });
+        }
+
+        async function uploadFile(file) {
+            if (!file) return;
+
+            const err = await uploadOne(file, filesJoin(filesState.path, file.name),
+                                        tr('files.uploading') + ' ' + file.name);
+            if (err) {
+                filesStatus(tr('files.upload_fail') + ': ' + err, 'fail');
+                return;
+            }
+            filesStatus(tr('files.upload_ok') + ': ' + file.name, 'ok');
+            loadList();
+        }
+
+        /* ─── Upload folder ──────────────────────────────── */
+        /* The browser hands over a flat list of files that carry their relative
+           path, so the tree has to be rebuilt on the device: every target
+           directory is created first (depth order — the API refuses a missing
+           parent), then the files are uploaded one at a time, because the
+           firmware streams exactly one file per request and checks the free
+           space for that file. Each directory is listed once up front: that
+           tells us which names already exist (the overwrite question) and keeps
+           the listing requests out of the upload loop. */
+        async function folderExistingNames(dir) {
+            const entries = await folderListing(dir);
+            return new Set((entries || []).map(e => e.name.toLowerCase()));
+        }
+
+        /* One listing call, two uses: the overwrite question of a folder upload
+           and the destination check of a move. `null` means "no such
+           directory" (the upload treats that as empty, the move as an error). */
+        async function folderListing(dir) {
+            try {
+                const resp = await apiFetch('/api/files/list?volume=' +
+                    encodeURIComponent(filesState.volume) +
+                    '&path=' + encodeURIComponent(dir));
+                if (!resp.ok) return null;
+                const data = await resp.json();
+                return data.entries || [];
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function uploadFolder(fileList) {
+            const files = Array.from(fileList || []);
+            if (files.length === 0) return;
+
+            // `webkitRelativePath` reads "<picked folder>/<sub>/<file>", so the
+            // picked folder itself becomes a directory in the current one — the
+            // same thing every file manager does.
+            const items = [];
+            const dirs = new Set();
+            for (const f of files) {
+                const parts = (f.webkitRelativePath || f.name).split('/').filter(s => s.length);
+                if (parts.length === 0) continue;
+                const name = parts.pop();
+                const rel = parts.join('/');
+                const dir = rel ? filesJoin(filesState.path, rel) : filesState.path;
+                dirs.add(dir);
+                items.push({ file: f, dir: dir, name: name });
+            }
+            if (items.length === 0) return;
+
+            const depth = (p) => p.split('/').filter(s => s.length).length;
+            const ordered = Array.from(dirs)
+                .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+
+            const existing = new Map();
+            for (const dir of ordered) {
+                const resp = await apiFetch('/api/files/mkdir', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: filesState.volume, path: dir }),
+                });
+                // 409 = the directory is already there, which is the normal case
+                // when the same folder is uploaded twice; anything else is real.
+                if (!resp.ok && resp.status !== 409) {
+                    filesStatus(tr('files.upload_folder_fail') + ': ' +
+                                await filesError(resp), 'fail');
+                    return;
+                }
+                // Listed AFTER the mkdir: for a fresh directory the listing is
+                // empty (nothing to clash with), for an existing one it is the
+                // set of names the overwrite question is about — and asking a
+                // missing directory for its contents would only log a 404.
+                existing.set(dir, await folderExistingNames(dir));
+            }
+
+            const clashes = items
+                .filter(it => existing.get(it.dir).has(it.name.toLowerCase())).length;
+            let done = 0, overwriteAll = false, stopped = false, firstError = '';
+
+            // One batch counter for the whole upload: the bar then moves steadily
+            // across the folder instead of jumping 0→100 % per file.
+            const batch = { done: 0, total: items.reduce((n, it) => n + it.file.size, 0) };
+
+            for (let i = 0; i < items.length; i++) {
+                const it = items[i];
+
+                // Asked once per clash: "Overwrite" answers for this file,
+                // "Overwrite all" for this and every remaining one, Cancel stops
+                // the whole upload (what has already arrived stays).
+                if (!overwriteAll && existing.get(it.dir).has(it.name.toLowerCase())) {
+                    const choice = await filesModalOpen({
+                        title: tr('files.overwrite_title') + ' (' + clashes + ')',
+                        hint: filesJoin(it.dir, it.name) + '   ·   ' + tr('files.overwrite_note'),
+                        okLabel: tr('files.overwrite'),
+                        extraLabel: tr('files.overwrite_all'),
+                    });
+                    if (!choice) { stopped = true; break; }
+                    if (choice === 'extra') overwriteAll = true;
+                }
+
+                const label = tr('files.uploading') + ' ' + (i + 1) + ' / ' + items.length +
+                              ': ' + it.name;
+                const err = await uploadOne(it.file, filesJoin(it.dir, it.name), label, batch);
+                if (err) {
+                    if (!firstError) firstError = it.name + ': ' + err;
+                } else {
+                    done++;
+                }
+            }
+
+            document.getElementById('files-progress-row').style.display = 'none';
+
+            let summary = tr('files.upload_folder_done') + ' ' + done + ' / ' + items.length;
+            if (stopped) summary += '   ·   ' + tr('files.stopped');
+            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
+            filesStatus(summary, (firstError || stopped) ? 'fail' : 'ok');
+            await reloadFiles();
+        }
+
+        /* Download through fetch + object URL so the Basic-auth header is
+           applied (a plain link would lose it and re-prompt). */
+        async function downloadEntry(name) {
+            const url = '/api/files/download?volume=' + encodeURIComponent(filesState.volume) +
+                        '&path=' + encodeURIComponent(filesJoin(filesState.path, name));
+            const resp = await apiFetch(url);
+            if (!resp.ok) {
+                filesStatus(tr('files.download_fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            const blob = await resp.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            URL.revokeObjectURL(a.href);
+            a.remove();
+        }
+
+        async function renameEntry(name) {
+            const to = await filesModalOpen({
+                title: tr('files.rename'),
+                withInput: true,
+                value: name,
+                okLabel: tr('files.rename'),
+            });
+            if (!to || to === name) return;
+
+            const resp = await apiFetch('/api/files/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ volume: filesState.volume,
+                                       path: filesJoin(filesState.path, name),
+                                       to: filesJoin(filesState.path, to) }),
+            });
+            if (!resp.ok) {
+                filesStatus(tr('files.fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            filesStatus(tr('files.ok'), 'ok');
+            loadList();
+        }
+
+        async function deleteEntry(name, isDir) {
+            const target = filesJoin(filesState.path, name);
+            const confirmed = await filesModalOpen({
+                title: tr('files.delete_confirm') + ' "' + name + '"?',
+                danger: true,
+                okLabel: tr('files.delete'),
+            });
+            if (!confirmed) return;
+
+            const doDelete = async (recursive) => {
+                return apiFetch('/api/files/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: filesState.volume, path: target,
+                                           recursive: recursive }),
+                });
+            };
+
+            let resp = await doDelete(false);
+            if (resp.status === 409 && isDir) {
+                // The server refuses a non-empty directory: ask again, this
+                // time spelling out that the contents go with it.
+                const again = await filesModalOpen({
+                    title: tr('files.delete_recursive_confirm'),
+                    danger: true,
+                    okLabel: tr('files.delete'),
+                });
+                if (!again) return;
+                resp = await doDelete(true);
+            }
+            if (!resp.ok) {
+                filesStatus(tr('files.fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            filesStatus(tr('files.ok'), 'ok');
+            loadList();
+        }
+
+        async function formatVolume() {
+            const first = await filesModalOpen({
+                title: tr('files.format'),
+                hint: tr('files.format_confirm1'),
+                danger: true,
+                okLabel: tr('files.ok_continue'),
+            });
+            if (!first) return;
+            const second = await filesModalOpen({
+                title: tr('files.format'),
+                hint: tr('files.format_confirm2'),
+                danger: true,
+                okLabel: tr('files.format'),
+            });
+            if (!second) return;
+
+            const resp = await apiFetch('/api/files/format', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ volume: filesState.volume, confirm: true }),
+            });
+            if (!resp.ok) {
+                filesStatus(tr('files.format_fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            filesStatus(tr('files.format_ok'), 'ok');
+            reloadFiles();
+        }
+
+        /* ─── Text editor ────────────────────────────────── */
+        async function openEditor(name) {
+            const path = filesJoin(filesState.path, name);
+            const url = '/api/files/text?volume=' + encodeURIComponent(filesState.volume) +
+                        '&path=' + encodeURIComponent(path);
+            const resp = await apiFetch(url);
+            if (!resp.ok) {
+                filesStatus(tr('files.edit_fail') + ': ' + await filesError(resp), 'fail');
+                return;
+            }
+            const data = await resp.json();
+            filesState.editorPath = data.path || path;
+            filesState.editorMtime = data.mtime || 0;
+            document.getElementById('files-editor-path').textContent = filesState.editorPath;
+            document.getElementById('files-editor-text').value = data.text || '';
+            document.getElementById('files-editor-status').textContent = '';
+            document.getElementById('files-editor-card').style.display = '';
+            document.getElementById('files-editor-card').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function closeEditor() {
+            document.getElementById('files-editor-card').style.display = 'none';
+            filesState.editorPath = '';
+            filesState.editorMtime = -1;
+        }
+
+        async function saveEditor() {
+            const text = document.getElementById('files-editor-text').value;
+            const statusEl = document.getElementById('files-editor-status');
+
+            // `text` MUST be the last member: the firmware reads volume/path/mtime
+            // from the part of the body that precedes it.
+            const body = JSON.stringify({
+                volume: filesState.volume,
+                path: filesState.editorPath,
+                mtime: filesState.editorMtime,
+                text: text,
+            });
+
+            const resp = await apiFetch('/api/files/text', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body,
+            });
+            if (!resp.ok) {
+                statusEl.className = 'test-conn-result test-conn-fail';
+                statusEl.textContent = tr('files.editor_fail') + ': ' + await filesError(resp);
+                return;
+            }
+            const data = await resp.json();
+            filesState.editorMtime = data.mtime || 0;
+            statusEl.className = 'test-conn-result test-conn-ok';
+            statusEl.textContent = tr('files.editor_saved');
+            loadList();
+        }
+
+        /* ─── Bootstrap ──────────────────────────────────── */
+        initToolbarMenu();
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            updateActionsTitle();
+            await loadVolumes();
+            await loadList();
+            await loadFilesSettings();
+        });
+
+        /* The tab labels, table rows and breadcrumbs are built by JS, so a
+           language switch must re-render them — app.js fires `i18n-applied`
+           after the dictionary is loaded. The toolbar labels are `data-i18n`
+           (translated by app.js itself), but its tooltip is an attribute and
+           has to be set here. */
+        document.addEventListener('i18n-applied', () => {
+            updateActionsTitle();
+            if (filesState.volumes.length === 0) return;   // nothing loaded yet
+            renderVolumeTabs();
+            renderVolumeInfo();
+            renderBreadcrumbs();
+            renderRows(filesState.entries);
+            loadFilesSettings();
+        });
+    </script>
+</body>
+</html>

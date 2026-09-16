@@ -1,5 +1,8 @@
 #include "RestApi.h"
 #include "AuthManager.h"
+#include "FileJson.h"
+#include "JsonWriter.h"
+#include "MultipartExtractor.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
 #include "../core/CpuMonitor.h"
@@ -7,15 +10,20 @@
 #include "../dhcp/IDhcpServer.h"
 #include "../dhcp/DhcpServer.h"
 #include "../dns/DnsServer.h"
+#include "../files/IFileManager.h"
+#include "../storage/PathUtil.h"
 #include "../time/TimeServer.h"
 #include "../time/TimeMath.h"
 
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <sstream>
 #include <algorithm>
+#include <vector>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_http_client.h"
 #include "esp_ota_ops.h"
@@ -37,18 +45,21 @@ namespace web {
 ::dhcp::dns::DnsServer*      RestApi::s_dns  = nullptr;
 ::dhcp::time::TimeServer*    RestApi::s_time = nullptr;
 ::dhcp::web::AuthManager*    RestApi::s_auth = nullptr;
+::dhcp::files::IFileManager* RestApi::s_files = nullptr;
 
 void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
                     ::dhcp::dhcp::IDhcpServer* dhcpSrv,
                     ::dhcp::dns::DnsServer* dnsSrv,
                     ::dhcp::time::TimeServer* timeSrv,
-                    ::dhcp::web::AuthManager* auth)
+                    ::dhcp::web::AuthManager* auth,
+                    ::dhcp::files::IFileManager* fileMgr)
 {
     s_wifi = wifi;
     s_dhcp = dhcpSrv;
     s_dns  = dnsSrv;
     s_time = timeSrv;
     s_auth = auth;
+    s_files = fileMgr;
     ESP_LOGI(TAG, "RestApi initialized");
 }
 
@@ -84,6 +95,39 @@ esp_err_t RestApi::respondUnauthorized(httpd_req* req)
                        "Basic realm=\"DHCPServer\"");
     httpd_resp_sendstr(req, "{\"error\":\"Unauthorized\"}");
     return ESP_OK;
+}
+
+uint32_t RestApi::getClientIp4(httpd_req* req)
+{
+    // The peer of the TCP connection — deliberately NOT the X-Forwarded-For
+    // header: the file endpoints decide access on this address, and a client
+    // must not be able to claim an address inside the allowed subnet.
+    const int sock = httpd_req_to_sockfd(req);
+    if (sock < 0) return 0;
+
+    struct sockaddr_in addr = {};
+    socklen_t len = sizeof(addr);
+    if (getpeername(sock, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
+        ESP_LOGW(TAG, "getpeername failed (%s)", strerror(errno));
+        return 0;
+    }
+    if (addr.sin_family != AF_INET) return 0;
+
+    return ntohl(addr.sin_addr.s_addr);
+}
+
+bool RestApi::checkFileAccess(httpd_req* req)
+{
+    if (!s_files) return true;   // no file service in this build
+
+    const uint32_t clientIp = getClientIp4(req);
+    if (s_files->allowClient(clientIp)) return true;
+
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"status\":\"error\",\"message\":\"forbidden (client is outside the allowed subnet)\"}");
+    return false;
 }
 
 std::string RestApi::getClientIp(httpd_req* req)
@@ -229,6 +273,25 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                 s_dns ? s_dns->isRunning() : false, true);
     addJsonBool(json, "ntp_running",
                 s_time ? s_time->isRunning() : false, true);
+    // Device uptime since boot. The home page shows it next to its own title,
+    // and that row has to stay readable while the time service is switched off,
+    // so the raw `esp_timer` count is read here instead of asking `s_time` —
+    // the same clock `TimeServer::uptimeSec()` uses, which keeps this endpoint
+    // and `/api/time/settings` from ever disagreeing.
+    addJsonInt(json, "uptime_sec",
+               static_cast<int64_t>(esp_timer_get_time() / 1000000ULL), true);
+    // File explorer availability: only the ESP32-P4 has FAT volumes (flash
+    // data partition + card slot); the web UI hides the menu entry otherwise.
+    addJsonBool(json, "files_enabled",
+                s_files ? s_files->supported() : false, true);
+    // Storage capacity of those volumes — the internal flash data partition and
+    // the microSD card. The home page shows them next to RAM, so the status
+    // endpoint carries the same array the explorer serves (one shared writer,
+    // `FileJson::volumeArray`), and a client outside the allowed subnet still
+    // sees the capacities even though `/api/files/*` answers it with 403.
+    json += ",\"volumes\":" + FileJson::volumeArray(
+        s_files ? s_files->volumes()
+                : std::vector<::dhcp::storage::VolumeInfo>{});
     addJsonInt(json, "cpu_load0", ::dhcp::core::CpuMonitor::loadCore0(), true);
     addJsonInt(json, "cpu_load1", ::dhcp::core::CpuMonitor::loadCore1(), true);
     addJsonInt(json, "heap_free",
@@ -442,6 +505,7 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     // client filters — re-evaluate them when the subnet (or the IP) changes.
     if (s_dns) s_dns->applySubnetFilter();
     if (s_time) s_time->applyAccessFilter();
+    if (s_files) s_files->applyAccessFilter();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
@@ -972,6 +1036,14 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonInt(json, "lockout_period", sec.lockoutPeriodSec, true);
     json += "}";
 
+    // ── files section (file explorer access policy) ──
+    {
+        auto fcfg = cfgMgr.getFiles();
+        json += ",\"files\":{";
+        addJsonBool(json, "allow_own_subnet", fcfg.allowOwnSubnet, false);
+        json += "}";
+    }
+
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -1021,7 +1093,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     std::string skipped;
     const char* known[] = { "format", "schema", "firmware_version",
                             "dhcp", "static_bindings", "dns", "time",
-                            "local_hosts", "security" };
+                            "local_hosts", "security", "files" };
     size_t pos = 0;
     while ((pos = body.find('"', pos)) != std::string::npos) {
         size_t keyStart = pos + 1;
@@ -1287,6 +1359,20 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
     }
 
+    // Files (file explorer access policy)
+    if (body.find("\"files\"") != std::string::npos) {
+        size_t s = body.find("\"files\"");
+        size_t open = body.find('{', s);
+        if (open != std::string::npos) {
+            std::string seg = body.substr(open);
+            auto cur = cfgMgr.getFiles();
+            cur.allowOwnSubnet =
+                jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
+            cfgMgr.setFiles(cur);
+            if (s_files) s_files->applyAccessFilter();
+        }
+    }
+
     // ─── 5. Re-apply to running servers (DHCP / DNS restart reads NVS) ───
     // A change to the network parameters requires a reboot — the static IP is
     // applied once at Ethernet init and cannot be re-applied on the fly.
@@ -1422,6 +1508,68 @@ esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
 // ─────────────────────────────────────────────────────
 // POST /api/ota/upload
 // ─────────────────────────────────────────────────────
+// Accepts two body layouts:
+//
+//   * `multipart/form-data` with a `firmware` part — what the web UI sends
+//     (`new FormData()`); only the part payload is the image, everything else
+//     is MIME envelope: `--boundary\r\n` + part headers + `\r\n\r\n`, and the
+//     trailing `\r\n--boundary--`.
+//   * `application/octet-stream` — the whole body is the image (curl
+//     `--data-binary`, scripts).
+//
+// IMPORTANT: the previous version wrote the *raw* body into the OTA partition
+// regardless of the layout, so a multipart upload started with
+// `--<boundary>\r\nContent-Disposition: …` instead of the 0xE9 image magic.
+// `esp_ota_end()` then rejected the image — and the page still reported
+// success, so the update looked like it worked while nothing was installed.
+// The failure text (`esp_err_to_name`) is now returned in `detail` as well.
+
+namespace {
+
+/**
+ * @brief Buffered writer for `esp_ota_write`.
+ *
+ * The API accepts arbitrary sizes, so this only batches the HTTP chunks into
+ * 4 KB writes (fewer flash calls, and the buffer lives on the handler's stack
+ * frame instead of the heap).
+ */
+struct OtaWriter {
+    esp_ota_handle_t handle = 0;
+    uint8_t buf[4096];
+    size_t len = 0;
+    uint64_t written = 0;
+    esp_err_t err = ESP_OK;
+
+    /** @brief Write the buffered bytes to the OTA partition. */
+    bool flush()
+    {
+        if (len == 0) return err == ESP_OK;
+
+        err = esp_ota_write(handle, buf, len);
+        if (err != ESP_OK) return false;
+
+        written += len;
+        len = 0;
+        return true;
+    }
+
+    /** @brief Feed payload bytes. */
+    bool feed(const uint8_t* data, size_t n)
+    {
+        while (n > 0) {
+            const size_t space = sizeof(buf) - len;
+            const size_t take = (n < space) ? n : space;
+            memcpy(buf + len, data, take);
+            len += take;
+            data += take;
+            n -= take;
+            if (len == sizeof(buf) && !flush()) return false;
+        }
+        return err == ESP_OK;
+    }
+};
+
+} // namespace
 
 esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
 {
@@ -1429,71 +1577,169 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
 
     ESP_LOGI(TAG, "OTA update starting...");
 
-    esp_ota_handle_t otaHandle = 0;
+    // ── Body layout ────────────────────────────────────
+    size_t ctLen = httpd_req_get_hdr_value_len(req, "Content-Type");
+    std::string contentType;
+    if (ctLen > 0) {
+        contentType.resize(ctLen);
+        httpd_req_get_hdr_value_str(req, "Content-Type", &contentType[0], ctLen + 1);
+    }
+
+    // The payload extraction itself lives in MultipartExtractor (unit-tested on
+    // the host): writing the raw multipart body into the OTA partition produced
+    // an image without the 0xE9 magic, which esp_ota_end() then rejected.
+    const bool multipart = contentType.rfind("multipart/form-data", 0) == 0;
+    std::string boundary;
+    if (multipart) {
+        const size_t b = contentType.find("boundary=");
+        if (b == std::string::npos) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"multipart body without boundary\"}");
+            return ESP_OK;
+        }
+        boundary = contentType.substr(b + 9);
+        boundary.erase(0, boundary.find_first_not_of(" \t\""));
+        const size_t lastOk = boundary.find_last_not_of(" \t\"");
+        boundary.erase(lastOk == std::string::npos ? 0 : lastOk + 1);
+        const size_t semi = boundary.find(';');
+        if (semi != std::string::npos) boundary.erase(semi);
+        if (boundary.empty()) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"multipart body without boundary\"}");
+            return ESP_OK;
+        }
+    }
+
     const esp_partition_t* partition = esp_ota_get_next_update_partition(nullptr);
     if (!partition) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"no OTA partition available\"}");
         return ESP_OK;
     }
+    ESP_LOGI(TAG, "OTA target partition: %s at 0x%lx (%lu bytes)",
+             partition->label, (unsigned long)partition->address,
+             (unsigned long)partition->size);
 
+    esp_ota_handle_t otaHandle = 0;
     esp_err_t err = esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &otaHandle);
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
+        std::string body = "{\"status\":\"error\",\"message\":\"OTA begin failed\",\"detail\":\"";
+        body += esp_err_to_name(err);
+        body += "\"}";
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, body.c_str());
         return ESP_OK;
     }
 
-    // Read and write firmware chunks
+    OtaWriter writer;
+    writer.handle = otaHandle;
+
+    MultipartExtractor extractor(boundary, [&writer](const uint8_t* d, size_t n) {
+        return writer.feed(d, n);
+    });
+
+    // ── Stream the body ────────────────────────────────
     char buf[1024];
-    int remaining = req->content_len;
-    bool success = true;
+    uint32_t remaining = static_cast<uint32_t>(req->content_len);
+    int retries = 0;
+    bool badBody = false;
 
     while (remaining > 0) {
-        int recvLen = httpd_req_recv(req, buf, std::min(remaining, (int)sizeof(buf)));
-        if (recvLen <= 0) {
-            success = false;
+        const uint32_t want = (remaining < sizeof(buf)) ? remaining
+                                                        : (uint32_t)sizeof(buf);
+        const int got = httpd_req_recv(req, buf, want);
+        if (got < 0) {
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
+            badBody = true;
             break;
         }
-
-        err = esp_ota_write(otaHandle, buf, recvLen);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "OTA write failed: %s", esp_err_to_name(err));
-            success = false;
+        if (got == 0) {
+            badBody = true;
             break;
         }
-        remaining -= recvLen;
-    }
+        remaining -= static_cast<uint32_t>(got);
 
-    if (success) {
-        err = esp_ota_end(otaHandle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
-            success = false;
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(buf);
+        const size_t n = static_cast<size_t>(got);
+        const bool ok = multipart ? extractor.feed(data, n) : writer.feed(data, n);
+        if (!ok) {
+            badBody = true;
+            break;
         }
     }
 
-    if (success) {
-        err = esp_ota_set_boot_partition(partition);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "OTA set boot partition failed: %s", esp_err_to_name(err));
-            success = false;
-        }
+    // Anything left in the socket (multipart epilogue) is read and dropped so
+    // the connection stays clean — the image itself is complete by now.
+    while (remaining > 0) {
+        const uint32_t want = (remaining < sizeof(buf)) ? remaining
+                                                        : (uint32_t)sizeof(buf);
+        const int got = httpd_req_recv(req, buf, want);
+        if (got <= 0) break;
+        remaining -= static_cast<uint32_t>(got);
     }
 
-    if (success) {
-        ESP_LOGI(TAG, "OTA update successful! Rebooting...");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Update successful. Rebooting...\"}");
+    // ── Finish ─────────────────────────────────────────
+    esp_err_t failErr = ESP_OK;
+    bool otaEnded = false;
 
-        // Give the response time to be sent before reboot
-        vTaskDelay(pdMS_TO_TICKS(500));
-        esp_restart();
+    if (badBody) {
+        failErr = ESP_FAIL;
+    } else if (multipart && !extractor.finish()) {
+        ESP_LOGE(TAG, "multipart body incomplete (no closing boundary)");
+        failErr = ESP_ERR_INVALID_ARG;
+    } else if (writer.err != ESP_OK) {
+        failErr = writer.err;
+    } else if (!writer.flush()) {
+        failErr = writer.err;
+    } else if ((err = esp_ota_end(otaHandle)) != ESP_OK) {
+        ESP_LOGE(TAG, "OTA end failed: %s", esp_err_to_name(err));
+        failErr = err;
     } else {
-        ESP_LOGE(TAG, "OTA update failed");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"OTA update failed\"}");
+        // From here on the image is written and validated: the handle is gone,
+        // so the only remaining step is pointing the bootloader at it.
+        otaEnded = true;
+        if ((err = esp_ota_set_boot_partition(partition)) != ESP_OK) {
+            ESP_LOGE(TAG, "OTA set boot partition failed: %s", esp_err_to_name(err));
+            failErr = err;
+        }
     }
 
+    if (failErr != ESP_OK) {
+        // Release the partition only while the session is still open
+        // (esp_ota_end() already invalidated the handle).
+        if (!otaEnded) esp_ota_abort(otaHandle);
+
+        std::string body = "{\"status\":\"error\",\"message\":\"OTA update failed\",\"detail\":\"";
+        body += esp_err_to_name(failErr);
+        body += "\",\"received\":";
+        body += std::to_string((unsigned long long)writer.written);
+        body += "}";
+        ESP_LOGE(TAG, "OTA update failed: %s", esp_err_to_name(failErr));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, body.c_str());
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "OTA update successful (%llu bytes) — rebooting",
+             (unsigned long long)writer.written);
+    std::string body = "{\"status\":\"ok\",\"message\":\"Update successful. Rebooting...\",\"bytes\":";
+    body += std::to_string((unsigned long long)writer.written);
+    body += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, body.c_str());
+
+    // Give the response (and the log) time to get out before the reboot.
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
     return ESP_OK;
 }
 
@@ -2232,6 +2478,945 @@ esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/files/volumes
+// ─────────────────────────────────────────────────────
+// State of every file-explorer volume: id, mount point, mounted/present flags,
+// capacity and the last mount error. The response is also what the web UI
+// polls to discover a card that was inserted after boot (FileManager retries
+// the mount, throttled, on every call).
+//
+//   {"enabled":true,"volumes":[
+//     {"id":"fat","mount_point":"/fat","mounted":true,"present":true,
+//      "total_bytes":22282240,"free_bytes":22118400,"error":""}, … ]}
+
+esp_err_t RestApi::handleGetFileVolumes(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+
+    // The body itself is built by `FileJson` (host-tested): the previous
+    // hand-written version started with a stray comma (`{,"enabled"…`) and
+    // the page failed in JSON.parse() although the status was 200.
+    const std::string json = FileJson::volumes(
+        s_files ? s_files->supported() : false,
+        s_files ? s_files->volumes() : std::vector<::dhcp::storage::VolumeInfo>{});
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// File explorer helpers
+// ─────────────────────────────────────────────────────
+namespace {
+
+/** @brief Complete HTTP status line for a file-explorer status. */
+const char* fileStatusLine(::dhcp::files::FileStatus st)
+{
+    switch (::dhcp::files::httpStatusFor(st)) {
+        case 200: return "200 OK";
+        case 400: return "400 Bad Request";
+        case 404: return "404 Not Found";
+        case 409: return "409 Conflict";
+        case 413: return "413 Payload Too Large";
+        case 415: return "415 Unsupported Media Type";
+        case 507: return "507 Insufficient Storage";
+        default:  return "500 Internal Server Error";
+    }
+}
+
+/**
+ * @brief Send the result of a file-explorer operation.
+ *
+ * Success carries @p okJson (a ready-made JSON object), failures carry
+ * `{"status":"error","message":…[,"detail":…]}` with the status code mapped
+ * from the enum — handlers never invent status codes or messages.
+ */
+esp_err_t sendFileResult(httpd_req* req, ::dhcp::files::FileStatus st,
+                         const std::string& okJson,
+                         const std::string* detail = nullptr)
+{
+    if (st == ::dhcp::files::FileStatus::Ok) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, okJson.c_str());
+        return ESP_OK;
+    }
+
+    JsonWriter fail;
+    fail.str("status", "error");
+    fail.str("message", ::dhcp::files::messageFor(st));
+    if (detail != nullptr && !detail->empty()) {
+        fail.str("detail", *detail);
+    }
+
+    httpd_resp_set_status(req, fileStatusLine(st));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, fail.toString().c_str());
+    return ESP_OK;
+}
+
+/** @brief Reply for a missing/unknown file-explorer backend. */
+esp_err_t sendNoFileManager(httpd_req* req)
+{
+    return sendFileResult(req, ::dhcp::files::FileStatus::NotMounted,
+                          "{}", nullptr);
+}
+
+/**
+ * @brief Read and percent-decode one query parameter.
+ *
+ * `httpd_query_key_value()` copies the raw (still percent-encoded) value; paths
+ * with non-ASCII names would reach the validator percent-encoded otherwise.
+ * The 1 KB buffer covers a 255-byte path with every byte escaped.
+ *
+ * @return false when the parameter is missing or the escape sequence is broken.
+ */
+bool queryParam(httpd_req* req, const char* key, std::string& out)
+{
+    char query[1024];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+
+    char raw[768];
+    if (httpd_query_key_value(query, key, raw, sizeof(raw)) != ESP_OK) {
+        return false;
+    }
+
+    auto hexVal = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+
+    out.clear();
+    for (const char* p = raw; *p; ++p) {
+        if (*p != '%') {
+            out += (*p == '+') ? ' ' : *p;
+            continue;
+        }
+        if (!p[1] || !p[2]) return false;
+        const int hi = hexVal(p[1]);
+        const int lo = hexVal(p[2]);
+        if (hi < 0 || lo < 0) return false;
+        out += static_cast<char>((hi << 4) | lo);
+        p += 2;
+    }
+    return true;
+}
+
+} // namespace (file explorer helpers)
+
+// ─────────────────────────────────────────────────────
+// GET /api/files/list?volume=<id>&path=<rel>
+// ─────────────────────────────────────────────────────
+// Directory listing: directories first, then files, case-insensitive by name.
+// The response is bounded (max. IFileManager::kMaxListEntries entries) so a
+// huge directory cannot exhaust the httpd stack while building the body;
+// `truncated` says the list may have been cut.
+//
+//   {"volume":"fat","path":"/logs","mounted":true,"total_bytes":…,
+//    "free_bytes":…,"truncated":false,
+//    "entries":[{"name":"2026","is_dir":true,"size":0,"mtime":1757971200}, …]}
+
+esp_err_t RestApi::handleGetFileList(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}",
+                              nullptr);
+    }
+    if (!queryParam(req, "path", path)) path = "/";   // root by default
+
+    std::vector<::dhcp::files::FileEntry> entries;
+    std::string detail;
+    ::dhcp::files::FileStatus st =
+        s_files->list(volume, path, entries, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    // Normalized path + capacity for the breadcrumb/free-space display.
+    std::string norm = path;
+    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = "/";
+    ::dhcp::storage::IFileSystem* vol = s_files->find(volume);
+    uint64_t total = 0, free = 0;
+    if (vol != nullptr) {
+        const auto info = vol->info();
+        total = info.totalBytes;
+        free = info.freeBytes;
+    }
+
+    FileJson::ListPayload payload;
+    payload.volume = volume;
+    payload.path = norm;
+    payload.mounted = true;
+    payload.totalBytes = total;
+    payload.freeBytes = free;
+    payload.truncated =
+        entries.size() >= ::dhcp::files::IFileManager::kMaxListEntries;
+    payload.entries = entries;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, FileJson::list(payload).c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/files/mkdir  |  /rename  |  /delete  |  /format
+// ─────────────────────────────────────────────────────
+// Bodies (all volume-relative paths, leading slash optional):
+//   mkdir : {"volume":"fat","path":"/logs/2026"}
+//   rename: {"volume":"fat","path":"/a.txt","to":"/b.txt"}
+//   delete: {"volume":"fat","path":"/logs","recursive":true}
+//   format: {"volume":"sd","confirm":true}
+//
+// `recursive` is required to delete a non-empty directory (otherwise 409), and
+// `confirm` must be exactly true to format — formatting erases the whole card
+// and is only offered for the external volume.
+
+esp_err_t RestApi::handlePostFileMkdir(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req);
+    const std::string volume = jsonGetStr(body, "volume");
+    const std::string path = jsonGetStr(body, "path");
+
+    std::string detail;
+    const auto st = s_files->mkdir(volume, path, &detail);
+    return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+}
+
+esp_err_t RestApi::handlePostFileRename(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req);
+    const std::string volume = jsonGetStr(body, "volume");
+    const std::string from = jsonGetStr(body, "path");
+    const std::string to = jsonGetStr(body, "to");
+
+    std::string detail;
+    const auto st = s_files->rename(volume, from, to, &detail);
+    return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+}
+
+esp_err_t RestApi::handlePostFileDelete(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req);
+    const std::string volume = jsonGetStr(body, "volume");
+    const std::string path = jsonGetStr(body, "path");
+    const bool recursive = jsonGetBool(body, "recursive", false);
+
+    std::string detail;
+    const auto st = s_files->remove(volume, path, recursive, &detail);
+    return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+}
+
+esp_err_t RestApi::handlePostFileFormat(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req);
+    const std::string volume = jsonGetStr(body, "volume");
+    if (!jsonGetBool(body, "confirm", false)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}",
+                              nullptr);
+    }
+
+    std::string detail;
+    const auto st = s_files->format(volume, &detail);
+    if (st == ::dhcp::files::FileStatus::Ok) {
+        ESP_LOGW(TAG, "volume '%s' formatted from the web UI", volume.c_str());
+    }
+    return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/files/download?volume=<id>&path=<rel>
+// ─────────────────────────────────────────────────────
+// Streams the file to the client in chunks (no Content-Length — the response
+// is chunked, exactly like the static-file handler), so a 21 MB file costs
+// only the shared transfer window, not a buffer of its size.
+//
+// Content-Disposition carries both a plain quoted name (for old clients) and
+// the RFC 5987 UTF-8 form, so a Cyrillic file name survives the round-trip.
+
+namespace {
+
+/**
+ * @brief Shared transfer window for file upload/download.
+ *
+ * The window is what makes a transfer independent of the file size: **512 KB
+ * allocated in PSRAM** (the agreed size), with a smaller fallback in the
+ * internal heap when PSRAM is unavailable, and finally `nullptr` — the caller
+ * then uses its own 1 KB stack buffer. The httpd task serves one request at a
+ * time, so a single shared allocation is safe and saves a 512 KB alloc/free
+ * per request.
+ */
+uint8_t* ioBuffer(size_t& outSize)
+{
+    static uint8_t* buf = nullptr;
+    static size_t size = 0;
+
+    if (buf == nullptr && size == 0) {
+        constexpr size_t kPreferred = 512 * 1024;
+        constexpr size_t kFallback = 64 * 1024;
+
+        buf = static_cast<uint8_t*>(
+            heap_caps_malloc(kPreferred, MALLOC_CAP_SPIRAM));
+        size = kPreferred;
+        if (buf == nullptr) {
+            buf = static_cast<uint8_t*>(
+                heap_caps_malloc(kFallback, MALLOC_CAP_DEFAULT));
+            size = kFallback;
+        }
+        if (buf == nullptr) {
+            ESP_LOGW(TAG, "no transfer buffer available, using 1 KB window");
+        } else {
+            ESP_LOGI(TAG, "file transfer window: %u KB",
+                     (unsigned)(size / 1024));
+        }
+    }
+
+    outSize = size;
+    return buf;
+}
+
+/**
+ * @brief Percent-encode for `filename*=UTF-8''…` (RFC 5987).
+ *
+ * Everything outside the `attr-char` set is escaped; the result is ASCII, so
+ * it is safe in an HTTP header even for a UTF-8 name.
+ */
+std::string rfc5987Encode(const std::string& in)
+{
+    static const char* kHex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        const bool attrChar =
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '!' || c == '#' || c == '$' || c == '&' || c == '+' ||
+            c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
+            c == '|' || c == '~';
+        if (attrChar) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += kHex[c >> 4];
+            out += kHex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+/** @brief ASCII-safe replacement for the quoted `filename=` parameter. */
+std::string asciiName(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F) continue;       // never in a header value
+        out += (u < 0x80) ? c : '_';
+    }
+    if (out.empty()) out = "download";
+    return out;
+}
+
+} // namespace
+
+esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
+    }
+    if (!queryParam(req, "path", path)) path = "/";
+
+    std::unique_ptr<::dhcp::files::IFileSource> src;
+    std::string detail;
+    const auto st = s_files->openRead(volume, path, src, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    std::string norm;
+    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
+    const std::string name = ::dhcp::storage::PathUtil::basename(norm);
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    std::string disposition = "attachment; filename=\"" + asciiName(name) +
+                              "\"; filename*=UTF-8''" + rfc5987Encode(name);
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+
+    size_t bufSize = 0;
+    uint8_t* buf = ioBuffer(bufSize);
+    uint8_t stackBuf[1024];
+    if (buf == nullptr) {
+        buf = stackBuf;
+        bufSize = sizeof(stackBuf);
+    }
+
+    ESP_LOGI(TAG, "download %s (%llu bytes, volume %s)", norm.c_str(),
+             (unsigned long long)src->size(), volume.c_str());
+
+    while (true) {
+        const size_t n = src->read(buf, bufSize);
+        if (n == 0) break;   // EOF (or an error — the client sees a short body)
+        if (httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buf), n) != ESP_OK) {
+            ESP_LOGW(TAG, "download %s aborted by the client", norm.c_str());
+            return ESP_OK;
+        }
+    }
+
+    httpd_resp_send_chunk(req, nullptr, 0);   // terminate the chunked body
+    if (src->error()) {
+        ESP_LOGE(TAG, "download %s ended with a read error", norm.c_str());
+    }
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/files/upload?volume=<id>&path=<rel>
+// ─────────────────────────────────────────────────────
+// Raw body (`application/octet-stream`), streamed to the volume in windows
+// through the shared PSRAM buffer: the file is written to `<name>.part` and
+// only renamed into place once the whole body arrived, so an interrupted
+// upload never leaves a truncated file under the real name.
+//
+//   ?volume=fat&path=/logs/2026-09-15.txt
+//
+// Answers 200 {"status":"ok","bytes":N,"path":"…"} on success; 411 when the
+// body length is missing (a chunked upload cannot be space-checked), 507 when
+// the volume cannot hold it, 500 when the write or the final rename fails.
+
+esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
+    }
+    if (!queryParam(req, "path", path)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    // The free-space check needs to know the size up front; browsers always
+    // send Content-Length for a file body.
+    if (req->content_len <= 0) {
+        httpd_resp_set_status(req, "411 Length Required");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Content-Length required\"}");
+        return ESP_OK;
+    }
+
+    const uint64_t expected = static_cast<uint64_t>(req->content_len);
+
+    std::unique_ptr<::dhcp::files::IFileSink> sink;
+    std::string detail;
+    auto st = s_files->openWrite(volume, path, expected, sink, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    size_t bufSize = 0;
+    uint8_t* buf = ioBuffer(bufSize);
+    uint8_t stackBuf[1024];
+    if (buf == nullptr) {
+        buf = stackBuf;
+        bufSize = sizeof(stackBuf);
+    }
+
+    // httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between TCP segments of
+    // a multi-chunk body — the same bounded retry as the other upload handlers.
+    uint64_t remaining = expected;
+    int retries = 0;
+    bool ok = true;
+    while (remaining > 0) {
+        const size_t want = static_cast<size_t>(
+            (remaining < bufSize) ? remaining : bufSize);
+        const int got = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
+        if (got < 0) {
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
+            ok = false;
+            break;
+        }
+        if (got == 0) {
+            ok = false;
+            break;
+        }
+        if (!sink->write(buf, static_cast<size_t>(got))) {
+            ok = false;
+            break;
+        }
+        remaining -= static_cast<uint64_t>(got);
+    }
+
+    if (!ok || !sink->commit()) {
+        sink->abort();
+        ESP_LOGE(TAG, "upload into '%s' failed after %llu of %llu bytes",
+                 path.c_str(), (unsigned long long)sink->written(),
+                 (unsigned long long)expected);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"upload failed\",\"detail\":\"incomplete or write error\"}");
+        return ESP_OK;
+    }
+
+    std::string norm;
+    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
+
+    std::string json = "{\"status\":\"ok\"";
+    addJsonInt(json, "bytes", static_cast<int64_t>(sink->written()), true);
+    addJsonString(json, "path", norm, true);
+    json += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET/POST /api/files/text?volume=<id>&path=<rel>
+// ─────────────────────────────────────────────────────
+// Text read/write for the built-in editor. The whole file travels in one JSON
+// document, so there is a hard limit (`IFileManager::kMaxTextBytes`, 512 KB)
+// and the content must actually be text: a binary file is refused with `415`
+// (downloading it still works), and a file that grew past the limit is refused
+// with `413`.
+//
+//   GET  → {"volume":"fat","path":"/notes.txt","size":42,"mtime":1757971200,
+//           "truncated":false,"text":"…"}
+//   POST ← {"volume":"fat","path":"/notes.txt","text":"…","mtime":1757971200}
+//
+// `mtime` is optional but recommended on save: when it is present and differs
+// from the file on the volume, the write is refused with `409` instead of
+// silently overwriting somebody else's change.
+
+namespace {
+
+/** @brief Share of "control-ish" bytes above which a file counts as binary. */
+constexpr size_t kBinaryRatioPercent = 10;
+
+/**
+ * @brief Decode one JSON string value, escapes included.
+ *
+ * The lightweight `jsonGetStr()` used for the settings bodies stops at the
+ * first quote, which is fine for short single-line values but would corrupt a
+ * text file: newlines arrive escaped (`\n`) and a `\"` inside the content would
+ * truncate the value. The editor endpoint therefore decodes properly —
+ * `\" \\ \/ \b \f \n \r \t` and `\uXXXX` (with surrogate pairs) — and converts
+ * to UTF-8.
+ *
+ * @return false when the key is missing or the value is not a valid string.
+ */
+bool jsonDecodeStr(const std::string& json, const std::string& key, std::string& out)
+{
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return false;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return false;
+    ++pos;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
+    if (pos >= json.size() || json[pos] != '"') return false;
+    ++pos;
+
+    /** @brief Append one code point as UTF-8. */
+    auto appendUtf8 = [&out](uint32_t cp) {
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+
+    out.clear();
+    while (pos < json.size()) {
+        const char c = json[pos++];
+        if (c == '"') return true;                // end of the value
+
+        if (c != '\\') {
+            out += c;
+            continue;
+        }
+        if (pos >= json.size()) return false;     // dangling escape
+
+        const char esc = json[pos++];
+        switch (esc) {
+            case '"':  out += '"';  break;
+            case '\\': out += '\\'; break;
+            case '/':  out += '/';  break;
+            case 'b':  out += '\b'; break;
+            case 'f':  out += '\f'; break;
+            case 'n':  out += '\n'; break;
+            case 'r':  out += '\r'; break;
+            case 't':  out += '\t'; break;
+            case 'u': {
+                if (pos + 4 > json.size()) return false;
+                uint32_t cp = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const char h = json[pos + i];
+                    int v = (h >= '0' && h <= '9') ? h - '0'
+                          : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+                          : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+                    if (v < 0) return false;
+                    cp = (cp << 4) | static_cast<uint32_t>(v);
+                }
+                pos += 4;
+
+                // Surrogate pair → one code point above the BMP.
+                if (cp >= 0xD800 && cp <= 0xDBFF && pos + 6 <= json.size() &&
+                    json[pos] == '\\' && json[pos + 1] == 'u') {
+                    uint32_t lo = 0;
+                    bool ok = true;
+                    for (int i = 0; i < 4; ++i) {
+                        const char h = json[pos + 2 + i];
+                        int v = (h >= '0' && h <= '9') ? h - '0'
+                              : (h >= 'a' && h <= 'f') ? h - 'a' + 10
+                              : (h >= 'A' && h <= 'F') ? h - 'A' + 10 : -1;
+                        if (v < 0) { ok = false; break; }
+                        lo = (lo << 4) | static_cast<uint32_t>(v);
+                    }
+                    if (ok && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        pos += 6;
+                    }
+                }
+                appendUtf8(cp);
+                break;
+            }
+            default:
+                return false;   // unknown escape — refuse rather than guess
+        }
+    }
+    return false;   // unterminated string
+}
+
+/**
+ * @brief Cheap binary heuristic for the editor.
+ *
+ * A NUL byte is decisive (text files never contain one), otherwise the share
+ * of bytes outside tab/CR/LF/printable/UTF-8 is measured — a UTF-8 text file
+ * with a few odd bytes in a comment still passes, a JPEG or a `.dat` does not.
+ */
+bool looksLikeText(const std::string& data)
+{
+    if (data.find('\0') != std::string::npos) return false;
+
+    size_t suspicious = 0;
+    for (unsigned char c : data) {
+        if (c == '\t' || c == '\n' || c == '\r') continue;
+        if (c >= 0x20 && c != 0x7F) continue;   // printable ASCII or UTF-8 byte
+        ++suspicious;
+    }
+    return suspicious * 100 <= data.size() * kBinaryRatioPercent;
+}
+
+} // namespace
+
+esp_err_t RestApi::handleGetFileText(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    std::string volume, path;
+    if (!queryParam(req, "volume", volume)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
+    }
+    if (!queryParam(req, "path", path)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    ::dhcp::files::FileEntry info;
+    std::string detail;
+    auto st = s_files->stat(volume, path, info, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+    if (info.isDir) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+    if (info.size > ::dhcp::files::IFileManager::kMaxTextBytes) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::TooLarge, "{}");
+    }
+
+    std::unique_ptr<::dhcp::files::IFileSource> src;
+    st = s_files->openRead(volume, path, src, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    std::string text;
+    text.reserve(static_cast<size_t>(info.size));
+    {
+        uint8_t buf[2048];
+        while (true) {
+            const size_t n = src->read(buf, sizeof(buf));
+            if (n == 0) break;
+            text.append(reinterpret_cast<const char*>(buf), n);
+            if (text.size() > ::dhcp::files::IFileManager::kMaxTextBytes) {
+                return sendFileResult(req, ::dhcp::files::FileStatus::TooLarge, "{}");
+            }
+        }
+    }
+    if (src->error()) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::IoError, "{}", &detail);
+    }
+    if (!looksLikeText(text)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotText, "{}");
+    }
+
+    std::string norm;
+    if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
+
+    FileJson::TextPayload payload;
+    payload.volume = volume;
+    payload.path = norm;
+    payload.text = text;
+    payload.size = text.size();
+    payload.mtime = info.mtime;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, FileJson::text(payload).c_str());
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostFileText(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    // The body carries the whole text, and JSON escaping can double its size
+    // (a file made of newlines/quotes), so the read cap is twice the editor
+    // limit plus the small envelope; anything longer is refused after parsing.
+    const std::string body =
+        readBody(req, ::dhcp::files::IFileManager::kMaxTextBytes * 2 + 4096);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    // `text` must be the LAST member: the envelope fields are read from the
+    // part of the body before it, so a file whose content happens to contain
+    // `"mtime":0` (documentation, JSON samples, …) cannot hijack the parsing.
+    const size_t textKey = body.find("\"text\"");
+    if (textKey == std::string::npos) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+    const std::string envelope = body.substr(0, textKey);
+
+    const std::string volume = jsonGetStr(envelope, "volume");
+    const std::string path = jsonGetStr(envelope, "path");
+    const int64_t clientMtime = jsonGetInt(envelope, "mtime", -1);
+
+    std::string text;
+    if (!jsonDecodeStr(body, "text", text)) {
+        // A missing or malformed `text` member: report it as a bad request the
+        // same way every other file endpoint does.
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    if (text.size() > ::dhcp::files::IFileManager::kMaxTextBytes) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::TooLarge, "{}");
+    }
+    if (!looksLikeText(text)) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::NotText, "{}");
+    }
+
+    // Optimistic-locking: only when the client sends the mtime it read.
+    ::dhcp::files::FileEntry info;
+    std::string detail;
+    const auto statSt = s_files->stat(volume, path, info, &detail);
+    const bool existed = (statSt == ::dhcp::files::FileStatus::Ok);
+    if (existed && info.isDir) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+    if (existed && clientMtime >= 0 &&
+        static_cast<uint64_t>(clientMtime) != info.mtime) {
+        ESP_LOGW(TAG, "text save refused: %s changed on the volume", path.c_str());
+        return sendFileResult(req, ::dhcp::files::FileStatus::Conflict, "{}");
+    }
+
+    std::unique_ptr<::dhcp::files::IFileSink> sink;
+    auto st = s_files->openWrite(volume, path, text.size(), sink, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    if (!text.empty() &&
+        !sink->write(reinterpret_cast<const uint8_t*>(text.data()), text.size())) {
+        sink->abort();
+        return sendFileResult(req, ::dhcp::files::FileStatus::IoError, "{}", &detail);
+    }
+    if (!sink->commit()) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::IoError, "{}", &detail);
+    }
+
+    ::dhcp::files::FileEntry after;
+    const uint64_t mtime =
+        (s_files->stat(volume, path, after) == ::dhcp::files::FileStatus::Ok)
+            ? after.mtime : 0;
+
+    std::string json = "{\"status\":\"ok\"";
+    addJsonInt(json, "size", static_cast<int64_t>(text.size()), true);
+    addJsonInt(json, "mtime", static_cast<int64_t>(mtime), true);
+    json += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET/POST /api/files/settings
+// ─────────────────────────────────────────────────────
+// Access policy of the file explorer. `allow_own_subnet` (default ON) keeps
+// browsing/uploading inside the device's own subnet; the subnet itself is the
+// device address + netmask from the DHCP settings (same definition as the DNS
+// and NTP filters), so this page has no address field of its own.
+
+esp_err_t RestApi::handleGetFileSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const auto cfg = ::dhcp::core::Config::instance().getFiles();
+    const auto net = ::dhcp::core::Config::instance().getDhcp();
+
+    FileJson::SettingsPayload payload;
+    payload.enabled = s_files ? s_files->supported() : false;
+    payload.allowOwnSubnet = cfg.allowOwnSubnet;
+    payload.filterActive = s_files ? s_files->filterActive() : false;
+    payload.subnetAddress = net.serverIp;
+    payload.subnetMask = net.subnet;
+    payload.blockedCount =
+        s_files ? static_cast<uint64_t>(s_files->foreignBlocked()) : 0;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, FileJson::settings(payload).c_str());
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostFileSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+
+    const std::string body = readBody(req);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    auto cfg = ::dhcp::core::Config::instance().getFiles();
+    cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", cfg.allowOwnSubnet);
+    ::dhcp::core::Config::instance().setFiles(cfg);
+
+    if (s_files) s_files->applyAccessFilter();
+    ESP_LOGI(TAG, "file settings updated (allow_own_subnet=%d)",
+             (int)cfg.allowOwnSubnet);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+/*
+ * Read-only volume check ("Check for errors").
+ *
+ * POST starts a walk that reads every file of the volume: on a card that is
+ * many gigabytes that takes minutes, so the handler answers immediately and the
+ * page polls GET — the same shape the built-in cache persistence uses. GET is
+ * also the only way the UI learns the outcome: the report is a snapshot, so a
+ * poll in mid-walk is not an error.
+ */
+esp_err_t RestApi::handlePostFileCheck(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req, 512);
+    const std::string volume = jsonGetStr(body, "volume");
+    if (volume.empty()) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    std::string detail;
+    const auto st = s_files->checkStart(volume, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"started\"}");
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostFileCheckCancel(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    // Only sets a flag: the walk stops at its next step, so this answers at once.
+    s_files->checkCancel();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handleGetFileCheck(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        ::dhcp::web::FileJson::check(s_files->checkReport()).c_str());
     return ESP_OK;
 }
 

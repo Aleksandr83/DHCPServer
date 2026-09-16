@@ -77,6 +77,8 @@ static const char* KEY_TIME_LOG_URL   = "time_log_url";
 static const char* KEY_TIME_LOG_AUTH  = "time_log_auth";
 static const char* KEY_TIME_LOG_AUTH_U = "time_log_auth_u";
 static const char* KEY_TIME_LOG_AUTH_P = "time_log_auth_p";
+// File explorer settings (NVS keys limited to 15 chars).
+static const char* KEY_FILES_ALLOW_LAN = "files_allow_lan";
 
 namespace dhcp {
 namespace core {
@@ -579,6 +581,20 @@ void Config::setTime(const TimeConfig& cfg)
     writeI32(KEY_TIME_LOG_AUTH, cfg.logAuthEnabled ? 1 : 0);
     writeStr(KEY_TIME_LOG_AUTH_U, cfg.logAuthUser);
     writeStr(KEY_TIME_LOG_AUTH_P, cfg.logAuthPassword);
+}
+
+// ─── File explorer (FAT volumes) ────────────────────
+
+FileConfig Config::getFiles() const
+{
+    FileConfig cfg;
+    cfg.allowOwnSubnet = readI32(KEY_FILES_ALLOW_LAN, 1) != 0;   // default ON
+    return cfg;
+}
+
+void Config::setFiles(const FileConfig& cfg)
+{
+    writeI32(KEY_FILES_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
 }
 
 } // namespace core

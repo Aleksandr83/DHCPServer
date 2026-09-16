@@ -12,7 +12,13 @@
 
     <main class="container">
         <h1 data-i18n="app.title">DHCPServer</h1>
-        <p data-i18n="app.subtitle">DHCP &amp; Caching DNS Server</p>
+        <!-- The description and the device uptime share one line: the uptime is
+             a secondary reading next to the title, not a status row of its own
+             (the rows below are the live services). -->
+        <div class="subtitle-row">
+            <p data-i18n="app.subtitle">DHCP &amp; Caching DNS Server</p>
+            <span class="uptime" id="uptime"></span>
+        </div>
         <div id="status">
             <div class="status-row">
                 <span class="status-label" data-i18n="app.device_time">Device date/time:</span>
@@ -65,7 +71,33 @@
                         </div>
                     </div>
                 </div>
-            </div>            <div class="status-row" id="internal-cache-row" style="display:none;">
+            </div>
+            <!-- Storage meters — internal FAT data partition and microSD card,
+                 filled from `/api/status` (`volumes`, the same array the file
+                 explorer serves). The row hides itself on a build without FAT
+                 volumes and on firmware that predates the field. -->
+            <div class="status-row" id="storage-row" style="display:none;">
+                <span class="status-label" data-i18n="app.storage">Storage:</span>
+                <div class="status-value ram-meter">
+                    <div class="core-meter" id="fat-meter">
+                        <span class="core-label" id="fat-label" data-i18n="app.vol_fat">Internal</span>
+                        <div class="meter-track"><div class="meter-fill disk-fill" id="fat-bar"></div></div>
+                        <div class="ram-values">
+                            <span class="ram-total" id="fat-total">--</span>
+                            <span class="ram-free" id="fat-free"></span>
+                        </div>
+                    </div>
+                    <div class="core-meter" id="sd-meter">
+                        <span class="core-label" id="sd-label" data-i18n="app.vol_sd">microSD</span>
+                        <div class="meter-track"><div class="meter-fill disk-fill" id="sd-bar"></div></div>
+                        <div class="ram-values">
+                            <span class="ram-total" id="sd-total">--</span>
+                            <span class="ram-free" id="sd-free"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="status-row" id="internal-cache-row" style="display:none;">
                 <span class="status-label" data-i18n="app.internal_cache">Internal DNS Cache:</span>
                 <div class="status-value ram-meter">
                     <div class="core-meter">

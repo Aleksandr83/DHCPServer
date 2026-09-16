@@ -14,6 +14,7 @@ namespace dhcp { class IDhcpServer; }
 namespace dns  { class DnsServer; }
 namespace time { class TimeServer; }
 namespace web  { class AuthManager; }
+namespace files { class IFileManager; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -28,7 +29,8 @@ public:
                      ::dhcp::dhcp::IDhcpServer* dhcpSrv,
                      ::dhcp::dns::DnsServer* dnsSrv,
                      ::dhcp::time::TimeServer* timeSrv,
-                     ::dhcp::web::AuthManager* auth);
+                     ::dhcp::web::AuthManager* auth,
+                     ::dhcp::files::IFileManager* fileMgr = nullptr);
 
     static esp_err_t handleGetStatus(httpd_req* req);
     static esp_err_t handleGetVersion(httpd_req* req);
@@ -60,11 +62,38 @@ public:
     static esp_err_t handlePostTimeSettings(httpd_req* req);
     static esp_err_t handleGetTimeNow(httpd_req* req);
     static esp_err_t handlePostTimeSet(httpd_req* req);
+    // File explorer (FAT volumes)
+    static esp_err_t handleGetFileVolumes(httpd_req* req);
+    static esp_err_t handleGetFileList(httpd_req* req);
+    static esp_err_t handlePostFileMkdir(httpd_req* req);
+    static esp_err_t handlePostFileRename(httpd_req* req);
+    static esp_err_t handlePostFileDelete(httpd_req* req);
+    static esp_err_t handlePostFileFormat(httpd_req* req);
+    static esp_err_t handleGetFileDownload(httpd_req* req);
+    static esp_err_t handlePostFileUpload(httpd_req* req);
+    static esp_err_t handleGetFileText(httpd_req* req);
+    static esp_err_t handlePostFileText(httpd_req* req);
+    static esp_err_t handleGetFileSettings(httpd_req* req);
+    static esp_err_t handlePostFileSettings(httpd_req* req);
+    // Read-only volume check ("Check for errors")
+    static esp_err_t handlePostFileCheck(httpd_req* req);
+    static esp_err_t handlePostFileCheckCancel(httpd_req* req);
+    static esp_err_t handleGetFileCheck(httpd_req* req);
 
 private:
     static bool checkAuth(httpd_req* req);
+    /**
+     * @brief LAN-only gate for the file endpoints.
+     *
+     * Uses the **socket** peer address (never `X-Forwarded-For`: a client
+     * must not be able to talk itself into the allowed subnet) and the filter
+     * from `IFileManager`. Answers `403` itself.
+     */
+    static bool checkFileAccess(httpd_req* req);
     static esp_err_t respondUnauthorized(httpd_req* req);
     static std::string getClientIp(httpd_req* req);
+    /** @brief Peer IPv4 of the request in host byte order (0 when unknown). */
+    static uint32_t getClientIp4(httpd_req* req);
 
     static void addJsonString(std::string& json, const std::string& key,
                               const std::string& val, bool addComma);
@@ -79,6 +108,7 @@ private:
     static ::dhcp::dns::DnsServer*     s_dns;
     static ::dhcp::time::TimeServer*   s_time;
     static ::dhcp::web::AuthManager*   s_auth;
+    static ::dhcp::files::IFileManager* s_files;
 };
 
 } // namespace web

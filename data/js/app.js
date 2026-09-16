@@ -199,6 +199,20 @@ async function postJSON(url, data) {
     return resp.json();
 }
 
+/* Show/hide the "Files" nav entry according to the build's capability.
+   Called once per page load (the flag is a build property, not a setting). */
+async function applyFilesNavVisibility() {
+    const item = document.getElementById('nav-files');
+    if (!item) return;
+
+    try {
+        const status = await fetchJSON('/api/status');
+        item.style.display = status.files_enabled ? 'block' : 'none';
+    } catch (e) {
+        console.warn('files_enabled check failed:', e);
+    }
+}
+
 /* Toggle the mobile hamburger menu */
 function toggleNav() {
     const navbar = document.querySelector('.navbar');
@@ -235,6 +249,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Re-apply translations after dynamic content
     applyTranslations();
 
+    // The Files explorer needs FAT volumes — present only on the ESP32-P4
+    // build (flash data partition + microSD). /api/status reports that as
+    // `files_enabled`, and the nav entry stays hidden until we know, so a
+    // classic ESP32 never shows a dead menu item.
+    await applyFilesNavVisibility();
+
     // Close any open dropdown when clicking elsewhere
     document.addEventListener('click', (e) => {
         if (!e.target.closest('.nav-dropdown')) {
@@ -263,6 +283,19 @@ function setMeter(id, pct) {
     if (!bar) return;
     const v = Math.max(0, Math.min(100, Math.round(pct)));
     bar.style.width = v + '%';
+}
+
+/* Byte sizes on the status page: kilobytes for the on-chip memories, megabytes
+   or gigabytes for the FAT volumes (21 MB partition / multi-GB cards), so a
+   single helper covers both RAM and storage rows. */
+function formatBytes(bytes) {
+    const b = Number(bytes) || 0;
+    if (b < 1024) return b + ' B';
+    const kb = b / 1024;
+    if (kb < 1024) return kb.toFixed(0) + ' KB';
+    const mb = kb / 1024;
+    if (mb < 1024) return mb.toFixed(mb < 10 ? 1 : 0) + ' MB';
+    return (mb / 1024).toFixed(2) + ' GB';
 }
 
 /* Device time for DISPLAY: the API/browser fields use the ISO-ish wire format
@@ -302,6 +335,22 @@ async function updateDeviceTime() {
 async function updateStatus() {
     try {
         const data = await fetchJSON('/api/status');
+
+        // Uptime next to the page title: one unit, the largest that fits —
+        // seconds, then minutes, hours and days — because a raw second count
+        // would be noise in the header.
+        const uptimeEl = document.getElementById('uptime');
+        if (uptimeEl && data.uptime_sec != null) {
+            const sec = Math.max(0, Math.floor(Number(data.uptime_sec) || 0));
+            const days = Math.floor(sec / 86400);
+            const hours = Math.floor(sec / 3600);
+            const mins = Math.floor(sec / 60);
+            const value = days >= 1 ? days + ' ' + tr('app.uptime_days')
+                        : hours >= 1 ? hours + ' ' + tr('app.uptime_hours')
+                        : mins >= 1 ? mins + ' ' + tr('app.uptime_min')
+                        : sec + ' ' + tr('app.uptime_sec');
+            uptimeEl.textContent = tr('app.uptime') + ' ' + value;
+        }
         const dhcpEl = document.getElementById('dhcp-status');
         if (dhcpEl) {
             dhcpEl.textContent = data.dhcp_running ? tr('status.running') : tr('status.stopped');
@@ -337,9 +386,9 @@ async function updateStatus() {
             : (data.heap_total != null ? data.heap_total : 320 * 1024);
         const ramFree = data.heap_free != null ? data.heap_free : 0;
         const ramTotalEl = document.getElementById('ram-total');
-        if (ramTotalEl) ramTotalEl.textContent = (ramTotal / 1024).toFixed(0) + ' KB';
+        if (ramTotalEl) ramTotalEl.textContent = formatBytes(ramTotal);
         const freeRamEl = document.getElementById('free-ram');
-        if (freeRamEl) freeRamEl.textContent = (ramFree / 1024).toFixed(0) + ' KB free';
+        if (freeRamEl) freeRamEl.textContent = formatBytes(ramFree) + ' ' + tr('app.free_short');
         if (document.getElementById('ram-bar')) {
             setMeter('ram-bar', ramTotal > 0 ? (1 - ramFree / ramTotal) * 100 : 0);
         }
@@ -350,15 +399,62 @@ async function updateStatus() {
             if (psramTotal > 0) {
                 psramEl.style.display = '';
                 const psramTotalEl = document.getElementById('psram-total');
-                if (psramTotalEl) psramTotalEl.textContent = (psramTotal / 1024).toFixed(0) + ' KB';
+                if (psramTotalEl) psramTotalEl.textContent = formatBytes(psramTotal);
                 const freePsramEl = document.getElementById('free-psram');
-                if (freePsramEl) freePsramEl.textContent = (psramFree / 1024).toFixed(0) + ' KB free';
+                if (freePsramEl) freePsramEl.textContent = formatBytes(psramFree) + ' ' + tr('app.free_short');
                 if (document.getElementById('psram-bar')) {
                     setMeter('psram-bar', (1 - psramFree / psramTotal) * 100);
                 }
             } else {
                 psramEl.style.display = 'none';
             }
+        }
+        // Storage meters — the internal FAT partition and the microSD card.
+        // The data comes from `/api/status` (`volumes`), which is the same
+        // array the file explorer serves; an older firmware has no such field,
+        // so the row simply stays hidden until one arrives.
+        const storageRow = document.getElementById('storage-row');
+        if (storageRow) {
+            const vols = Array.isArray(data.volumes) ? data.volumes : [];
+            const fat = vols.find(v => v.id === 'fat');
+            const sd = vols.find(v => v.id === 'sd');
+            storageRow.style.display = (fat || sd) ? '' : 'none';
+
+            const renderVolume = (vol, labelId, barId, totalId, freeId) => {
+                const labelEl = document.getElementById(labelId);
+                const totalEl = document.getElementById(totalId);
+                const freeEl = document.getElementById(freeId);
+                // The label column is narrow, so the mount point lives in the
+                // tooltip rather than in the text.
+                if (labelEl) labelEl.title = vol && vol.mount_point ? vol.mount_point : '';
+                if (!vol) {
+                    if (totalEl) totalEl.textContent = '--';
+                    if (freeEl) freeEl.textContent = '';
+                    setMeter(barId, 0);
+                    return;
+                }
+                // Nothing to measure on an unusable volume: say so instead of
+                // drawing a zero-capacity bar. "Not mounted" is deliberate —
+                // with no card-detect line the firmware cannot tell an empty
+                // slot from a card it failed to mount. The driver's own error
+                // stays in the tooltip only: a line like "mount failed (4-bit):
+                // ESP_ERR_TIMEOUT; mount failed (1-bit): …" is a diagnostic, not
+                // something to read on the home page (the Files page still
+                // shows it next to the volume).
+                const mounted = !!vol.mounted && vol.total_bytes > 0;
+                if (totalEl) {
+                    totalEl.textContent = mounted ? formatBytes(vol.total_bytes) : tr('app.not_mounted');
+                    totalEl.title = vol.error || '';
+                }
+                if (freeEl) {
+                    freeEl.textContent = mounted
+                        ? formatBytes(vol.free_bytes) + ' ' + tr('app.free_short') : '';
+                }
+                setMeter(barId, mounted ? (1 - vol.free_bytes / vol.total_bytes) * 100 : 0);
+            };
+
+            renderVolume(fat, 'fat-label', 'fat-bar', 'fat-total', 'fat-free');
+            renderVolume(sd, 'sd-label', 'sd-bar', 'sd-total', 'sd-free');
         }
         // Static bindings NVS storage usage
         const sbEl = document.getElementById('static-bindings-usage');
