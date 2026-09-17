@@ -342,6 +342,17 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                    static_cast<int64_t>(st.freeBytes), true);
         addJsonInt(json, "internal_cache_hits", icHits, true);
         addJsonInt(json, "internal_cache_avg_hit_us", avgUs, true);
+        // Usage frequency (stage 104): how often names were needed, and the
+        // record that was needed most. The name is the high-water mark kept by
+        // the cache — reading the live maximum would mean walking the whole
+        // PSRAM pool on every poll, holding the arena lock while DNS waits.
+        addJsonInt(json, "internal_cache_uses_total",
+                   static_cast<int64_t>(st.usesTotal), true);
+        addJsonInt(json, "internal_cache_uses_max",
+                   static_cast<int64_t>(st.usesMax), true);
+        addJsonString(json, "internal_cache_top_name", st.topName, true);
+        addJsonInt(json, "internal_cache_top_qtype",
+                   static_cast<int64_t>(st.topQtype), true);
         addJsonInt(json, "internal_forward_count", fwd, true);
     }
     addJsonString(json, "firmware_version",

@@ -186,6 +186,31 @@
 
         refreshWebUiUploadState();   // the markup already starts out disabled
 
+        // The chosen folder, kept so the line can be written again on a language
+        // switch: the label is built at runtime and therefore carries no
+        // `data-i18n` (applyTranslations() would overwrite it), and the shared
+        // `i18n-applied` event is the hook for exactly that case.
+        let webuiPick = null;
+
+        function renderWebUiPick() {
+            if (!webuiPick) return;
+            // "файлов: 26 · папка: data" — labels and numbers, not a sentence:
+            // a counted noun would need plural forms in both languages, and this
+            // line says the same thing without them. What it must name is the
+            // **folder** and how much is in it, never the first entry: the picker
+            // reports its files in its own order, so naming one of them made the
+            // page look like it was about that one file. The folder is the first
+            // segment of any relative path (`data/pages/x.html` → `data`).
+            webuiName.removeAttribute('data-i18n');
+            webuiName.textContent =
+                (translations?.webupdate?.file_count || 'files') + ': ' +
+                webuiPick.count + ' · ' +
+                (translations?.webupdate?.folder || 'folder') + ': ' +
+                webuiPick.folder;
+        }
+
+        document.addEventListener('i18n-applied', renderWebUiPick);
+
         webuiBrowseBtn.addEventListener('click', () => {
             webuiStatus('');   // same rule: opening the picker clears the last result
             webuiInput.click();
@@ -195,13 +220,14 @@
             refreshWebUiUploadState();
             const files = Array.from(webuiInput.files || []);
             if (files.length) {
-                // Remove the data-i18n attribute so applyTranslations() does
-                // not overwrite the runtime status text on language switch.
-                webuiName.removeAttribute('data-i18n');
-                webuiName.textContent = files.length + ' ' +
-                    (translations?.webupdate?.file_count || 'files') + ': ' +
-                    (files[0].webkitRelativePath || files[0].name);
+                const first = files[0].webkitRelativePath || files[0].name;
+                webuiPick = {
+                    count: files.length,
+                    folder: first.indexOf('/') >= 0 ? first.split('/')[0] : '.',
+                };
+                renderWebUiPick();
             } else {
+                webuiPick = null;
                 webuiName.setAttribute('data-i18n', 'webupdate.no_folder');
                 applyTranslations();
             }

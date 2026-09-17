@@ -51,6 +51,21 @@ Get overall system status.
 > `internal_cache_hits`, `internal_cache_avg_hit_us` — average µs of a
 > successful PSRAM-cache lookup, `internal_forward_count`).
 >
+> The cache block also answers **how often names are needed**:
+> `internal_cache_uses_total` (every counted use since the cache was enabled —
+> one per query that involved the cache, see below),
+> `internal_cache_uses_max` (the highest counter a single record has reached)
+> and the record behind it — `internal_cache_top_name` / `internal_cache_top_qtype`,
+> empty/0 while nothing has been counted. That name is a **high-water mark kept
+> in O(1) per use**: reading the live maximum would walk the whole PSRAM pool
+> (up to 59 520 records) on every poll while holding the arena lock, and DNS
+> queries would wait behind it. A record may therefore have been evicted since
+> it set the mark.
+>
+> Both usage counters **saturate** at `UINT64_MAX`: a counter that has reached
+> its maximum stays there instead of wrapping through zero, so a record can never
+> look unused — and be evicted first — because its count rolled over.
+>
 > `uptime_sec` is the device uptime in seconds since boot, read from the raw
 > `esp_timer` counter and therefore independent of the time service: the home
 > page keeps showing its “Uptime” row even while NTP is disabled, and
@@ -436,9 +451,13 @@ already running; `404 Not Found` — no cache file yet; `500` — the background
 job could not start.
 
 **File format:** binary, little-endian — 16-byte header (`"DCC1"` magic,
-u32 version=1, u32 entryCount, u32 reserved), then per entry: nameLen u8 +
-name, qtype u16, nA u8, nAAAA u8, remaining-ttl u32, then nA×4 B IPv4 and
-nAAAA×16 B IPv6 raw bytes.
+u32 version=2, u32 entryCount, u32 reserved), then per entry: nameLen u8 +
+name, qtype u16, nA u8, nAAAA u8, remaining-ttl u32, **usage counter u64**, then
+nA×4 B IPv4 and nAAAA×16 B IPv6 raw bytes. The counter was added in version 2
+(stage 104) so that the frequency of a name survives a save/load — the file is
+read back with the same counters instead of counting the restore as a use per
+record. Version 1 files (written before the counter existed) are still accepted
+and their records come back with `uses == 0`.
 
 ---
 

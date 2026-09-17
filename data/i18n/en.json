@@ -399,6 +399,7 @@
     "browse": "Choose folder",
     "no_folder": "No folder selected",
     "file_count": "files",
+    "folder": "folder",
     "upload": "Upload",
     "uploading": "Uploading...",
     "progress": "files",

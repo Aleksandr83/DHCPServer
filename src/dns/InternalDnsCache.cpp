@@ -95,6 +95,17 @@ bool InternalDnsCache::enable(size_t sizeMb)
     nodes_ = reinterpret_cast<Node*>(arena + bucketBytes);
     nodeCount_ = nodeCount;
 
+    // Initialise the bucket heads. The arena comes from memset(0), so an empty
+    // bucket would otherwise read **0** — and 0 is a perfectly valid node index.
+    // That made every unused bucket a chain into node 0: while node 0 was still
+    // free it happened to terminate (its `next` was the free-list link, so walks
+    // crawled the free list first), but as soon as the pool filled up and node 0
+    // became a real record, storing into an empty bucket wrote
+    // `n.next = buckets_[b] = 0` — the node pointed at itself and every chain
+    // walk (a lookup, an eviction) spun forever. `-1` is the terminator the walk
+    // loops already expect, and `clear()` has always set it.
+    for (uint32_t i = 0; i < numBuckets_; i++) buckets_[i] = -1;
+
     // Initialise the free-node stack.
     freeHead_ = -1;
     for (int32_t i = 0; i < nodeCount_; i++) {
@@ -105,6 +116,8 @@ bool InternalDnsCache::enable(size_t sizeMb)
     hits_ = 0;
     misses_ = 0;
     evicted_ = 0;
+    usesTotal_ = 0;
+    resetTop();
 
     ESP_LOGI(TAG, "Internal DNS cache enabled: %u MB arena, %u buckets, "
              "%d entries max (%u bytes PSRAM used)",
@@ -127,6 +140,7 @@ void InternalDnsCache::disable()
     entries_ = 0;
     arenaBytes_ = 0;
     sizeMb_ = 0;
+    resetTop();   // no arena — nothing to report about
     unlock();
 }
 
@@ -185,19 +199,23 @@ int InternalDnsCache::findNode(uint32_t bucket, uint32_t hash,
     return -1;
 }
 
-// Walk every bucket chain and return the used node with the smallest
-// store timestamp (oldest). Used for overflow eviction.
-int InternalDnsCache::findOldestUsed(int* bucketOut) const
+// Walk every bucket chain and return the used node with the lowest usage
+// counter (ties: the oldest store time). Used for overflow eviction — the
+// record nobody asks for goes first, not merely the one stored earliest.
+int InternalDnsCache::findEvictVictim(int* bucketOut) const
 {
     int best = -1;
-    uint32_t bestMs = UINT32_MAX;
+    uint64_t bestUses = UINT64_MAX;
+    uint64_t bestMs = UINT64_MAX;   // storedMs cannot turn over, so smallest = oldest
     for (uint32_t b = 0; b < numBuckets_; b++) {
         for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
-            if (nodes_[idx].storedMs < bestMs) {
-                bestMs = nodes_[idx].storedMs;
-                best = idx;
-                if (bucketOut) *bucketOut = static_cast<int>(b);
-            }
+            const Node& n = nodes_[idx];
+            if (best >= 0 && n.uses > bestUses) continue;
+            if (n.uses == bestUses && n.storedMs >= bestMs) continue;
+            bestUses = n.uses;
+            bestMs = n.storedMs;
+            best = idx;
+            if (bucketOut) *bucketOut = static_cast<int>(b);
         }
     }
     return best;
@@ -240,6 +258,16 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
                              const std::vector<std::string>& ips,
                              uint32_t ttl)
 {
+    // A query needed this name (either because the cache missed, or because a
+    // local/upstream answer is being kept) — that is one use of the record.
+    storeInternal(domain, qtype, ips, ttl, /*countUse=*/true, 0);
+}
+
+void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
+                                     const std::vector<std::string>& ips,
+                                     uint32_t ttl, bool countUse,
+                                     uint64_t usesExact)
+{
     if (!arena_) return;
     if (domain.empty() || ips.empty()) return;
     // Only A (IPv4) and AAAA (IPv6) answers are cached.
@@ -257,11 +285,12 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
     // Upsert existing entry (domain + type).
     int idx = findNode(b, h, lname.c_str(), qtype);
     if (idx < 0) {
-        // New entry — need a free node (evict the oldest if the pool is full).
+        // New entry — need a free node (evict the least used if the pool is
+        // full).
         idx = allocNode();
         if (idx < 0) {
             int oldBucket = 0;
-            int victim = findOldestUsed(&oldBucket);
+            int victim = findEvictVictim(&oldBucket);
             if (victim < 0) {  // pool full but nothing to evict — should not happen
                 unlock();
                 return;
@@ -277,6 +306,8 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
         Node& n = nodes_[idx];
         n.hash = h;
         n.qtype = qtype;
+        n.uses = 0;   // a recycled node must not inherit the previous count
+        n.storedMs = now;
         memcpy(n.name, lname.c_str(), lname.size() + 1);
         n.next = buckets_[b];
         buckets_[b] = idx;
@@ -284,7 +315,7 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
     }
 
     Node& n = nodes_[idx];
-    n.storedMs = static_cast<uint32_t>(now);
+    n.storedMs = now;
     n.ttl = ttl;
     n.nA = 0;
     n.nAAAA = 0;
@@ -303,7 +334,53 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
         }
     }
 
+    // Counter last, so it sees the final record: a refresh keeps the old count
+    // and adds today's use; a restore writes the value that was saved.
+    if (countUse) {
+        bumpUse(n);
+    } else {
+        n.uses = usesExact;
+        noteTop(n);
+    }
+
     unlock();
+}
+
+// Saturating +1 on a record's counter, plus the O(1) bookkeeping the status
+// needs: the running total and the high-water "hottest name" mark.
+//
+// Both counters **saturate**: a counter that has reached its maximum stays
+// there instead of wrapping through zero. For a usage counter a wrap is not
+// just a wrong number — `uses` is what the eviction orders by, so a record
+// that rolled over to 0 would look like the least used one and be thrown out
+// first, and the running total would report that names were never used.
+void InternalDnsCache::bumpUse(Node& n)
+{
+    if (n.uses != UINT64_MAX) n.uses++;
+    if (usesTotal_ != UINT64_MAX) usesTotal_++;
+    noteTop(n);
+}
+
+// A record whose counter reached the highest value so far becomes the new
+// mark. "The same value twice" also refreshes the mark, so the reported name
+// is one that is actually in the cache at the moment it was passed.
+void InternalDnsCache::noteTop(const Node& n)
+{
+    if (n.uses == 0) return;   // a record nobody used is not a candidate
+    if (topValid_ && n.uses < topUses_) return;
+    topUses_ = n.uses;
+    topQtype_ = n.qtype;
+    memcpy(topName_, n.name, sizeof(topName_));
+    topName_[sizeof(topName_) - 1] = '\0';
+    topValid_ = true;
+}
+
+void InternalDnsCache::resetTop()
+{
+    topUses_ = 0;
+    topQtype_ = 0;
+    topName_[0] = '\0';
+    topValid_ = false;
 }
 
 bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
@@ -328,10 +405,12 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
     }
 
     Node& n = nodes_[idx];
-    const uint64_t ageSec = (nowMs() - n.storedMs) / 1000ULL;
+    // One age for both decisions below (two clock reads could straddle a
+    // millisecond and disagree).
+    const uint64_t elapsed = nowMs() - n.storedMs;
 
     // Honoring TTL: an entry older than its TTL is a miss and is purged.
-    if (!ignoreTtl_ && n.ttl != 0 && ageSec >= n.ttl) {
+    if (!ignoreTtl_ && n.ttl != 0 && elapsed / 1000ULL >= n.ttl) {
         unlinkNode(b, idx);
         evicted_++;
         misses_++;
@@ -363,7 +442,8 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
     }
 
     // Remaining TTL (when expiry is honored) or the original TTL (ignore).
-    const uint64_t elapsed = nowMs() - n.storedMs;
+    // The expiry check above guarantees elapsed < ttl*1000, so this is not
+    // negative.
     if (ignoreTtl_ || n.ttl == 0) {
         ttl = n.ttl;
     } else {
@@ -371,6 +451,9 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
         ttl = static_cast<uint32_t>((remainMs + 999) / 1000ULL);  // ceil to seconds
     }
 
+    // The record served the client — that is one use of this name (an expired
+    // or empty answer above returned early and is not counted).
+    bumpUse(n);
     hits_++;
     unlock();
     return true;
@@ -390,6 +473,10 @@ void InternalDnsCache::clear()
         freeHead_ = i;
     }
     entries_ = 0;
+    // Every record is gone, so a "hottest name" holding one of them would be
+    // a claim about nothing. The running total stays (it counts uses, not
+    // records) — it is reset only when the arena is created anew.
+    resetTop();
     unlock();
     ESP_LOGI(TAG, "Internal DNS cache cleared");
 }
@@ -399,16 +486,21 @@ void InternalDnsCache::clear()
 // ─────────────────────────────────────────────────────
 //
 // Binary layout (little-endian):
-//   header (16 B): magic "DCC1" (4) | u32 version (=1) | u32 entryCount | u32 reserved(0)
+//   header (16 B): magic "DCC1" (4) | u32 version | u32 entryCount | u32 reserved(0)
 //   per entry:
 //     u8  nameLen, name[nameLen]
 //     u16 qtype
 //     u8  nA, u8 nAAAA
 //     u32 ttlRemainingSec
+//     u64 uses            (version 2 only)
 //     nA  × 4 B  (IPv4, network byte order)
 //     nAAAA × 16 B (IPv6)
+//
+// Version 1 files (written before the usage counter existed) are still read:
+// their records come back with uses == 0.
 namespace {
-constexpr uint32_t kFileVersion = 1;
+constexpr uint32_t kFileVersion = 2;      // written now
+constexpr uint32_t kFileVersionMin = 1;   // still readable
 constexpr uint32_t kMaxNameSave = 127;
 
 void putU32(uint8_t* d, uint32_t v)
@@ -424,6 +516,16 @@ uint32_t getU32(const uint8_t* s)
            (static_cast<uint32_t>(s[1]) << 8) |
            (static_cast<uint32_t>(s[2]) << 16) |
            (static_cast<uint32_t>(s[3]) << 24);
+}
+void putU64(uint8_t* d, uint64_t v)
+{
+    for (int i = 0; i < 8; i++) d[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+}
+uint64_t getU64(const uint8_t* s)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v |= static_cast<uint64_t>(s[i]) << (8 * i);
+    return v;
 }
 } // namespace
 
@@ -454,7 +556,8 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
             for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
                 const Node& n = nodes_[idx];
                 if (n.name[0] == '\0') continue;
-                if (!ignoreTtl_ && n.ttl != 0 && (now - n.storedMs) / 1000ULL >= n.ttl) {
+                if (!ignoreTtl_ && n.ttl != 0 &&
+                    (now - n.storedMs) / 1000ULL >= n.ttl) {
                     continue;  // already expired — skip
                 }
                 keep++;
@@ -478,7 +581,8 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
             for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
                 const Node& n = nodes_[idx];
                 if (n.name[0] == '\0') continue;
-                if (!ignoreTtl_ && n.ttl != 0 && (now - n.storedMs) / 1000ULL >= n.ttl) {
+                if (!ignoreTtl_ && n.ttl != 0 &&
+                    (now - n.storedMs) / 1000ULL >= n.ttl) {
                     continue;
                 }
                 snap[s++] = idx;
@@ -549,6 +653,15 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         putU32(tail + 4, ttlRem);
         if (fwrite(tail, 1, sizeof(tail), f) != sizeof(tail)) { ok = false; break; }
 
+        // Usage counter (version 2): the frequency survives a save/load, so a
+        // restored cache keeps its eviction order and its "hottest name".
+        uint8_t usesBuf[8];
+        putU64(usesBuf, n.uses);
+        if (fwrite(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) {
+            ok = false;
+            break;
+        }
+
         if (n.nA > 0 && fwrite(n.a4, 4, n.nA, f) != n.nA) { ok = false; break; }
         for (uint16_t i = 0; i < n.nAAAA && ok; i++) {
             if (fwrite(n.a6[i], 1, 16, f) != 16) { ok = false; break; }
@@ -598,7 +711,8 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
         fclose(f);
         return false;
     }
-    if (memcmp(hdr, "DCC1", 4) != 0 || getU32(hdr + 4) != kFileVersion) {
+    const uint32_t ver = (memcmp(hdr, "DCC1", 4) == 0) ? getU32(hdr + 4) : 0;
+    if (ver < kFileVersionMin || ver > kFileVersion) {
         ESP_LOGW(TAG, "loadFromFile: %s has unsupported header", path);
         fclose(f);
         return false;
@@ -627,6 +741,15 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
         const uint32_t ttlRem = getU32(tail + 4);
         if (nA > 16 || nAAAA > 8) break;
 
+        // Version 2 carries the usage counter; version 1 files simply have
+        // none, and their records come back counted as never used.
+        uint64_t uses = 0;
+        if (ver >= 2) {
+            uint8_t usesBuf[8];
+            if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
+            uses = getU64(usesBuf);
+        }
+
         std::vector<std::string> ips;
         bool entryOk = true;
         if (qtype == 1) {
@@ -647,7 +770,9 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
             break;
         }
         if (!entryOk || ips.empty()) break;
-        store(name, qtype, ips, ttlRem);
+        // A restore writes the saved counter as it is — store() would count
+        // the load itself as a use and inflate every record by one.
+        storeInternal(name, qtype, ips, ttlRem, /*countUse=*/false, uses);
         loaded++;
 
         // Report progress periodically.
@@ -695,6 +820,12 @@ InternalDnsCache::Stats InternalDnsCache::stats() const
     s.hits = hits_;
     s.misses = misses_;
     s.evicted = evicted_;
+    s.usesTotal = usesTotal_;
+    s.usesMax = topUses_;
+    if (topValid_) {
+        s.topName.assign(topName_);
+        s.topQtype = topQtype_;
+    }
     const size_t nodeSize = sizeof(Node);
     s.usedBytes = entries_ * nodeSize;
     s.freeBytes = (nodeCount_ > static_cast<int32_t>(entries_))

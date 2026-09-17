@@ -19,7 +19,38 @@ namespace dns {
  *
  * Chained hash table, FNV-1a over the lowercased domain; the qtype is part of
  * the key. Each node stores up to 16 IPv4 (A) and 8 IPv6 (AAAA) addresses,
- * the original TTL and the store timestamp.
+ * the original TTL, the store timestamp and a usage counter.
+ *
+ * Store timestamp (`Node::storedMs`) — "when the record was put in":
+ * milliseconds since boot over 64 bits, refreshed on every store() (a fresh
+ * upstream answer makes the record young again). 64 bits because the age is
+ * obtained by **subtracting this value from the clock**: with 32 bits the
+ * counter turns over every 49.7 days, and after that turnover every record
+ * stored since it is reported as ~49.7 days old — an expiry on the very first
+ * read, which left the cache unable to hold anything until a reboot. At 64 bits
+ * the value reaches its maximum in ~584 million years, so it never turns over
+ * and the age is a plain difference. The width costs ~2 % of the record pool
+ * (352 → 360 bytes per record, 20 MB: 59 520 → 58 197 entries) — a deliberate
+ * trade against a wrap that no arithmetic could repair. The field answers four
+ * questions: is the record expired (aging in `lookup()` and when writing the
+ * file), how much of its TTL is left for the client, which record is the oldest
+ * when a full pool has to drop one, and how much lifetime to write into the
+ * file. It is not the DNS TTL of the answer (that is `ttl`), not a "last used"
+ * mark (the record has none — `uses` only counts), and it is not persisted (the
+ * file carries the remaining TTL instead).
+ *
+ * Usage counter (`Node::uses`, 64-bit): how often the name was needed — one
+ * per hit in lookup() and one per store(), so every query that involves the
+ * cache adds exactly one (a hit is answered from the cache and is not stored,
+ * a miss is stored and does not hit). A restored record keeps its saved
+ * counter, and the counter survives a refresh of the same name/type; it is
+ * zeroed only when the node is handed out of the free pool, so a recycled
+ * node can never inherit the count of the record it replaced. The counter
+ * **saturates** at UINT64_MAX instead of wrapping through zero (the same rule
+ * as the running total of the status): a record that rolled over to 0 would
+ * look like the least used one and be evicted first. Two uses of
+ * the number: the eviction policy (the least used record goes first, ties
+ * broken by the oldest store time) and the “hottest name” the status reports.
  *
  * TTL semantics:
  *   - ignoreTtl() == false (default): an entry older than its TTL is a miss
@@ -151,6 +182,16 @@ public:
         uint64_t hits = 0;
         uint64_t misses = 0;
         uint64_t evicted = 0;  // purged/evicted entries (overflow + TTL purge)
+        // Usage counters.
+        uint64_t usesTotal = 0;  // counted uses since the cache was enabled
+        uint64_t usesMax = 0;    // high-water mark of one record's counter
+        // The name behind usesMax (empty when nothing has been counted yet).
+        // It is a high-water mark, not a live reading: the record may have
+        // been evicted since, in which case the mark stays until another name
+        // passes it. Cheaper than a scan of the whole pool on every poll,
+        // which would hold the arena lock and stall DNS.
+        std::string topName;
+        uint16_t topQtype = 0;
         // Approximate data bytes actually stored / free in the node pool.
         size_t usedBytes = 0;   // entries × node size
         size_t freeBytes = 0;   // (capacity − entries) × node size
@@ -166,8 +207,12 @@ private:
         uint16_t nA;        // number of IPv4 addresses
         uint16_t nAAAA;     // number of IPv6 addresses
         uint16_t _pad;
-        uint32_t storedMs;  // store timestamp (ms)
+        // Store timestamp: milliseconds since boot, 64-bit on purpose — the age
+        // is this value subtracted from the clock, and a 32-bit millisecond
+        // counter turns over every 49.7 days (see the class comment).
+        uint64_t storedMs;
         uint32_t ttl;       // original TTL (seconds)
+        uint64_t uses;      // usage counter (0 on a node handed out of the pool)
         char     name[128]; // lowercased domain, NUL-terminated
         uint32_t a4[16];    // up to 16 IPv4 (network byte order)
         uint8_t  a6[8][16]; // up to 8 IPv6
@@ -177,12 +222,27 @@ private:
     static std::string lower(const std::string& s);
     static uint64_t nowMs();
 
+    // store() and loadFromFile() share this body; they differ only in what
+    // happens to the usage counter:
+    //   countUse == true  → the name was just needed: counter grows by one
+    //   countUse == false → a restore: counter is written as usesExact
+    void storeInternal(const std::string& domain, uint16_t qtype,
+                       const std::vector<std::string>& ips, uint32_t ttl,
+                       bool countUse, uint64_t usesExact);
+    // Saturating +1 plus the running total and the high-water "hottest" mark.
+    void bumpUse(Node& n);
+    // High-water mark only (a restored counter is what it is — not a use now).
+    void noteTop(const Node& n);
+    void resetTop();
+
     uint32_t bucketOf(uint32_t hash) const { return hash % numBuckets_; }
     int  findNode(uint32_t bucket, uint32_t hash,
                   const char* name, uint16_t qtype) const;
     int  allocNode();
     void freeNode(int idx);
-    int  findOldestUsed(int* bucketOut) const;
+    // Eviction victim: the least used record, ties broken by the oldest store
+    // time (a record never hit has uses == 1 and the oldest one goes first).
+    int  findEvictVictim(int* bucketOut) const;
     void unlinkNode(uint32_t bucket, int idx);
     void lock() const;
     void unlock() const;
@@ -199,6 +259,14 @@ private:
     mutable uint64_t hits_ = 0;
     mutable uint64_t misses_ = 0;
     uint64_t evicted_ = 0;
+    // Usage bookkeeping (see the class comment): a monotonic total and the
+    // high-water "hottest name" mark, both maintained in O(1) per use so that
+    // stats() never walks the pool.
+    uint64_t usesTotal_ = 0;
+    uint64_t topUses_ = 0;
+    uint16_t topQtype_ = 0;
+    char     topName_[128] = {0};
+    bool     topValid_ = false;
     bool     ignoreTtl_ = false;
     void*    mutex_ = nullptr;    // SemaphoreHandle_t
 };

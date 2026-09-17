@@ -19,7 +19,7 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 - **DHCPv4 Server** — configurable IP range, subnet, gateway, lease time, static MAC→IP bindings (enable + per-host DNS override)
 - **DNS Proxy** — pipeline: logging → local hosts → **internal (PSRAM) cache** → external cache (REST) → forwarding to external DNS
 - **Block non-A/AAAA forwarding** — optional toggle on DNS Setup: queries of any type other than A/AAAA that are not answered from local hosts get an immediate NODATA reply and are never sent to the external cache/upstream (the client falls back to A/AAAA)
-- **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache
+- **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache. Every record carries a **usage counter**: it grows by one for each answer served from the cache and for each answer stored, the **least used** record is evicted when the pool fills up, and the status reports the total and the most-used name (the cache file keeps the counters, format version 2)
 - **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
 - **Time Server (NTP)** — the device syncs its clock from an external NTP server (SNTP) and serves UTC time to LAN clients over NTP (UDP 123; configurable external NTP server, re-sync interval, named timezone selection with a custom-offset fallback; clock sync and serving can be switched on/off independently; optional terminal/REST logging of served requests). Until the clock has been synchronised (or set by hand) the server answers with LI=3/stratum 16 (RFC 5905) instead of a wrong time. The date/time can also be **set manually** from the web interface — typed in the selected timezone or taken from the computer's clock, and values earlier than the firmware build time are refused (the board has no battery-backed RTC)
 - **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). The **file explorer applies the same rule** to `/api/files/*` (a foreign client gets `403`). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
@@ -236,7 +236,7 @@ Access: `http://192.168.1.201` (default static IP)
 | DHCP ▾ Static Bindings | `/pages/dhcp_static.html` | Static MAC→IP bindings (enable/DNS) |
 | DHCP ▾ Logging | `/pages/dhcp_logging.html` | DHCP REST logging (URL/auth/Test) |
 | DNS ▾ Setup | `/pages/dns_setup.html` | DNS forwarding, mode/address, query filters (LAN-only, non-A/AAAA blocking) |
-| DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, save/load `cache.dat` with progress |
+| DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, usage frequency (names used, most-used record), save/load `cache.dat` with progress |
 | DNS ▾ External Cache | `/pages/dns_cache.html` | External REST cache URL, cache stats |
 | DNS ▾ Local Hosts | `/pages/dns_local_hosts.html` | Local domain→IP mappings |
 | DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
@@ -407,7 +407,11 @@ Modules with no ESP-IDF dependency are compiled and run **on the PC** (fast,
 no board needed) — this is how `Subnet`, `TimeMath`, `PathUtil`,
 `MultipartExtractor` and the file-explorer JSON writers (`FileJson` /
 `JsonWriter`) are verified, with a small `host_main.cpp` shim that just calls
-`esp_test_app_main()`:
+`esp_test_app_main()`. Code that does touch ESP-IDF can be covered the same way
+when the run needs a controllable environment: `test/test_internalcache.cpp`
+builds against the stand-ins in `test/stubs` (capability allocator, a clock the
+test moves, a FreeRTOS mutex that does nothing, lwIP's `inet_pton`/`inet_ntop`)
+and asks for `-DDHCP_TEST_HOST`:
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I. \
@@ -437,6 +441,7 @@ Test files:
 - `test/test_jobregistry.cpp` — rules of the job list behind the scheduler page (one-off removal, repeats, paused operations, cancellation) — host-runnable
 - `test/test_multipart.cpp` — `MultipartExtractor` for OTA bodies (any chunk size) — host-runnable
 - `test/test_filejson.cpp` — file-explorer/storage JSON payloads + structural comma checks — host-runnable
+- `test/test_internalcache.cpp` — the PSRAM DNS cache: usage counter (hit, store, refresh, recycled node), least-used eviction, TTL expiry, save/load roundtrip (format v2), a version 1 file and the counter saturating at the maximum instead of wrapping through zero — host-only (`-DDHCP_TEST_HOST -I test/stubs`, link `-lws2_32`): the stub clock makes TTL expiry testable without sleeping, and the test fills the whole pool, which is where it found the uninitialised bucket heads
 
 > No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
 > has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4
