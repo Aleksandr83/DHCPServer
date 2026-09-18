@@ -14,6 +14,13 @@
 namespace dhcp {
 namespace files {
 
+// Defined in TransferEngine.h. They are only declared here so that the manager
+// can take a request and hand back a report without dragging the engine into
+// every user of this header — the engine includes *this* file for `FileStatus`
+// and `FileEntry`, so the dependency has to stay one-way.
+struct TransferRequest;
+struct TransferReport;
+
 /**
  * @brief Outcome of a file-explorer operation.
  *
@@ -297,6 +304,41 @@ public:
 
     /** @brief Snapshot of the running/last check (safe to call any time). */
     virtual CheckReport checkReport() = 0;
+
+    /**
+     * @brief Names in @p req that already exist in the destination directory.
+     *
+     * Answers the question the UI has to ask before a batch starts: "these three
+     * names are taken, replace them?". Only the selected entries are looked at,
+     * never their contents, which is both what "ask once per entry" means and
+     * what keeps this cheap enough to run inside an HTTP handler: N `stat()`
+     * calls, no walk.
+     *
+     * @param[out] names Basenames of the entries whose destination name is taken.
+     */
+    virtual FileStatus transferConflicts(const TransferRequest& req,
+                                         std::vector<std::string>& names,
+                                         std::string* detail = nullptr) = 0;
+
+    /**
+     * @brief Start copying or moving files/directories between two volumes.
+     *
+     * The transfer runs in a task of its own — a directory of a card is
+     * gigabytes, and the httpd has to stay answerable while it happens — so
+     * this returns as soon as the job is accepted; poll @ref transferReport for
+     * progress and the result, @ref transferCancel to stop it.
+     *
+     * One transfer at a time (a second start is refused with
+     * @ref FileStatus::Busy), and never while a format owns a volume.
+     */
+    virtual FileStatus transferStart(const TransferRequest& req,
+                                     std::string* detail = nullptr) = 0;
+
+    /** @brief Ask a running transfer to stop (returns immediately). */
+    virtual void transferCancel() = 0;
+
+    /** @brief Snapshot of the running/last transfer (safe to call any time). */
+    virtual void transferReport(TransferReport& out) = 0;
 
     /**
      * @brief Re-read the LAN-only flag and the device subnet from the config.

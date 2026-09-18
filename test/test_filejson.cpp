@@ -487,6 +487,13 @@ int test_all_builders_well_formed()
     job.titleKey = "jobs.file_check";
     ASSERT_WELL_FORMED(FileJson::jobs({job}));
     ASSERT_WELL_FORMED(FileJson::jobs({}));
+
+    ::dhcp::files::TransferReport transfer;
+    transfer.srcVolume = "sd";
+    transfer.dstVolume = "fat";
+    transfer.dstPath = "/backup";
+    ASSERT_WELL_FORMED(FileJson::transfer(transfer));
+    ASSERT_WELL_FORMED(FileJson::transferConflicts({}));
     return 0;
 }
 
@@ -546,6 +553,103 @@ int test_jobs_payload()
     return 0;
 }
 
+/** `GET /api/files/transfer`: the snapshot the Files page draws. */
+int test_transfer_payload()
+{
+    // A copy in flight: the bar uses done/total, and every counter the summary
+    // after the run needs is already in the payload.
+    ::dhcp::files::TransferReport running;
+    running.phase = ::dhcp::files::TransferPhase::Copying;
+    running.busy = true;
+    running.op = ::dhcp::files::TransferOp::Copy;
+    running.srcVolume = "sd";
+    running.dstVolume = "fat";
+    running.dstPath = "/backup";
+    running.current = "/photos/a.jpg";
+    running.doneBytes = 65536;
+    running.totalBytes = 41943040;
+    running.neededBytes = 41943040;
+    running.freeBytes = 20971520;
+    running.filesDone = 2;
+    running.filesTotal = 38;
+    running.dirsDone = 1;
+    running.dirsTotal = 2;
+
+    const std::string body = FileJson::transfer(running);
+    TEST_ASSERT_STR_EQ(body,
+        "{\"phase\":\"copying\",\"busy\":true,\"finished\":false,"
+        "\"cancelled\":false,\"instant\":false,\"op\":\"copy\","
+        "\"src_volume\":\"sd\",\"dst_volume\":\"fat\",\"dst_path\":\"/backup\","
+        "\"current\":\"/photos/a.jpg\",\"done_bytes\":65536,"
+        "\"total_bytes\":41943040,\"needed_bytes\":41943040,"
+        "\"free_bytes\":20971520,\"files_done\":2,\"files_total\":38,"
+        "\"dirs_done\":1,\"dirs_total\":2,\"skipped\":0,\"failed\":0,"
+        "\"deleted\":0,\"error\":\"\",\"error_path\":\"\"}");
+    ASSERT_WELL_FORMED(body);
+
+    // Measuring: no byte has moved yet, and `total_bytes == 0` is the signal the
+    // page needs to draw an indeterminate bar instead of dividing by zero.
+    ::dhcp::files::TransferReport measuring;
+    measuring.phase = ::dhcp::files::TransferPhase::Measuring;
+    measuring.busy = true;
+    measuring.filesTotal = 120;
+    const std::string probing = FileJson::transfer(measuring);
+    TEST_ASSERT_TRUE(probing.find("\"phase\":\"measuring\"") != std::string::npos);
+    TEST_ASSERT_TRUE(probing.find("\"total_bytes\":0") != std::string::npos);
+    ASSERT_WELL_FORMED(probing);
+
+    // A same-volume move is a rename: `instant`, no byte copied — the page must
+    // not show a bar for it.
+    ::dhcp::files::TransferReport instant;
+    instant.phase = ::dhcp::files::TransferPhase::Done;
+    instant.finished = true;
+    instant.instant = true;
+    instant.op = ::dhcp::files::TransferOp::Move;
+    instant.filesDone = 3;
+    instant.deleted = 3;
+    const std::string renamed = FileJson::transfer(instant);
+    TEST_ASSERT_TRUE(renamed.find("\"instant\":true") != std::string::npos);
+    TEST_ASSERT_TRUE(renamed.find("\"op\":\"move\"") != std::string::npos);
+    TEST_ASSERT_TRUE(renamed.find("\"deleted\":3") != std::string::npos);
+    ASSERT_WELL_FORMED(renamed);
+
+    // Cancelled with a failure: both survive, with the path it happened on — that
+    // is the whole summary the operator gets after a partial run.
+    ::dhcp::files::TransferReport stopped;
+    stopped.phase = ::dhcp::files::TransferPhase::Done;
+    stopped.finished = true;
+    stopped.cancelled = true;
+    stopped.skipped = 1;
+    stopped.failed = 1;
+    stopped.error = "not enough free space on the destination";
+    stopped.errorPath = "/backup/photos";
+    const std::string partial = FileJson::transfer(stopped);
+    TEST_ASSERT_TRUE(partial.find("\"cancelled\":true") != std::string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"skipped\":1") != std::string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"failed\":1") != std::string::npos);
+    TEST_ASSERT_TRUE(partial.find("not enough free space") != std::string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"error_path\":\"/backup/photos\"") != std::string::npos);
+    ASSERT_WELL_FORMED(partial);
+    return 0;
+}
+
+/** The `409` answer that makes the page ask about taken names. */
+int test_transfer_conflicts_payload()
+{
+    const std::string none = FileJson::transferConflicts({});
+    TEST_ASSERT_STR_EQ(none, "{\"status\":\"conflict\",\"conflicts\":[]}");
+    ASSERT_WELL_FORMED(none);
+
+    // Names travel as they are: a volumne may hold anything FAT allows, and the
+    // writer is the one place that knows how to escape it.
+    const std::string two = FileJson::transferConflicts({"photos", "отчёт 1.txt"});
+    TEST_ASSERT_STR_EQ(two,
+        "{\"status\":\"conflict\",\"conflicts\":[{\"name\":\"photos\"},"
+        "{\"name\":\"отчёт 1.txt\"}]}");
+    ASSERT_WELL_FORMED(two);
+    return 0;
+}
+
 } // namespace
 
 extern "C" {
@@ -570,6 +674,8 @@ void app_main()
     failures += test_volume_array();
     failures += test_check_report();
     failures += test_jobs_payload();
+    failures += test_transfer_payload();
+    failures += test_transfer_conflicts_payload();
     failures += test_checker_rejects_broken_documents();
     failures += test_all_builders_well_formed();
 

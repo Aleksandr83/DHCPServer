@@ -102,9 +102,28 @@
             if (!file) return;   // not reachable while the button is disabled
 
             const btn = fwBtn;
+
+            // Before the image is sent, the device writes what the "before
+            // reboot" switches ask for — and the operator gets to see it, and to
+            // say no when the cache could not be written. The flow is the same
+            // one the Reboot button runs (js/app.js); `saved=1` then tells the
+            // device there is nothing left for it to write before it restarts.
+            const stepLine = (text, cls) => {
+                fwStatus(`<p class="${cls || ''}"></p>`);
+                document.querySelector('#fw-status p').textContent = text;
+            };
+            // `'update'`: the question this flow may ask is about an *update*, not
+            // about a reboot — the device restarts after the image is installed, but
+            // what the operator is doing here is updating firmware.
+            const prepared = await prepareRestartFlow(stepLine, 'update');
+            if (prepared === 'cancelled') {
+                // The flow has already said what happened, and nothing was sent.
+                refreshFwUploadState();
+                return;
+            }
+
             btn.disabled = true;
             btn.textContent = translations?.update?.uploading || 'Uploading...';
-            fwStatus('');        // the run that starts now owns the line
 
             // Send the image as the raw request body — deliberately NOT as
             // multipart/form-data. The OTA endpoint writes the bytes it receives
@@ -115,7 +134,8 @@
             // new one also tolerates multipart, for curl --data-binary scripts),
             // which is what lets a device stuck on an older build update again.
             try {
-                const resp = await apiFetch('/api/ota/upload', {
+                const url = '/api/ota/upload' + (prepared === 'ready' ? '?saved=1' : '');
+                const resp = await apiFetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/octet-stream' },
                     body: file,
@@ -239,6 +259,22 @@
 
             const btn = webuiUploadBtn;
             const status = document.getElementById('webui-status');
+
+            // Overwriting the web interface deserves a question, and it is asked
+            // in the page (js/app.js `showDialog`) rather than by the browser:
+            // the native dialog cannot be translated or styled and is blocked in
+            // some embedded browsers. The label line is the same one the picker
+            // shows, so what is confirmed is what was chosen.
+            const answer = await showDialog({
+                title: tr('webupdate.confirm_title'),
+                hint: tr('webupdate.file_count') + ': ' + (webuiPick ? webuiPick.count : files.length) +
+                      ' · ' + tr('webupdate.folder') + ': ' + (webuiPick ? webuiPick.folder : '.') +
+                      '\n\n' + tr('webupdate.note'),
+                okLabel: tr('webupdate.upload'),
+                cancelLabel: tr('common.cancel'),
+            });
+            if (!answer) return;
+
             btn.disabled = true;
             webuiStatus('');   // the run that starts now owns the line (and cancels a pending clear)
 

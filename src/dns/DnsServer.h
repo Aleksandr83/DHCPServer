@@ -5,6 +5,7 @@
 #include "DnsCache.h"
 #include "DnsLogger.h"
 #include "InternalDnsCache.h"
+#include "RestartSaveJobState.h"
 #include "../dhcp/IDhcpServer.h"
 
 #include <string>
@@ -123,6 +124,124 @@ public:
                    : 0;
     }
 
+    // ─── Keeping state across a planned restart ───
+    /**
+     * @brief How one "keep it across the restart" step ended.
+     *
+     * The reboot paths call the steps unconditionally and ignore the result;
+     * `POST /api/device/reboot/prepare` reports it, because the Device
+     * Management page shows the operator what is being written.
+     */
+    enum class RestartSave {
+        Ok,            // statistics: the save job is running; cache: ditto
+        Skipped,       // the operator has the switch off (or the cache is absent)
+        NothingToSave, // the cache holds no entry — there is no file to update
+        Busy,          // a job of this kind was already in flight and will be waited for
+        Failed,
+    };
+
+    // ─── Statistics persistence (Statistica.dat on FAT) ───
+    /**
+     * @brief Keep the main-page counters across a restart.
+     *
+     * The three counters above live here and are never reset by anything but a
+     * reboot, so a restore simply seeds them and every later query keeps adding.
+     * The file is written before a restart (the reboot button, an OTA update, the
+     * terminal menu) and read back once at boot — deliberately **after** the
+     * built-in cache has been enabled, because `InternalDnsCache::enable()` zeroes
+     * the cache's own counters and would wipe an earlier restore.
+     *
+     * All three are no-ops while the operator has the flag off; the reboot paths
+     * call them unconditionally so they never have to know the policy.
+     */
+    bool restoreStatsFromFile();
+
+    /** @brief Drop the file — a factory reset must not keep statistics. */
+    bool deleteStatsFile();
+
+    /**
+     * @brief State of the statistics job, for GET /api/dns/stats/progress.
+     *
+     * Both fields come from one locked read on purpose: two calls would let a
+     * page see `busy=false` from the old run and `result=None` from the new one,
+     * which is exactly the "no verdict" state it treats as unknown.
+     */
+    struct StatsProgress {
+        bool busy = false;   // the background write is running
+        RestartSaveJobState::Verdict result = RestartSaveJobState::Verdict::None;
+        /// Why the last job failed, in the device's words ("cannot publish the
+        /// file"). It travels to the page because the terminal is not always
+        /// there — the operator has no serial console, which is exactly how a
+        /// failed write went unexplained once.
+        std::string detail;
+    };
+
+    /**
+     * @brief Start the background write of Statistica.dat (single-flight).
+     *
+     * The file is three numbers — 44 bytes — and it is still written on a task
+     * of its own, for the same reason the cache is: the reboot paths run on the
+     * single httpd task, and a file write there (a slow card, a filesystem
+     * hiccup) answers nobody else for as long as it takes. The operator asked
+     * for the two files to be treated alike, and they are: two jobs, because
+     * their switches are independent and the page shows them as two steps.
+     *
+     * @return Ok when the job was started, Skipped when the switch is off, Busy
+     * when one is already running (the caller waits for that one instead),
+     * Failed when the task could not be created.
+     */
+    RestartSave startStatsSaveJob();
+
+    /**
+     * @brief Write Statistica.dat before a planned restart and wait for it.
+     *
+     * For the paths that have no page to poll: an OTA update and the console's
+     * `reboot`. The wait is bounded by kPersistStallMs; a stuck job is logged
+     * and the restart continues, because the write is published with
+     * `.tmp` + `rename` and an unfinished one leaves the previous file intact.
+     */
+    bool saveStatsBeforeRestart();
+
+    /**
+     * @brief Wait for the statistics job to finish. Returns false when it was
+     * still running after @p stallMs milliseconds.
+     */
+    bool waitForStatsJob(uint32_t stallMs);
+
+    /**
+     * @brief Current statistics job state (busy + verdict of the last one).
+     */
+    StatsProgress statsProgress() const;
+
+    // ─── Keeping the cache itself across a planned restart ───
+    /**
+     * @brief Start the cache save a planned restart wants, without waiting.
+     *
+     * The caller is the one that knows how long it may wait, and that is the
+     * point of the split: `POST /api/device/reboot/prepare` returns at once so
+     * the page can poll the job's progress and only then ask for the restart,
+     * while the other paths (OTA, the console, a plain reboot call) use
+     * saveCacheBeforeRestart() below and wait inside the request.
+     */
+    RestartSave startCacheSaveForRestart();
+
+    /**
+     * @brief Write cache.dat before a planned restart, when the operator asked
+     * for it (`cacheInternalSaveCache`).
+     *
+     * The cache is far bigger than the statistics file, so this runs the normal
+     * background save job (`startPersistJob(true)`) and waits for it here: the
+     * file I/O must not happen on the caller's stack — the console's `reboot`
+     * runs on the ~3.5 KB main task, while the persist task owns a dedicated
+     * 8 KB one and is the path the web page already exercises.
+     *
+     * The wait is bounded and progress-aware: a job that stops moving for
+     * kPersistStallMs must not be able to keep the device from restarting.
+     * Returns true when the cache is on its way to the file (or when there was
+     * nothing to do because the flag is off), false when it could not be saved.
+     */
+    bool saveCacheBeforeRestart();
+
     // ─── Built-in cache persistence (cache.dat on FAT) ───
     /**
      * @brief Path of the built-in cache persistence file on the FAT partition.
@@ -132,11 +251,29 @@ public:
     static constexpr const char* kCacheDatPath = "/fat/cache.dat";
 
     /**
+     * @brief How long a save/load job may make no progress before a reboot path
+     * stops waiting for it (see saveCacheBeforeRestart()).
+     */
+    static constexpr uint32_t kPersistStallMs = 5000;
+
+    /**
+     * @brief How the last save/load ended, for clients that have to say it out
+     * loud (the Device Management page reports the step of a planned restart).
+     *
+     * `Empty` is not an error: a device that has not answered a query yet, or
+     * whose entries have all expired, has simply nothing to write — and telling
+     * the operator "the cache could not be saved" in that case is a lie a
+     * boolean could not avoid (it was the sole reason for this enum).
+     */
+    enum class PersistResult { None, Ok, Empty, Failed };
+
+    /**
      * @brief Progress of the running save/load job.
      */
     struct PersistProgress {
         bool     busy = false;   // a background job is running
         bool     isSave = false; // true=save, false=load
+        PersistResult result = PersistResult::None;  // outcome of the last finished job
         uint32_t done = 0;       // records processed so far
         uint32_t total = 0;      // total records (0 until known)
     };
@@ -148,11 +285,49 @@ public:
      * blocks the httpd task (web stays responsive) nor holds the arena mutex
      * for the whole operation. Progress is polled via persistProgress().
      * @param save true → cache → /fat/cache.dat; false → file → cache.
+     * @param force true → load even when the file's checksum does not match the
+     * one this device stored (the operator confirmed it on the page). A save is
+     * never forced: there is nothing to override there.
      * @return true when the job was started; false when another job is running,
      * the cache is disabled, or the operation is not possible (e.g. no file
      * to load).
      */
-    bool startPersistJob(bool save);
+    bool startPersistJob(bool save, bool force = false);
+
+    /**
+     * @brief State of the checksum the device keeps for its own cache file.
+     *
+     * The file is only loaded when it is the one this device wrote. Three ways
+     * the check can fail, and they are different things: the file is not there
+     * at all, the device has no checksum for it (fresh flash, factory reset, or
+     * a file put there by the explorer), or the checksum simply differs (a
+     * half-written file, a damaged block).
+     */
+    struct CacheFileMd5 {
+        bool fileExists = false;   // /fat/cache.dat is present
+        bool hasStored = false;    // the device remembers a checksum for it
+        bool match = false;        // and that is the checksum the file has now
+        bool readable = false;     // the file could be read at all
+        std::string fileMd5;       // digest of the file now (empty when unreadable)
+        std::string storedMd5;     // digest of the file as it was written
+    };
+
+    /**
+     * @brief Compare the stored checksum with the one the file has now.
+     *
+     * Reads the whole file (one pass, 4 KB at a time), so it costs what one read
+     * of the cache costs — callers are the reboot path and the load handler, not
+     * a polling path.
+     */
+    CacheFileMd5 checkCacheFileMd5();
+
+    /**
+     * @brief Remember @p md5 as the checksum of the cache file just written.
+     *
+     * Written through Config (NVS) immediately: the value has to survive the very
+     * restart it is meant to protect against.
+     */
+    bool storeCacheFileMd5(const std::string& md5);
 
     /**
      * @brief Current save/load progress (for GET .../progress).
@@ -181,11 +356,20 @@ private:
     // Task
     static void serverTask(void* arg);
     void serverLoop();
+    // Background write of Statistica.dat (startStatsSaveJob). Single-flight,
+    // like the cache job below; the two never share a task or a mutex.
+    static void statsJobTask(void* arg);
+    // The actual write, called by the job task. @p detail receives the device's
+    // own reason when the write failed (empty otherwise).
+    RestartSaveJobState::Verdict writeStatsNow(std::string& detail);
     // Background manual save/load job (startPersistJob). Single-flight. Also
     // used for the boot-time auto-restore from /fat/cache.dat.
     static void persistJobTask(void* arg);
     // Progress callback fed to InternalDnsCache::saveToFile/loadFromFile.
     static void onPersistProgress(uint32_t done, uint32_t total, void* ctx);
+    // Wait until no save/load job is running any more, as long as it keeps
+    // making progress. Returns false when it stalled for stallMs milliseconds.
+    bool waitForPersistJob(uint32_t stallMs);
 
     // DNS message parsing
     bool parseQuery(const uint8_t* buf, size_t len,
@@ -273,9 +457,23 @@ private:
     void*  persistJobMutex_ = nullptr;   // SemaphoreHandle_t
     bool   persistBusy_ = false;
     bool   persistSave_ = false;         // true=save, false=load
+    bool   persistForce_ = false;        // load even on a checksum mismatch
+    // Verdict of the last finished job. The page that polls the progress needs
+    // it: "busy went false" alone cannot tell "the cache is on the card" from
+    // "there was nothing to write" or "the write failed", and reporting a save
+    // that did not happen is worse than reporting nothing.
+    PersistResult persistResult_ = PersistResult::None;
     uint32_t persistDone_ = 0;
     uint32_t persistTotal_ = 0;
     TaskHandle_t persistTaskHandle_ = nullptr;
+
+    // Background statistics write state (startStatsSaveJob), guarded by
+    // statsJobMutex_. The rules it enforces — single-flight, a verdict the page
+    // reads, no inherited luck — are in RestartSaveJobState, where they are
+    // host-tested; here it is only the task and the mutex around it.
+    void*  statsJobMutex_ = nullptr;     // SemaphoreHandle_t
+    RestartSaveJobState statsJob_;
+    TaskHandle_t statsTaskHandle_ = nullptr;
 
     // External DNS server address
     uint32_t externalDnsIp_ = 0;

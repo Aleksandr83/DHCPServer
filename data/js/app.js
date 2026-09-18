@@ -199,6 +199,390 @@ async function postJSON(url, data) {
     return resp.json();
 }
 
+/* Wait for something without blocking the page — used by the dialogs and
+   by the restart preparation, which must let a message be read before the
+   next one replaces it. */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ─── In-page modal dialog ─────────────────────────── */
+
+/* Native window.prompt()/confirm() are blocked in some embedded browsers, and a
+   browser dialog cannot be styled, translated or screenshotted — so the UI asks
+   its questions here. This used to live in the file explorer only; it now serves
+   every page that needs an answer, which is why it took the explorer's exact
+   semantics (and its callers were left untouched).
+
+   Resolves with the typed value (input mode), `true` (confirm mode), 'extra'
+   (the optional third button) or null when the operator cancels or closes it. */
+let uiDialogResolve = null;
+
+function uiDialog() {
+    let modal = document.getElementById('ui-modal');
+    if (modal) return modal;
+
+    modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.id = 'ui-modal';
+    modal.style.display = 'none';
+    modal.innerHTML =
+        '<div class="modal-card" role="dialog" aria-modal="true">' +
+        '<h3 id="ui-modal-title"></h3>' +
+        '<p class="hint" id="ui-modal-hint" style="display:none;"></p>' +
+        '<input type="text" id="ui-modal-input" style="display:none;" maxlength="128">' +
+        '<div class="modal-actions">' +
+        '<button class="btn" id="ui-modal-cancel"></button>' +
+        '<button class="btn" id="ui-modal-extra" style="display:none;"></button>' +
+        '<button class="btn btn-primary" id="ui-modal-ok"></button>' +
+        '</div></div>';
+    document.body.appendChild(modal);
+
+    document.getElementById('ui-modal-ok').onclick = () => {
+        const input = document.getElementById('ui-modal-input');
+        closeDialog(input.style.display === 'none' ? true : input.value.trim());
+    };
+    document.getElementById('ui-modal-extra').onclick = () => closeDialog('extra');
+    document.getElementById('ui-modal-cancel').onclick = () => closeDialog(null);
+    document.getElementById('ui-modal-input').onkeydown = (e) => {
+        if (e.key === 'Enter') document.getElementById('ui-modal-ok').click();
+        if (e.key === 'Escape') closeDialog(null);
+    };
+    document.addEventListener('keydown', (e) => {
+        // Escape anywhere in the dialog closes it, not just in the input field.
+        if (e.key === 'Escape' && modal.style.display !== 'none') closeDialog(null);
+    });
+    return modal;
+}
+
+function closeDialog(result) {
+    const modal = document.getElementById('ui-modal');
+    if (modal) modal.style.display = 'none';
+    const resolve = uiDialogResolve;
+    uiDialogResolve = null;
+    if (resolve) resolve(result);
+}
+
+function showDialog({ title, hint, value, okLabel, cancelLabel, danger,
+                      withInput, extraLabel }) {
+    const modal = uiDialog();
+    const input = document.getElementById('ui-modal-input');
+    const hintEl = document.getElementById('ui-modal-hint');
+    const ok = document.getElementById('ui-modal-ok');
+    const extra = document.getElementById('ui-modal-extra');
+
+    document.getElementById('ui-modal-title').textContent = title;
+    hintEl.textContent = hint || '';
+    hintEl.style.display = hint ? '' : 'none';
+
+    input.style.display = withInput ? '' : 'none';
+    input.value = withInput ? (value || '') : '';
+
+    ok.textContent = okLabel || tr('common.ok');
+    ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
+    document.getElementById('ui-modal-cancel').textContent = cancelLabel || tr('common.cancel');
+    extra.textContent = extraLabel || '';
+    extra.style.display = extraLabel ? '' : 'none';
+
+    modal.style.display = 'flex';
+    if (withInput) {
+        input.focus();
+        input.select();
+    } else {
+        ok.focus();
+    }
+    return new Promise(resolve => { uiDialogResolve = resolve; });
+}
+
+/* ─── Preparing a planned restart ─────────────────── */
+
+/* A restart also writes what the "before reboot" switches ask for — the
+   statistics file and the cache. That must not happen silently: the cache is
+   megabytes, and a restart that *looks* instant while the device is still
+   writing is exactly what the operator cannot see. So the page asks the device
+   what has to be done (`POST /api/device/reboot/prepare`), shows every step,
+   waits for the cache job through the very endpoint the Internal Cache page
+   uses, and asks before losing the cache.
+
+   `onStep(text, cls)` draws one line; the flow guarantees that a message has
+   been on screen long enough to be read before the next one replaces it. It
+   resolves with
+
+     'ready'     — everything the switches asked for is written, so a restart may
+                   be told `{ "saved": true }`;
+     'doubt'     — no verdict (a device that does not report one, or a job that
+                   stopped moving): the device writes the file itself during the
+                   restart, which is the older and slower path;
+     'failed'    — the write failed and the operator chose to restart anyway;
+     'cancelled' — the write failed and the operator cancelled: nothing was done.
+
+   The Device Management page and the Version page (before a firmware upload)
+   both run exactly this. They are not the same action, though, so the flow takes
+   the action as a parameter (`'reboot'` by default, `'update'` on the Version
+   page): the question about a failed write has to offer "update anyway" there and
+   "reboot anyway" here, and the operator who is updating firmware must not be
+   asked whether to reboot — he is not rebooting, the update is. */
+async function prepareRestartFlow(onStep, action) {
+    const isUpdate = action === 'update';
+    const kStepMinMs = 900;       // no message may flash by unread
+    const kProgressMinMs = 300;   // ...and a progress line that ends at once
+    const kPollMs = 500;
+    const kStallLimitMs = 10000;  // no progress for this long -> carry on anyway
+
+    let stepShownAt = 0;
+    const step = (text, cls) => {
+        onStep(text, cls);
+        stepShownAt = Date.now();
+    };
+
+    // A step that finishes in a millisecond is a step nobody can read — the
+    // cache of a freshly started device is empty, for instance. So a message
+    // stays on screen for at least minMs before the next one replaces it.
+    async function lingerStep(minMs) {
+        const left = (minMs || kStepMinMs) - (Date.now() - stepShownAt);
+        if (left > 0) await sleep(left);
+    }
+
+    // Wait for the background cache save to end. Returns the last progress
+    // report, or null when it stopped moving — then the device's own guard
+    // (kPersistStallMs) takes over during the restart, so nothing is lost, only
+    // unshown.
+    async function waitForCacheSave() {
+        let lastDone = -1, stalledMs = 0, shownProgress = false;
+        for (;;) {
+            let p = null;
+            try { p = await fetchJSON('/api/dns/internal-cache/progress'); } catch (e) { p = null; }
+            if (p && !p.busy) {
+                // Nothing to announce when the job was over before the first
+                // question; but a progress line that did appear must not blink.
+                if (shownProgress) await lingerStep(kProgressMinMs);
+                return p;
+            }
+
+            const done = p ? (p.done || 0) : 0;
+            const total = p ? (p.total || 0) : 0;
+            const pct = total > 0 ? Math.round(done * 100 / total) : null;
+            step(tr('restart.cache_saving') +
+                 (pct === null ? '' : ' ' + pct + '%') +
+                 (total > 0 ? ' (' + done + ' / ' + total + ')' : ''));
+            shownProgress = true;
+
+            if (done !== lastDone) { lastDone = done; stalledMs = 0; }
+            else { stalledMs += kPollMs; }
+            if (stalledMs >= kStallLimitMs) {
+                step(tr('restart.cache_stalled'), 'status-warn');
+                return null;
+            }
+            await sleep(kPollMs);
+        }
+    }
+
+    // Wait for the background statistics write the device started (stage 122:
+    // it runs as a job of its own, like the cache). No percentage — 44 bytes
+    // have none, and inventing one would be worse than the plain word. Returns
+    // `{result, detail}` ('ok' | 'skipped' | 'failed' | '' when none arrived,
+    // plus the device's own words about a failure), or null when the job stopped
+    // answering.
+    async function waitForStatsSave() {
+        let stalledMs = 0;
+        for (;;) {
+            let p = null;
+            try { p = await fetchJSON('/api/dns/stats/progress'); } catch (e) { p = null; }
+            if (p && !p.busy) {
+                return { result: p.last_result || '', detail: p.last_detail || '' };
+            }
+            stalledMs += kPollMs;
+            if (stalledMs >= kStallLimitMs) {
+                step(tr('restart.stats_stalled'), 'status-warn');
+                return null;
+            }
+            await sleep(kPollMs);
+        }
+    }
+
+    // One question for every way the files can fail to reach the card: the
+    // statistics, the cache, a cache save that never moved. The operator asked
+    // for exactly this rule — "if the save failed, ask whether to reboot" — and
+    // it applies to both files, not only to the cache. Asking costs one click;
+    // carrying on on its own costs him the data he was told would be kept.
+    //
+    // The **action** is the other half of the same rule: the question must name
+    // what the operator is about to do. On the Version page that is an update, and
+    // asking him whether to "reboot anyway" there is simply wrong.
+    //
+    // @param detail the device's own words about the failure, when it gave any:
+    //        the operator has no serial console, so this dialog is the only place
+    //        he can read why ("cannot publish the file").
+    async function askBeforeLosingData(what, detail) {
+        const cache = what === 'cache';
+        const hintKey = cache ? (isUpdate ? 'restart.cache_failed_hint_update'
+                                          : 'restart.cache_failed_hint')
+                              : (isUpdate ? 'restart.stats_failed_hint_update'
+                                          : 'restart.stats_failed_hint');
+        let hint = tr(hintKey);
+        if (detail) hint += '\n\n' + tr('restart.device_detail') + ': ' + detail;
+        const anyway = await showDialog({
+            title: tr(cache ? 'restart.cache_failed' : 'restart.stats_failed'),
+            hint: hint,
+            okLabel: tr(isUpdate ? 'restart.update_anyway' : 'restart.reboot_anyway'),
+            cancelLabel: tr(isUpdate ? 'restart.cancel_update' : 'restart.cancel_reboot'),
+            danger: true,
+        });
+        if (!anyway) {
+            const cancelKey = cache ? (isUpdate ? 'restart.cancelled_update'
+                                                : 'restart.cancelled')
+                                    : (isUpdate ? 'restart.cancelled_stats_update'
+                                                : 'restart.cancelled_stats');
+            step(tr(cancelKey), 'status-warn');
+            await lingerStep();
+            return 'cancelled';
+        }
+        return 'failed';
+    }
+
+    // True when the statistics file was asked for but no verdict about it ever
+    // arrived. It is not a failure, but it must not be reported to the device as
+    // "already saved" either: `saved: true` tells it to skip **both** files, and
+    // the statistics would then be lost for a reason the page itself called
+    // unknown. So the flag waits for a verdict on everything the switches asked
+    // for, and anything unknown keeps the device's own write alive (the older,
+    // slower path — never a lost file).
+    let statsUnknown = false;
+
+    let p;
+    step(tr('restart.stats_saving'));
+    try {
+        p = await postJSON('/api/device/reboot/prepare', {});
+    } catch (e) {
+        // The device did not answer at all — a firmware without
+        // `/api/device/reboot/prepare` answers exactly like this. Nothing about
+        // the two files can be shown then, so this line is the last message
+        // before the reboot takes over: it must be readable. It used to be held
+        // for 300 ms, which is why an old firmware looked like a broken page.
+        await lingerStep(kProgressMinMs);
+        step(tr('restart.prep_unavailable'), 'status-warn');
+        await lingerStep();
+        return 'doubt';
+    }
+    // The statistics file is 44 bytes, so this step is over before it can be
+    // read — hold its announcement for a moment anyway.
+    await lingerStep(kProgressMinMs);
+
+    if (p.stats === 'saved') {
+        // An older device writes the file inside the request itself: by the time
+        // this answer is here, the file is on the card.
+        step(tr('restart.stats_saved'));
+        await lingerStep();
+    } else if (p.stats === 'started' || p.stats === 'busy') {
+        // The write runs as a background job now — wait for its verdict instead
+        // of assuming it. ('busy' = one was already running, e.g. a second press
+        // of the button; either way it is that job's verdict we report.)
+        const statsOutcome = await waitForStatsSave();
+        if (statsOutcome === null) {
+            // It stopped moving: the file's state is unknown, so the operator
+            // decides, not the page.
+            await lingerStep();
+            return askBeforeLosingData('stats');
+        }
+        const verdict = statsOutcome.result;
+        if (verdict === 'ok') {
+            step(tr('restart.stats_saved'), 'status-ok');
+            await lingerStep();
+        } else if (verdict === 'skipped') {
+            step(tr('restart.stats_not_saved'), 'status-warn');
+            await lingerStep();
+        } else if (verdict === 'failed') {
+            step(tr('restart.stats_failed'), 'status-err');
+            await lingerStep();
+            return askBeforeLosingData('stats', statsOutcome.detail);
+        } else {
+            // No verdict at all: the job never reported one (the device restarted
+            // under it, or the endpoint is not there). A missing answer is not a
+            // failure and not a success — say exactly that, and send no `saved`
+            // flag, so the device writes the file itself during the restart.
+            step(tr('restart.stats_no_verdict'), 'status-warn');
+            statsUnknown = true;
+            await lingerStep();
+        }
+    } else if (p.stats === 'skipped') {
+        // The switch is off. Say so rather than stay silent: an absent step is
+        // indistinguishable from a broken feature (stage 120).
+        step(tr('restart.stats_not_saved'), 'status-warn');
+        await lingerStep();
+    } else if (p.stats === 'failed') {
+        // The statistics file could not be written *now* — and this page is the
+        // only place that knows it. It used to print the line and let the
+        // caller reboot, which is exactly what the operator objected to: a
+        // failure message followed by a restart nobody agreed to.
+        step(tr('restart.stats_failed'), 'status-err');
+        await lingerStep();     // readable before the question opens
+        return askBeforeLosingData('stats');
+    }
+
+    if (p.cache === 'skipped') {
+        // The device refuses to write the cache: "save the cache before a
+        // reboot" is off, or the internal cache itself is disabled. Say it
+        // rather than stay silent.
+        step(tr('restart.cache_not_saved'), 'status-warn');
+        await lingerStep();
+        return statsUnknown ? 'doubt' : 'ready';
+    }
+    if (p.cache === 'empty') {
+        // Nothing live to write — a freshly started device, or one whose entries
+        // have all expired. Normal, and the restart has nothing to do either.
+        step(tr('restart.cache_empty'));
+        await lingerStep();
+        return statsUnknown ? 'doubt' : 'ready';
+    }
+    if (p.cache === 'failed') {
+        // The save could not even be started, so this restart will not write the
+        // file either: the cache is lost unless the operator says otherwise.
+        step(tr('restart.cache_failed'), 'status-err');
+        await lingerStep();
+        return askBeforeLosingData('cache');
+    }
+
+    // 'started' (we just started it) or 'busy' (a save was already running — a
+    // manual one, or the boot restore): either way wait for it.
+    const last = await waitForCacheSave();
+    if (last === null) {
+        // The job stopped moving and waitForCacheSave() has already said so. The
+        // file's state is unknown, so the page has no business deciding to
+        // restart anyway: the operator does. (It used to print "rebooting
+        // anyway" and carry on by itself — the same mistake as the silent
+        // branches, just louder.)
+        await lingerStep();
+        return askBeforeLosingData('cache');
+    }
+    const result = last.last_result || '';
+    if (result === 'ok') {
+        step(tr('restart.cache_saved'), 'status-ok');
+        await lingerStep();
+        return statsUnknown ? 'doubt' : 'ready';
+    }
+    if (result === 'empty') {
+        step(tr('restart.cache_empty'));
+        await lingerStep();
+        return statsUnknown ? 'doubt' : 'ready';
+    }
+    if (result === 'failed') {
+        // The device said the cache could not be written, and carrying on now
+        // would lose it. That is the operator's call, not the page's: asking
+        // costs one click, losing a warm cache costs him the working set he has
+        // just built.
+        return askBeforeLosingData('cache');
+    }
+    // No verdict at all: the device does not report one (a firmware without
+    // `last_result` answers `busy=false` and nothing more). Guessing "failed"
+    // from a missing field is exactly what made this flow lie once — but going
+    // silent is the other half of the same mistake: the operator cannot tell a
+    // cache that was written from one that was never touched, and all he sees
+    // is a restart with no cache step in it. So say what is known — the answer
+    // never arrived, the device writes the file itself during the restart —
+    // and send no `saved` flag.
+    step(tr('restart.cache_no_verdict'), 'status-warn');
+    await lingerStep();
+    return 'doubt';
+}
+
 /* Show/hide the "Files" nav entry according to the build's capability.
    Called once per page load (the flag is a build property, not a setting). */
 async function applyFilesNavVisibility() {

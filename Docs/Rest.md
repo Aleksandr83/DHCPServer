@@ -268,6 +268,8 @@ Get DNS server configuration.
   "cache_internal": false,
   "cache_internal_size_mb": 20,
   "cache_internal_ignore_ttl": false,
+  "cache_internal_save_stats": true,
+  "cache_internal_save_cache": true,
   "cache_internal_available": true,
   "block_forward_non_aa": false,
   "allow_own_subnet": true
@@ -286,6 +288,9 @@ Get DNS server configuration.
 > TTLs are kept but never expire entries (actualization comes later).
 > `cache_internal_available` (read-only) is true when PSRAM is present and
 > the cache can actually be enabled.
+> `cache_internal_save_stats` and `cache_internal_save_cache` (both default
+> **on**) keep the main-page counters and the cache itself across a planned
+> restart — see the two sections below.
 > `block_forward_non_aa` — when on, queries of any type other than A/AAAA
 > that are NOT answered from local hosts are answered **NODATA** (NOERROR,
 > 0 records) and are never sent to the external cache or the upstream DNS.
@@ -329,6 +334,8 @@ Update DNS server configuration.
   "cache_internal": false,
   "cache_internal_size_mb": 20,
   "cache_internal_ignore_ttl": false,
+  "cache_internal_save_stats": true,
+  "cache_internal_save_cache": true,
   "block_forward_non_aa": false,
   "allow_own_subnet": true
 }
@@ -344,6 +351,10 @@ Update DNS server configuration.
 > The POST applies the built-in cache settings live: enabling/disabling it,
 > resizing the PSRAM hash table when `cache_internal_size_mb` changed, and
 > updating the ignore-TTL flag — no reboot required.
+> The two "save before reboot" flags are the exception: they are only stored
+> (a missing field keeps the current value, so a partial client cannot switch
+> the mechanism off by accident), because the running server never reads them
+> — the reboot paths do.
 > `block_forward_non_aa` is also applied live: toggling it on makes the
 > running server answer non-A/AAAA queries with NODATA immediately — no
 > reboot required.
@@ -371,6 +382,103 @@ local hosts → internal (PSRAM) cache → external (REST) cache → forward
   an entry (a dedicated actualization mechanism will be added later).
 - On a full table the oldest entry is evicted. Without PSRAM the internal cache
   is unavailable (`cache_internal_available=false`); every call is a safe no-op.
+
+### Statistics file — `Statistica.dat` on FAT
+
+The three numbers of the main page (`From cache`, `Forward`, `Avg hit`) are kept
+across a restart in a 44-byte record on the internal volume:
+
+```
+offset  size  field
+0       4     magic "DST1"
+4       4     version (1)
+8       4     payload size (24 — a mismatch means a damaged file)
+12      4     reserved
+16      8     queries answered from the built-in cache
+24      8     queries forwarded upstream
+32      8     sum of the hit durations, µs
+40      4     checksum (sum of the preceding bytes)
+```
+
+The average is **derived** from the sum and the count, never stored: a stored
+average could not be continued after a reboot (new queries would be averaged
+against an average). The record is written **in place**, like `cache.dat`, and not
+published through a temporary file: FatFS refuses a `rename` onto an existing name,
+so `<path>.tmp` + `rename` failed on every save after the first one (the device's
+`logs/Errors.log` said `cannot publish the file` three times in a row; stage 125).
+The price of writing in place is that an interrupted write can leave a torn record,
+and what pays for it is the format itself — magic, version, payload size and
+checksum are checked on every load, so a half-written file is refused instead of
+being read as plausible numbers (and the boot restore puts that refusal into
+`logs/Errors.log`, because counters silently starting from zero must not stay
+unexplained).
+
+It is written **before a planned restart only** — the Reboot button (through
+`POST /api/device/reboot/prepare`, so the page can show the step), the terminal
+menu `reboot`, and a firmware update right before the device restarts —
+and read back once at boot, after the built-in cache has been enabled
+(`InternalDnsCache::enable()` zeroes the cache's own counters, so an earlier
+restore would be wiped by it). A power cut or a reset button therefore loses
+what was counted since the last save; that is the documented behaviour, not an
+accident.
+
+`cache_internal_save_stats` (see `GET/POST /api/dns/settings`, default **on**)
+switches the whole mechanism off: with it off nothing is written and nothing is
+read, and an existing file is simply left alone. A factory reset
+(`POST /api/settings/reset`) deletes the file, because it describes the settings
+that were just erased.
+
+---
+
+### Cache file before a restart
+
+`cache_internal_save_cache` (default **on**) applies the same policy to the cache
+itself: before a planned restart the device writes the whole table to
+`/fat/cache.dat` — the very file the server already auto-loads at boot — so a
+reboot no longer costs the working set.
+
+The size is what shapes the mechanism: a full table is a few megabytes against
+the statistics file's 44 bytes. The save therefore runs as the usual background
+job (`POST /api/dns/internal-cache/save`) and whoever asked for it waits for it,
+in one of two ways:
+
+- **The Device Management page waits itself, because it can show it.** It calls
+  `POST /api/device/reboot/prepare`, polls
+  `GET /api/dns/internal-cache/progress` while the job runs (the same endpoint
+  the Internal Cache page uses for its manual save) and only then calls
+  `POST /api/device/reboot` with `"saved": true`. The operator sees
+  "Saving the cache... 42 %" instead of a reboot that looks instant.
+  Every message of that flow is held on screen for a moment (a step that takes
+  milliseconds would otherwise be unreadable) and the result comes from
+  `last_result`, so "cache saved" is never printed over a write that did not
+  happen — and "nothing to save" is not printed as a failure either. The flow
+  never stays **silent** about the cache either: a device that refuses to write
+  it (`cache: "skipped"` — the switch is off, or the internal cache is disabled)
+  or one that does not report a result at all (a firmware without `last_result`)
+  gets a line of its own, because silence is indistinguishable from a broken
+  feature — which is exactly how it was read once. And when the page knows the
+  write did **not** happen (a failed statistics write, a cache save that could
+  not be started, or one that stopped moving for 10 s), it asks the operator
+  before restarting at all: "cancel" sends no request whatsoever, "reboot
+  anyway" sends the restart without the `saved` flag so the device tries once
+  more on the way down.
+- **Everything else waits inside the request**: a plain
+  `POST /api/device/reboot` (no body), a firmware update, and the terminal
+  menu's `reboot`. There the wait is bounded and progress-aware — a job that
+  reports no progress for 5 s (`DnsServer::kPersistStallMs`) stops the wait, logs
+  a warning, and the restart continues, because a stuck save must never be able
+  to keep the device from rebooting. While such a path waits, the single httpd
+  task is busy, so the web interface answers nothing for those seconds; that is
+  exactly why the page does not use this path.
+
+A job that is already running (a manual save, or the boot-time restore) is used
+instead of starting a second one, because two writers on one file are never
+allowed.
+
+The same three paths trigger the save as for the statistics: the Reboot button,
+a firmware update, and the terminal menu's `reboot`. A power cut still loses
+whatever was cached since the last save. A factory reset writes nothing and also
+leaves an existing `cache.dat` in place (it deletes only the statistics file).
 
 ### Persistence file — `cache.dat` on FAT
 
@@ -406,6 +514,7 @@ Progress of the running background save/load job (auth required).
 {
   "busy": true,
   "save": true,
+  "last_result": "",
   "done": 256,
   "total": 512,
   "percent": 50
@@ -414,6 +523,23 @@ Progress of the running background save/load job (auth required).
 
 > `busy=false` means no job is running; `done`/`total` keep the last
 > finished job's values so the UI can show "finished at N entries".
+> `last_result` is the verdict of the last finished job, and it is the only
+> thing that tells a written file from a failed write — `busy=false` alone says
+> only that the job ended:
+>
+> | `last_result` | meaning |
+> |---------------|---------|
+> | `ok` | the file is written (a save) or read (a load) |
+> | `empty` | the save found nothing live to write — an empty table, or one whose entries have all expired. **Not an error**, and the file on the card is left as it was |
+> | `failed` | the write (or the read) failed, for instance because the volume is full |
+> | `""` | no job has finished in this boot yet |
+>
+> It is cleared to `""` while a job runs, so the previous job's luck is never
+> carried over. A client that reports "saved" must look at it together with
+> `save` (a load finishing is not a save), and it must **not** turn a missing
+> verdict into a failure: a firmware that does not report one simply has nothing
+> to say, and inventing a verdict from a missing field is how a fresh device
+> ended up announcing a save that never failed.
 
 #### `POST /api/dns/internal-cache/save`
 
@@ -438,6 +564,20 @@ required). Entries are re-inserted with their **remaining TTL**, so they
 expire after the remaining time once reloaded. Returns immediately; poll
 `GET .../progress`.
 
+**Body (optional):**
+```json
+{ "force": true }
+```
+
+The file is only loaded when it is the one this device wrote: every save stores
+an MD5 of the file it produced (see "Cache file checksum" below), and a file
+whose checksum does not match is **refused** instead of loaded — a half-written
+file, a damaged block or a file placed there behind the firmware's back would
+otherwise quietly fill the cache with whatever it holds. The refusal is a `409`
+that carries both digests, so a client can ask its operator; `"force": true` is
+that answer and loads the file anyway. Checking costs one read pass over the
+file, inside this call.
+
 **Response `200 OK`:**
 ```json
 {
@@ -446,9 +586,51 @@ expire after the remaining time once reloaded. Returns immediately; poll
 }
 ```
 
-**Errors:** `409 Conflict` — internal cache disabled or another operation is
-already running; `404 Not Found` — no cache file yet; `500` — the background
-job could not start.
+**Response `409 Conflict`** — checksum mismatch:
+```json
+{
+  "status": "error",
+  "code": "md5_mismatch",
+  "reason": "mismatch",
+  "file_md5": "9f2c1e4b7a8d0c3f5e6b1a2c4d7e8f90",
+  "stored_md5": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+  "message": "the cache file checksum does not match the one stored for it"
+}
+```
+
+| `reason` | meaning |
+|----------|---------|
+| `mismatch` | the file is not the one this device saved |
+| `unknown` | the device has no checksum for it (fresh firmware, factory reset, or the file arrived another way) |
+| `unreadable` | the file could not be read at all |
+
+**Errors:** `409 Conflict` — internal cache disabled, another operation is
+already running, or the checksum check above; `404 Not Found` — no cache file
+yet; `500` — the background job could not start.
+
+#### Cache file checksum
+
+After every successful save (`POST .../save`, the save before a planned restart,
+an OTA restart) the device hashes the file it just wrote and keeps the MD5 in
+its own NVS (`dns_ic_file_md5`). The hash is taken **from the card**, not
+streamed while writing: the entry count is patched into the header as the last
+step, so the bytes that end up in the file are only known once it is closed.
+
+Before every load the file is hashed again and compared:
+
+- the boot-time restore runs as a background job and simply refuses the file
+  (with a warning in the log naming both digests) — nothing is loaded, the cache
+  starts cold, and no operator is standing by to ask;
+- the load button goes through this API and answers `409`, so the page can ask
+  "load it anyway?" and repeat with `"force": true`.
+
+The value is device state, not a setting: it is deliberately absent from
+`GET /api/settings/export` and from the settings import. A factory reset erases
+the NVS namespace, so an existing `cache.dat` then has no stored checksum and
+will be refused once — the log says so, and saving the cache once adopts it.
+
+It is a corruption detector, not a signature: nothing secret is protected, and
+the only thing the value is ever compared with is the device's own record.
 
 **File format:** binary, little-endian — 16-byte header (`"DCC1"` magic,
 u32 version=2, u32 entryCount, u32 reserved), then per entry: nameLen u8 +
@@ -593,6 +775,18 @@ curl -u admin:admin -X POST --data-binary @build/DHCPServer.bin \
 curl -u admin:admin -F 'firmware=@build/DHCPServer.bin' \
      http://192.168.1.201/api/ota/upload
 ```
+
+**Query parameter `saved=1` (optional):** the web UI runs the restart preparation
+first (`POST /api/device/reboot/prepare`, then it watches the cache job) and adds
+`?saved=1` to the upload URL when it finished with everything written. The device
+then **skips** the statistics and the cache write inside this request — the files
+are already on the card — and reboots straight away. Without the flag (scripts,
+older pages) the handler keeps the old behaviour and writes both files itself,
+waiting for the cache job with the progress-aware stall guard, because a client
+that does not know about the preparation must still get them written. Note the
+asymmetry the page relies on: on a cache write that **failed**, the page asks the
+operator and, if he carries on, omits the flag on purpose — the device's own
+attempt during the restart is the last chance to save the cache.
 
 **Response `200 OK`:**
 ```json
@@ -775,10 +969,75 @@ network, DHCP, DNS, static bindings, local hosts, DNS cache and the web login
 Reboots the device **without** touching any settings. The command is
 authenticated. The device restarts ~0.5 s after the response is sent.
 
+**Body (optional):**
+```json
+{ "saved": true }
+```
+
+`"saved": true` means "the files a planned restart wants are already written"
+(`Statistica.dat` and `cache.dat`): the handler writes nothing and restarts at
+once. That is what the Device Management page sends after
+`POST /api/device/reboot/prepare` and after it has watched the cache job finish.
+A caller that sends no body keeps the older behaviour — the device saves
+whatever the two "before reboot" switches ask for, and for the cache it waits
+for that write inside the request (see the cache-file section below for what
+that costs).
+
 **Response `200 OK`:**
 ```json
 { "status": "ok", "message": "Device is rebooting...", "reboot": true }
 ```
+
+---
+
+## POST /api/device/reboot/prepare
+
+Starts what a planned restart wants and reports **each step**, so a client can
+show the operator what is happening instead of a reboot that looks instant while
+the device is still writing to FAT. The command is authenticated.
+
+The policy stays on the device (the two switches on the Internal Cache page);
+this endpoint only reports what each step decided. Since stage 122 **neither file
+is written inside this call** — both run as background jobs of their own (44
+bytes still deserve a task: the callers of a restart run on the single httpd
+task, and a file write there answers nobody else). The client polls
+`GET /api/dns/stats/progress` and `GET /api/dns/internal-cache/progress` until
+`busy=false` on both and then asks for the restart with `"saved": true`.
+Waiting here instead would block that task, and then nothing could be polled.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "stats": "started", "cache": "started" }
+```
+
+| field | values | meaning |
+|-------|--------|---------|
+| `stats` | `started` / `busy` / `skipped` / `failed` | `started` = the statistics write job is running now; `busy` = one was already running and it is that one that will finish; `skipped` = the switch is off; `failed` = the task could not be started. On devices older than stage 122 this field answered `saved` — the file was written inside the call, and a client that understands both readings shows the same step either way |
+| `cache` | `started` / `busy` / `empty` / `skipped` / `failed` | `started` = the background save job is running now; `busy` = one was already running (a manual save, or the boot restore) and it is that one that will finish; `empty` = the cache holds no entry, so there is nothing to write and the existing file is left as it is (`saveToFile()` refuses an empty table as well — this state exists so a client does not report a save that never happened); `skipped` = the switch is off or there is no cache |
+
+---
+
+## GET /api/dns/stats/progress
+
+State of the background statistics write (`Statistica.dat`) that
+`POST /api/device/reboot/prepare` starts. Same shape as the cache endpoint next
+to it, because the page reads them the same way.
+
+**Response `200 OK`:**
+```json
+{ "busy": false, "last_result": "ok" }
+```
+
+| field | values | meaning |
+|-------|--------|---------|
+| `busy` | `true` / `false` | the write is running now |
+| `last_result` | `ok` / `skipped` / `failed` / `""` | verdict of the last finished job; `skipped` = the switch was off when it ran, `""` = nothing has finished (so there is no verdict to report) |
+| `last_detail` | any text / `""` | the device's **own words** about the last failure (`cannot create the temporary file`, `write failed`, `cannot publish the file`). It is here because the operator does not always have a terminal: "the statistics could not be saved" without the reason is the message that made him ask what went wrong. Empty on success |
+
+There is no `done`/`total`/`percent` here on purpose: three numbers have no
+progress to show, and the scheduler page draws an indeterminate bar for a job
+without a total. The job is single-flight — a second request while one runs
+answers `busy` and the caller waits for the running one.
 
 ---
 
@@ -1505,6 +1764,133 @@ ones), `bytes_read`, `budget_bytes` and `errors` — at most
 > `POST /api/files/delete` with `recursive`) or formatting the card — the two
 > actions that can actually make the volume usable again, both of which destroy
 > data and are therefore confirmed first.
+
+---
+
+## POST /api/files/transfer
+
+Copies or moves **files and whole directories between the two volumes**
+(internal FAT `fat` ↔ microSD `sd`), one batch per request.
+
+```json
+{
+  "op": "copy",
+  "src_volume": "sd",
+  "paths": ["/logs/2026-09-15.txt", "/photos"],
+  "dst_volume": "fat",
+  "dst_path": "/backup",
+  "conflict": "ask"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `op` | `copy` (default) or `move` |
+| `src_volume` | Volume id the entries come from (`fat`, `sd`) |
+| `paths` | Volume-relative paths of the entries to transfer (files or directories, up to 512) |
+| `dst_volume` | Volume id they go to |
+| `dst_path` | Volume-relative **directory** that receives them (must exist) |
+| `conflict` | `ask` (default), `overwrite` or `skip` |
+
+Each entry keeps its own name in the destination (`/photos` → `/backup/photos`);
+directories are copied recursively. A **same-volume `move`** is a `rename()` and
+therefore instant (`instant: true` in the snapshot) — only a cross-volume one has
+to copy, because FatFs is one filesystem per volume and `rename()` cannot cross
+them.
+
+Three properties matter more than speed here:
+
+* **Nothing is lost silently.** A file is written as `<name>.part` and published
+  only when it is complete, so an aborted or cancelled transfer never replaces the
+  destination with a truncated file. A `move` deletes a source entry **only after**
+  its copy finished, and a source *tree* only when every file inside it was copied.
+* **A full destination is refused before the first byte.** The source is measured
+  first (recursively), and if the bytes to copy do not fit the free space of the
+  destination (plus a 4 KB reserve), the transfer fails with `needed_bytes` /
+  `free_bytes` in the snapshot instead of filling the volume halfway. This is the
+  normal case when the internal partition (~21 MB) is the target of a card's
+  directory.
+* **The question about taken names comes first.** With `conflict: "ask"` (the
+  default) a name that already exists in the destination is **not** overwritten:
+  the request is answered with `409` and the list of those names, and the page
+  asks once, then repeats the request with `overwrite` (replace files, merge
+  directories) or `skip` (leave the destination and the source alone, counted in
+  `skipped`). `Ask` only ever looks at the selected entries, not inside them.
+
+The copy runs in a task of its own (the httpd has to stay answerable while
+gigabytes move) and appears on the scheduler page as job `transfer`, where it can
+also be stopped.
+
+**Response `200 OK`:** `{ "status": "started" }`
+**Response `409 Conflict`:** `{ "status": "conflict", "conflicts": [ { "name": "photos" } ] }`
+**Errors:** `400` bad/empty request or a destination inside the source · `403`
+outside the allowed subnet · `404` unknown volume or entry · `409` not mounted, a
+name is taken while `conflict` is `ask`, or **another transfer is already
+running** · `500` the task could not be started.
+
+---
+
+## POST /api/files/transfer/cancel
+
+Asks a running transfer to stop (sets a flag; the copy ends at its next 4 KB
+chunk, so the answer is immediate). What was already copied **stays** — the
+snapshot then reports `cancelled: true` together with how far it got; the
+interrupted file is discarded, never published. Nothing happens when no transfer
+is running.
+
+**Response `200 OK`:** `{ "status": "ok" }`
+
+---
+
+## GET /api/files/transfer
+
+Snapshot of the running (or last) transfer. One payload covers every state the
+page draws: while `busy` the bar uses `done_bytes` / `total_bytes`
+(`total_bytes == 0` means the measurement is still running — draw an
+indeterminate bar, do not divide), and once `finished` the same object is the
+summary.
+
+Fields: `phase` (`idle`, `measuring`, `copying`, `done`), `busy`, `finished`,
+`cancelled`, `instant` (a same-volume move: `rename()`, no byte was copied),
+`op`, `src_volume`, `dst_volume`, `dst_path`, `current` (path being worked on),
+`done_bytes`, `total_bytes`, `needed_bytes` / `free_bytes` (the measurement and
+the destination's space), `files_done` / `files_total`, `dirs_done` /
+`dirs_total`, `skipped`, `failed`, `deleted` (source entries removed by a `move`)
+and the first failure in `error` with the path it happened on in `error_path`.
+
+```json
+{
+  "phase": "copying",
+  "busy": true,
+  "finished": false,
+  "cancelled": false,
+  "instant": false,
+  "op": "move",
+  "src_volume": "sd",
+  "dst_volume": "fat",
+  "dst_path": "/backup",
+  "current": "/photos/2026/img_0142.jpg",
+  "done_bytes": 17825792,
+  "total_bytes": 41943040,
+  "needed_bytes": 41943040,
+  "free_bytes": 20971520,
+  "files_done": 12,
+  "files_total": 38,
+  "dirs_done": 2,
+  "dirs_total": 2,
+  "skipped": 1,
+  "failed": 0,
+  "deleted": 0,
+  "error": "",
+  "error_path": ""
+}
+```
+
+> **What a partial run leaves behind.** There is no rollback by design: on
+> cancel or on a failure the destination keeps what was already copied (and the
+> directories created for it), the source keeps everything that was not copied,
+> and the counters say exactly how much that was. A message that pretends
+> otherwise would be worse than the truth.
 
 ---
 

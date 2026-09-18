@@ -1,6 +1,9 @@
 #include "DnsServer.h"
+#include "DnsStatStore.h"
 #include "../core/Config.h"
+#include "../core/ErrorLog.h"
 #include "../core/JobRegistry.h"
+#include "../core/Md5.h"
 #include "../core/Subnet.h"
 
 #include <cstdio>
@@ -49,6 +52,7 @@ namespace dns {
 DnsServer::DnsServer()
 {
     persistJobMutex_ = xSemaphoreCreateMutex();
+    statsJobMutex_ = xSemaphoreCreateMutex();
 }
 
 DnsServer::~DnsServer()
@@ -60,6 +64,10 @@ DnsServer::~DnsServer()
     if (persistJobMutex_) {
         vSemaphoreDelete(static_cast<SemaphoreHandle_t>(persistJobMutex_));
         persistJobMutex_ = nullptr;
+    }
+    if (statsJobMutex_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(statsJobMutex_));
+        statsJobMutex_ = nullptr;
     }
 }
 
@@ -148,10 +156,17 @@ bool DnsServer::start()
 
     // Background restore of the built-in cache from /fat/cache.dat — a
     // low-priority persist job, so the DNS server answers immediately (cold
-    // cache → forwards) while the file is read and the arena warmed.
+    // cache → forwards) while the file is read and the arena warmed. The job
+    // checks the file's checksum first and refuses a file this device did not
+    // write (it says so in the log); nothing is hashed here, in the boot path.
     if (internalCache_.available() && internalCacheFileInfo().exists) {
         startPersistJob(false);
     }
+
+    // The counters of the main page survive a restart (Statistica.dat). Read here,
+    // at the end of start(): after `applyInternalCache()` above, which enables the
+    // cache and zeroes its own counters.
+    restoreStatsFromFile();
 
     ESP_LOGI(TAG, "DNS server started on port %d", DNS_PORT);
     return true;
@@ -161,7 +176,7 @@ bool DnsServer::start()
 // Background persist job (save/load of cache.dat on FAT)
 // ─────────────────────────────────────────────────────
 
-bool DnsServer::startPersistJob(bool save)
+bool DnsServer::startPersistJob(bool save, bool force)
 {
     if (!internalCache_.available()) {
         ESP_LOGW(TAG, "Cannot start persist job: internal cache is disabled");
@@ -179,8 +194,12 @@ bool DnsServer::startPersistJob(bool save)
             if (!persistBusy_) {
                 persistBusy_ = true;
                 persistSave_ = save;
+                persistForce_ = force;
                 persistDone_ = 0;
                 persistTotal_ = 0;
+                // Pessimistic until the job says otherwise: a page that reads
+                // this while the job runs must not see the previous job's luck.
+                persistResult_ = PersistResult::None;
                 started = true;
             }
             xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
@@ -223,6 +242,7 @@ DnsServer::PersistProgress DnsServer::persistProgress() const
                        portMAX_DELAY);
         p.busy = persistBusy_;
         p.isSave = persistSave_;
+        p.result = persistResult_;
         p.done = persistDone_;
         p.total = persistTotal_;
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
@@ -254,28 +274,83 @@ void DnsServer::persistJobTask(void* arg)
     }
 
     bool ok = false;
+    PersistResult result = PersistResult::Failed;
     if (self->persistSave_) {
         size_t written = 0;
+        bool nothingToSave = false;
         ok = self->internalCache_.saveToFile(
             self->kCacheDatPath, &written,
-            &DnsServer::onPersistProgress, self);
-        if (ok) {
+            &DnsServer::onPersistProgress, self, &nothingToSave);
+        if (nothingToSave) {
+            // An empty table is not a failure: a freshly started device has
+            // nothing to write, and saying otherwise to the operator is worse
+            // than saying nothing.
+            ok = false;
+            result = PersistResult::Empty;
+            ESP_LOGI(TAG, "cache not saved: nothing to store in %s", self->kCacheDatPath);
+        } else if (ok) {
+            result = PersistResult::Ok;
             ESP_LOGI(TAG, "Built-in cache saved: %u entries -> %s",
                      (unsigned)written, self->kCacheDatPath);
+            // Remember what the file is, so a later load can tell this file from
+            // a half-written one. Hashed from the file on the card rather than
+            // streamed while writing: the entry count is patched into the header
+            // at the very end, so the bytes that end up on the card are only
+            // known once the file is closed.
+            std::string md5err;
+            const std::string md5 = core::Md5::file(self->kCacheDatPath, &md5err);
+            if (md5.empty()) {
+                ESP_LOGW(TAG, "cache saved but its checksum could not be read (%s)",
+                         md5err.c_str());
+            } else {
+                self->storeCacheFileMd5(md5);
+            }
         } else {
             ESP_LOGE(TAG, "Built-in cache save failed -> %s",
                      self->kCacheDatPath);
         }
     } else {
-        size_t loaded = 0;
-        ok = self->internalCache_.loadFromFile(
-            self->kCacheDatPath, &loaded,
-            &DnsServer::onPersistProgress, self);
-        if (ok) {
-            ESP_LOGI(TAG, "Built-in cache restored: %u entries <- %s",
-                     (unsigned)loaded, self->kCacheDatPath);
+        // The file is only read when it is the one this device wrote. A
+        // mismatch is not something to "try anyway" silently: it means a
+        // half-written file, a damaged block or a file replaced behind the
+        // firmware's back, and loading it would quietly fill the cache with
+        // whatever it holds. The page can ask the operator and force it.
+        bool allowed = true;
+        if (!self->persistForce_) {
+            const DnsServer::CacheFileMd5 st = self->checkCacheFileMd5();
+            if (!st.match) {
+                allowed = false;
+                if (!st.fileExists) {
+                    ESP_LOGW(TAG, "cache file not loaded: %s is not there", self->kCacheDatPath);
+                } else if (!st.readable) {
+                    ESP_LOGW(TAG, "cache file not loaded: %s cannot be read", self->kCacheDatPath);
+                } else if (!st.hasStored) {
+                    ESP_LOGW(TAG, "cache file not loaded: no checksum is stored for %s "
+                                  "(file is %s) — save the cache once to adopt it",
+                             self->kCacheDatPath, st.fileMd5.c_str());
+                } else {
+                    ESP_LOGW(TAG, "cache file not loaded: checksum mismatch on %s "
+                                  "(file %s, stored %s)",
+                             self->kCacheDatPath, st.fileMd5.c_str(), st.storedMd5.c_str());
+                }
+            }
         } else {
-            ESP_LOGD(TAG, "No cache file to restore (%s)", self->kCacheDatPath);
+            ESP_LOGW(TAG, "cache file %s is being loaded although its checksum "
+                          "does not match the stored one (forced)", self->kCacheDatPath);
+        }
+
+        size_t loaded = 0;
+        if (allowed) {
+            ok = self->internalCache_.loadFromFile(
+                self->kCacheDatPath, &loaded,
+                &DnsServer::onPersistProgress, self);
+            result = ok ? PersistResult::Ok : PersistResult::Failed;
+            if (ok) {
+                ESP_LOGI(TAG, "Built-in cache restored: %u entries <- %s",
+                         (unsigned)loaded, self->kCacheDatPath);
+            } else {
+                ESP_LOGD(TAG, "No cache file to restore (%s)", self->kCacheDatPath);
+            }
         }
     }
 
@@ -293,6 +368,7 @@ void DnsServer::persistJobTask(void* arg)
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->persistJobMutex_),
                        portMAX_DELAY);
         self->persistBusy_ = false;
+        self->persistResult_ = result;
         self->persistTaskHandle_ = nullptr;
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->persistJobMutex_));
     }
@@ -426,6 +502,331 @@ void DnsServer::applyInternalCache(bool enabled, uint32_t sizeMb, bool ignoreTtl
 InternalDnsCache::FileInfo DnsServer::internalCacheFileInfo() const
 {
     return internalCache_.fileInfo(kCacheDatPath);
+}
+
+// ─────────────────────────────────────────────────────
+// Checksum of the cache file (cache.dat on FAT)
+//
+// The file's integrity is checked with an MD5 that the device stores in its own
+// NVS after every save. It is a corruption detector, not a signature: nothing
+// secret is protected, and the value is compared only against the device's own
+// record of what it wrote.
+// ─────────────────────────────────────────────────────
+
+DnsServer::CacheFileMd5 DnsServer::checkCacheFileMd5()
+{
+    CacheFileMd5 out;
+    out.fileExists = internalCacheFileInfo().exists;
+    out.storedMd5 = core::Config::instance().getDns().cacheInternalFileMd5;
+    out.hasStored = !out.storedMd5.empty();
+    if (!out.fileExists) return out;
+
+    std::string err;
+    out.fileMd5 = core::Md5::file(kCacheDatPath, &err);
+    out.readable = !out.fileMd5.empty();
+    if (!out.readable) {
+        ESP_LOGW(TAG, "cache file %s could not be hashed (%s)", kCacheDatPath, err.c_str());
+        return out;
+    }
+    out.match = out.hasStored && out.fileMd5 == out.storedMd5;
+    return out;
+}
+
+bool DnsServer::storeCacheFileMd5(const std::string& md5)
+{
+    auto cfg = core::Config::instance().getDns();
+    if (cfg.cacheInternalFileMd5 == md5) {
+        ESP_LOGD(TAG, "cache file checksum unchanged (%s)", md5.c_str());
+        return true;
+    }
+    cfg.cacheInternalFileMd5 = md5;
+    core::Config::instance().setDns(cfg);
+    ESP_LOGI(TAG, "cache file checksum stored: %s", md5.c_str());
+    return true;
+}
+
+// ─────────────────────────────────────────────────────
+// Statistics across a planned restart (Statistica.dat)
+//
+// Three numbers, 44 bytes, written before a restart and read once at boot. It
+// is the same *shape* as the cache job below — its own task, its own verdict,
+// its own progress endpoint — and deliberately not a shared one: the two files
+// have separate switches, and the page shows them as two steps. The reason for
+// a task at all is not the size of the file but where the caller runs: the
+// reboot paths execute on the single httpd task, so a file write there — a slow
+// card, a filesystem hiccup — answers nobody else for as long as it takes.
+// ─────────────────────────────────────────────────────
+
+void DnsServer::statsJobTask(void* arg)
+{
+    auto* self = static_cast<DnsServer*>(arg);
+    RestartSaveJobState::Verdict verdict = RestartSaveJobState::Verdict::Failed;
+    std::string detail;
+    if (self) verdict = self->writeStatsNow(detail);
+
+    ::dhcp::core::JobRegistry::instance().finish(
+        "stats_save",
+        verdict == RestartSaveJobState::Verdict::Ok ? ::dhcp::core::JobState::Done
+                                                    : ::dhcp::core::JobState::Failed,
+        DnsStatStore::kPath);
+
+    // Mark the job done (busy=false, verdict kept for the page that polls).
+    if (self && self->statsJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->statsJobMutex_),
+                       portMAX_DELAY);
+        self->statsJob_.finish(verdict, detail);
+        self->statsTaskHandle_ = nullptr;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->statsJobMutex_));
+    }
+    vTaskDelete(nullptr);
+}
+
+DnsServer::RestartSave DnsServer::startStatsSaveJob()
+{
+    const bool enabled = core::Config::instance().getDns().cacheInternalSaveStats;
+
+    RestartSaveJobState::StartResult started = RestartSaveJobState::StartResult::Failed;
+    if (statsJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(statsJobMutex_), portMAX_DELAY);
+        started = statsJob_.request(enabled);
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(statsJobMutex_));
+    }
+
+    switch (started) {
+        case RestartSaveJobState::StartResult::Skipped:
+            ESP_LOGI(TAG, "statistics are not kept before a reboot (disabled)");
+            return RestartSave::Skipped;   // nothing stands in the way of the restart
+        case RestartSaveJobState::StartResult::Busy:
+            ESP_LOGW(TAG, "statistics job already running — it will be waited for");
+            return RestartSave::Busy;
+        default:
+            break;   // Started (or Failed, handled below)
+    }
+
+    // 4 KB, not the cache job's 8: three numbers, one std::string and one stdio
+    // call. The cache needs the rest because it walks megabytes of records.
+    BaseType_t res = xTaskCreate(statsJobTask, "stats_save", 4096, this,
+                                 tskIDLE_PRIORITY + 1, &statsTaskHandle_);
+    if (res != pdTRUE) {
+        if (statsJobMutex_) {
+            xSemaphoreTake(static_cast<SemaphoreHandle_t>(statsJobMutex_),
+                           portMAX_DELAY);
+            statsJob_.abortStart();
+            statsTaskHandle_ = nullptr;
+            xSemaphoreGive(static_cast<SemaphoreHandle_t>(statsJobMutex_));
+        }
+        ESP_LOGE(TAG, "Failed to create the statistics job task");
+        return RestartSave::Failed;
+    }
+    ESP_LOGI(TAG, "Statistics job started: %s", DnsStatStore::kPath);
+    // No total: 44 bytes have no percentage, and the Jobs page draws an
+    // indeterminate bar for exactly that.
+    ::dhcp::core::JobRegistry::instance().begin("stats_save", "jobs.stats_save", "");
+    return RestartSave::Ok;
+}
+
+DnsServer::StatsProgress DnsServer::statsProgress() const
+{
+    StatsProgress p;
+    if (statsJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(statsJobMutex_),
+                       portMAX_DELAY);
+        p.busy = statsJob_.busy();
+        p.result = statsJob_.verdict();
+        p.detail = statsJob_.detail();
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(statsJobMutex_));
+    }
+    return p;
+}
+
+bool DnsServer::waitForStatsJob(uint32_t stallMs)
+{
+    constexpr uint32_t kStepMs = 50;
+    uint32_t waitedMs = 0;
+    StatsProgress p = statsProgress();
+    while (p.busy) {
+        vTaskDelay(pdMS_TO_TICKS(kStepMs));
+        waitedMs += kStepMs;
+        if (waitedMs >= stallMs) {
+            // The write publishes itself with .tmp + rename, so an unfinished
+            // one leaves the previous file intact: nothing is lost by going on.
+            ESP_LOGW(TAG, "statistics job still running after %u ms — carrying on",
+                     static_cast<unsigned>(stallMs));
+            return false;
+        }
+        p = statsProgress();
+    }
+    return true;
+}
+
+bool DnsServer::saveStatsBeforeRestart()
+{
+    const RestartSave started = startStatsSaveJob();
+    if (started == RestartSave::Skipped) return true;
+    if (started == RestartSave::Failed) return false;
+    return waitForStatsJob(kPersistStallMs);
+}
+
+RestartSaveJobState::Verdict DnsServer::writeStatsNow(std::string& detail)
+{
+    detail.clear();
+    if (!core::Config::instance().getDns().cacheInternalSaveStats) {
+        ESP_LOGI(TAG, "statistics are not kept before a reboot (disabled)");
+        return RestartSaveJobState::Verdict::Skipped;
+    }
+
+    DnsStatTotals totals;
+    totals.hits = internalCacheHits_;
+    totals.forwards = forwardedCount_;
+    // The sum is read twice on purpose: the DNS task keeps adding to it while this
+    // runs, and the second read is the value it settled on. The alternative would
+    // be a lock in the query path, which is not worth it for a statistic — a torn
+    // read could only shift the average of the very last query.
+    totals.hitUsSum = internalCacheHitUs_;
+    if (internalCacheHitUs_ != totals.hitUsSum) totals.hitUsSum = internalCacheHitUs_;
+
+    std::string why;
+    // Retry once, from a clean slate, and report both attempts to the error log
+    // (the operator asked for exactly that; see DnsStatStore::saveWithRetry).
+    if (!DnsStatStore::saveWithRetry(DnsStatStore::kPath, totals, &why,
+                                     core::ErrorLog::instance().core())) {
+        ESP_LOGW(TAG, "statistics could not be saved to %s (%s)",
+                 DnsStatStore::kPath, why.c_str());
+        // The page gets the device's own words: without a terminal, this is the
+        // only place it can read them.
+        detail = why;
+        return RestartSaveJobState::Verdict::Failed;
+    }
+
+    ESP_LOGI(TAG, "statistics saved: hits=%llu forward=%llu avg=%u us",
+             static_cast<unsigned long long>(totals.hits),
+             static_cast<unsigned long long>(totals.forwards),
+             static_cast<unsigned>(totals.avgHitUs()));
+    return RestartSaveJobState::Verdict::Ok;
+}
+
+bool DnsServer::restoreStatsFromFile()
+{
+    if (!core::Config::instance().getDns().cacheInternalSaveStats) return false;
+
+    DnsStatTotals totals;
+    std::string why;
+    if (!DnsStatStore::load(DnsStatStore::kPath, totals, &why)) {
+        // A device that never saved anything has no file: normal, not an error.
+        ESP_LOGI(TAG, "no statistics to restore (%s)", why.c_str());
+        // But a file that is there and cannot be read is a different story: since
+        // the record is written in place (stage 125), an interrupted write can
+        // leave a torn file, and the counters silently starting from zero is
+        // exactly the kind of thing that must not stay unexplained.
+        if (DnsStatStore::exists(DnsStatStore::kPath)) {
+            core::ErrorLog::instance().errorf("stats",
+                "the statistics file %s is there but was refused (%s) — the counters start from zero",
+                DnsStatStore::kPath, why.c_str());
+        }
+        return false;
+    }
+
+    // Saturate instead of wrapping: four billion hits is far away, but a counter
+    // that passes through zero would look like a device that lost its cache.
+    internalCacheHits_ = (totals.hits > 0xFFFFFFFFull)
+                             ? 0xFFFFFFFFu
+                             : static_cast<uint32_t>(totals.hits);
+    forwardedCount_ = (totals.forwards > 0xFFFFFFFFull)
+                          ? 0xFFFFFFFFu
+                          : static_cast<uint32_t>(totals.forwards);
+    internalCacheHitUs_ = totals.hitUsSum;
+
+    ESP_LOGI(TAG, "statistics restored: hits=%u forward=%u avg=%u us",
+             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs());
+    return true;
+}
+
+bool DnsServer::deleteStatsFile()
+{
+    if (!DnsStatStore::remove(DnsStatStore::kPath)) {
+        ESP_LOGI(TAG, "no statistics file to delete");
+        return false;
+    }
+    ESP_LOGI(TAG, "statistics file deleted (factory reset)");
+    return true;
+}
+
+// ─────────────────────────────────────────────────────
+// Cache across a planned restart (cache.dat)
+//
+// The statistics file is 44 bytes and can be written in the reboot path itself.
+// The cache cannot: a full table is a few megabytes and seconds of file I/O, so
+// the restart reuses the background save job and only waits for it here.
+// ─────────────────────────────────────────────────────
+
+DnsServer::RestartSave DnsServer::startCacheSaveForRestart()
+{
+    if (!core::Config::instance().getDns().cacheInternalSaveCache) {
+        ESP_LOGI(TAG, "cache is not kept before a reboot (disabled)");
+        return RestartSave::Skipped;   // nothing stands in the way of the restart
+    }
+    if (!internalCache_.available()) {
+        ESP_LOGI(TAG, "cache is not kept before a reboot (cache disabled)");
+        return RestartSave::Skipped;
+    }
+    // An empty cache has nothing to write: saveToFile() refuses it as well, but
+    // then the caller cannot tell "nothing to save" from "the write failed" —
+    // and a page that says "cache saved" over a file it never touched is worse
+    // than one that says nothing. The old file (if any) is left alone.
+    if (internalCacheStats().entries == 0) {
+        ESP_LOGI(TAG, "cache is not kept before a reboot (the cache is empty)");
+        return RestartSave::NothingToSave;
+    }
+
+    // A job may already be running: a manual "Save to file" the operator started,
+    // or the boot-time restore still reading. Two writers on one file is the one
+    // thing this must not allow, so the caller waits for that job instead.
+    if (persistProgress().busy) {
+        ESP_LOGW(TAG, "a cache job is already running — it will be waited for");
+        return RestartSave::Busy;
+    }
+    if (!startPersistJob(true)) {
+        ESP_LOGW(TAG, "cache save could not be started");
+        return RestartSave::Failed;
+    }
+    return RestartSave::Ok;
+}
+
+bool DnsServer::saveCacheBeforeRestart()
+{
+    const RestartSave started = startCacheSaveForRestart();
+    if (started == RestartSave::Skipped || started == RestartSave::NothingToSave) return true;
+    if (started == RestartSave::Failed) return false;
+
+    if (!waitForPersistJob(kPersistStallMs)) {
+        ESP_LOGW(TAG, "cache save stalled — rebooting anyway");
+        return false;
+    }
+    ESP_LOGI(TAG, "cache saved before the reboot (%s)", kCacheDatPath);
+    return true;
+}
+
+bool DnsServer::waitForPersistJob(uint32_t stallMs)
+{
+    constexpr uint32_t kStepMs = 100;
+    uint32_t stalledMs = 0;
+    PersistProgress p = persistProgress();
+    while (p.busy) {
+        vTaskDelay(pdMS_TO_TICKS(kStepMs));
+        const PersistProgress next = persistProgress();
+        // Progress is reported every 64 records, so "nothing new" for a few
+        // seconds means the job is stuck, not slow.
+        stalledMs = (next.done != p.done || next.total != p.total)
+                        ? 0
+                        : stalledMs + kStepMs;
+        if (stalledMs >= stallMs) {
+            ESP_LOGW(TAG, "cache job made no progress in %u ms (done=%u/%u)",
+                     (unsigned)stallMs, (unsigned)next.done, (unsigned)next.total);
+            return false;
+        }
+        p = next;
+    }
+    return true;
 }
 
 void DnsServer::setDhcpServer(::dhcp::dhcp::IDhcpServer* dhcp)

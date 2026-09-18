@@ -237,7 +237,17 @@
     "loading": "Loading…",
     "loaded": "Loaded",
     "load_failed": "Load failed",
-    "psram_note": "Internal cache is unavailable — no PSRAM detected on this device."
+    "psram_note": "Internal cache is unavailable — no PSRAM detected on this device.",
+    "save_stats": "Save statistics before reboot",
+    "save_cache": "Save cache before reboot",
+    "md5_mismatch": "The cache file differs from the one this device saved (checksum mismatch).",
+    "md5_unknown": "This device has no saved checksum for the cache file (fresh firmware, factory reset, or the file was put there another way).",
+    "md5_unreadable": "The cache file could not be read.",
+    "md5_file": "File checksum",
+    "md5_stored": "Stored checksum",
+    "md5_ask": "Load the file anyway? (not recommended)",
+    "md5_cancelled": "Load cancelled: the checksum does not match.",
+    "md5_load_anyway": "Load anyway"
   },
   "dns_local_hosts": {
     "title": "Local Hosts"
@@ -328,15 +338,14 @@
     "delete_selected_hint": "Folders are deleted with all their contents. This cannot be undone.",
     "delete_done": "Deleted",
     "nothing_selected": "Nothing selected",
-    "move": "Move ...",
+    "move": "Move to …",
     "move_here": "Move here",
-    "move_done": "Moved",
-    "move_no_dir": "Destination folder not found",
-    "move_exists": "The destination already has that name",
     "picker_title": "Move to",
     "picker_selected": "Selected",
     "picker_source": "source folder",
-    "picker_no_dirs": "No subfolders",
+    "picker_no_dirs": "No folders inside — confirm right here and the files go into this folder.",
+    "picker_dest": "Destination",
+    "picker_source_hint": "This is the source folder — pick another folder or the other volume.",
     "format": "Format card",
     "check": "Check for errors",
     "check_running": "Checking",
@@ -361,7 +370,19 @@
     "editor_close": "Close",
     "editor_save": "Save",
     "editor_saved": "Saved",
-    "editor_fail": "Could not save"
+    "editor_fail": "Could not save",
+    "copy": "Copy to …",
+    "picker_title_copy": "Copy to …",
+    "copy_here": "Copy here",
+    "conflict_title": "Names already exist",
+    "conflict_hint": "Overwrite replaces files and merges directories; skip leaves the destination and the source as they are.",
+    "conflict_overwrite": "Overwrite all",
+    "conflict_skip": "Skip existing",
+    "transfer_fail": "The transfer did not start",
+    "transfer_measuring": "measuring the source …",
+    "transfer_done": "Transfer finished",
+    "transfer_cancelled": "Transfer cancelled",
+    "transfer_skipped": "skipped"
   },
   "settings_device": {
     "title": "Device Management",
@@ -404,7 +425,8 @@
     "uploading": "Uploading...",
     "progress": "files",
     "success": "All files uploaded successfully.",
-    "failed": "files failed:"
+    "failed": "files failed:",
+    "confirm_title": "Upload the web interface files?"
   },
   "jobs": {
     "title": "Task Scheduler",
@@ -427,7 +449,44 @@
     "upload": "File upload",
     "cache_save": "DNS cache save",
     "cache_load": "DNS cache load",
+    "stats_save": "DNS statistics save",
     "format": "Volume format",
-    "test_connection": "Connection test"
+    "test_connection": "Connection test",
+    "transfer": "File transfer"
+  },
+
+  "common": {
+    "ok": "OK",
+    "cancel": "Cancel"
+  },
+
+  "restart": {
+    "stats_saving": "Saving the statistics...",
+    "stats_saved": "Statistics saved.",
+    "stats_failed": "The statistics could not be saved.",
+    "stats_failed_hint": "Restarting now loses the counters collected so far: the file on the card stays as it was, and the device will only try to write it again during the restart.",
+    "stats_failed_hint_update": "The update will go ahead without the statistics being saved: the file on the card stays as it was, and the device will try to write it during the update.",
+    "stats_not_saved": "The statistics are not saved before this reboot: the “save statistics before reboot” switch is off.",
+    "stats_no_verdict": "The device did not report whether the statistics were saved — it will try again during the restart.",
+    "stats_stalled": "The statistics save has stopped: no answer for more than 10 seconds.",
+    "device_detail": "The device reported",
+    "cache_saving": "Saving the cache...",
+    "cache_saved": "Cache saved.",
+    "cache_empty": "The cache holds no live entry yet — nothing to save.",
+    "cache_not_saved": "The cache is not saved before this reboot: the “save the cache before a reboot” switch is off, or the internal cache itself is disabled.",
+    "cache_failed": "The cache could not be saved.",
+    "cache_failed_hint": "Restarting now loses the cache: the file on the card stays as it was, and the device will only try to write it again during the restart.",
+    "cache_failed_hint_update": "The update will go ahead without the cache being saved: the file on the card stays as it was, and the device will try to write it during the update.",
+    "cache_stalled": "The cache save has stopped: no progress for more than 10 seconds.",
+    "cache_no_verdict": "The device did not report whether the cache was written — it will try again during the restart.",
+    "prep_unavailable": "The device did not answer the preparation — it will save the files itself (its firmware may be older than this page).",
+    "reboot_anyway": "Reboot anyway",
+    "cancel_reboot": "Cancel the reboot",
+    "update_anyway": "Update anyway",
+    "cancel_update": "Cancel the update",
+    "cancelled": "Cancelled: the cache is not saved.",
+    "cancelled_stats": "Cancelled: the statistics are not saved.",
+    "cancelled_update": "Cancelled: the cache is not saved, the update was not performed.",
+    "cancelled_stats_update": "Cancelled: the statistics are not saved, the update was not performed."
   }
 }

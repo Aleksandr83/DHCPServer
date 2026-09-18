@@ -100,51 +100,18 @@ bool isDirEmpty(const std::string& fullPath)
 
 } // namespace
 
-int httpStatusFor(FileStatus status)
-{
-    switch (status) {
-        case FileStatus::Ok:            return 200;
-        case FileStatus::InvalidPath:   return 400;
-        case FileStatus::Unsupported:   return 400;
-        case FileStatus::NotFound:      return 404;
-        case FileStatus::NotMounted:    return 409;
-        case FileStatus::AlreadyExists: return 409;
-        case FileStatus::NotEmpty:      return 409;
-        case FileStatus::Conflict:      return 409;
-        case FileStatus::Busy:          return 409;
-        case FileStatus::TooLarge:      return 413;
-        case FileStatus::NotText:       return 415;
-        case FileStatus::NoSpace:       return 507;
-        case FileStatus::IoError:       return 500;
-    }
-    return 500;
-}
-
-const char* messageFor(FileStatus status)
-{
-    switch (status) {
-        case FileStatus::Ok:            return "ok";
-        case FileStatus::InvalidPath:   return "invalid path";
-        case FileStatus::NotFound:      return "not found";
-        case FileStatus::NotMounted:    return "volume is not mounted";
-        case FileStatus::AlreadyExists: return "already exists";
-        case FileStatus::NotEmpty:      return "directory is not empty";
-        case FileStatus::Conflict:      return "file changed on the volume";
-        case FileStatus::Busy:          return "the volume is busy with another operation";
-        case FileStatus::TooLarge:      return "file is too large for the editor";
-        case FileStatus::NotText:       return "file is not a text file";
-        case FileStatus::NoSpace:       return "not enough free space on the volume";
-        case FileStatus::IoError:       return "filesystem error";
-        case FileStatus::Unsupported:   return "operation not supported for this volume";
-    }
-    return "error";
-}
+// `httpStatusFor` and `messageFor` live in `FileStatus.cpp`: the transfer engine
+// and the JSON builders need the message table as well, and both are host-tested.
 
 FileManager::FileManager()
 {
     checkMutex_ = xSemaphoreCreateMutex();
     if (checkMutex_ == nullptr) {
         ESP_LOGE(TAG, "failed to create the check mutex — volume checks disabled");
+    }
+    transferMutex_ = xSemaphoreCreateMutex();
+    if (transferMutex_ == nullptr) {
+        ESP_LOGE(TAG, "failed to create the transfer mutex — transfers disabled");
     }
 }
 
@@ -154,6 +121,7 @@ FileManager::~FileManager()
     // deleted here — the task may be inside it at this very moment, and this
     // runs once, at shutdown.
     checkCancel();
+    transferCancel();
 
     // Volumes unmount themselves (they own their driver state).
     volumes_.clear();
@@ -285,11 +253,9 @@ FileStatus FileManager::absolute(storage::IFileSystem& vol, const std::string& p
 // Directory listing
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::list(const std::string& volumeId, const std::string& path,
-                             std::vector<FileEntry>& out, std::string* detail)
+FileStatus FileManager::scan(const std::string& volumeId, const std::string& path,
+                            IDirVisitor& visitor, std::string* detail)
 {
-    out.clear();
-
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
@@ -308,16 +274,17 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
     DIR* dir = opendir(full.c_str());
     if (dir == nullptr) {
         if (detail) *detail = errnoText();
-        return FileStatus::IoError;
+        return (errno == ENOENT) ? FileStatus::NotFound : FileStatus::IoError;
     }
 
     struct dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
         const std::string name = ent->d_name;
-        if (name == "." || name == "..") continue;
+        if (name == ".." || name == ".") continue;
         // `<name>.part` is the temporary file of a paused (or abandoned) upload,
         // and that suffix is reserved for it anyway: it is not operator data, so
-        // it is neither listed nor offered for open/rename/delete.
+        // it is neither listed nor offered for open/rename/delete — and a
+        // transfer must not copy it either.
         if (storage::PathUtil::isPartName(name)) continue;
 
         FileEntry e;
@@ -333,10 +300,38 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
             ESP_LOGW(TAG, "stat failed for %s", entPath.c_str());
         }
 
-        out.push_back(std::move(e));
-        if (out.size() >= kMaxListEntries) break;
+        if (!visitor.visit(e)) break;   // the caller has everything it needs
     }
     closedir(dir);
+    return FileStatus::Ok;
+}
+
+FileStatus FileManager::list(const std::string& volumeId, const std::string& path,
+                            std::vector<FileEntry>& out, std::string* detail)
+{
+    out.clear();
+
+    // The listing is one use of the raw walk: collect, sort, cap. Sharing the walk
+    // with the transfer engine is what keeps the two from ever disagreeing about
+    // what a directory contains — the cap here never reaches the engine, which
+    // would otherwise delete a source tree it had only partly copied.
+    struct CollectVisitor : IDirVisitor {
+        CollectVisitor(std::vector<FileEntry>& target, size_t limit)
+            : entries(target), cap(limit) {}
+
+        bool visit(const FileEntry& entry) override
+        {
+            entries.push_back(entry);
+            return entries.size() < cap;
+        }
+
+        std::vector<FileEntry>& entries;
+        size_t cap;
+    };
+
+    CollectVisitor visitor(out, kMaxListEntries);
+    const FileStatus st = scan(volumeId, path, visitor, detail);
+    if (st != FileStatus::Ok) return st;
 
     // Directories first, then case-insensitive by name.
     std::sort(out.begin(), out.end(), [](const FileEntry& a, const FileEntry& b) {
@@ -344,6 +339,37 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
         return nameLess(a.name, b.name);
     });
 
+    return FileStatus::Ok;
+}
+
+FileStatus FileManager::createWriter(const std::string& volumeId,
+                                    const std::string& path,
+                                    std::unique_ptr<IFileSink>& out,
+                                    std::string* detail)
+{
+    storage::IFileSystem* vol = nullptr;
+    FileStatus st = resolve(volumeId, vol);
+    if (st != FileStatus::Ok) return st;
+
+    std::string rel, full;
+    st = absolute(*vol, path, rel, full);
+    if (st != FileStatus::Ok) return st;
+    if (rel == "/") return FileStatus::InvalidPath;   // needs a file name
+
+    // Replacing a directory with a file makes no sense — the same rule the
+    // upload path applies before it opens its sink.
+    struct stat stTarget = {};
+    if (::stat(full.c_str(), &stTarget) == 0 && S_ISDIR(stTarget.st_mode)) {
+        return FileStatus::AlreadyExists;
+    }
+
+    auto sink = std::make_unique<FileSink>(full, 0);
+    if (!sink->isOpen()) {
+        if (detail) *detail = errnoText();
+        return FileStatus::IoError;
+    }
+
+    out = std::move(sink);
     return FileStatus::Ok;
 }
 
@@ -992,6 +1018,197 @@ void FileManager::checkWalk(const std::string& mountPoint)
 // ─────────────────────────────────────────────────────
 // LAN-only access filter
 // ─────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────
+// Copy / move between volumes
+//
+// One job, one task, one snapshot — the same shape the volume check above uses,
+// for the same reason: copying a directory off a card takes far longer than the
+// httpd can wait, and the operator has to be able to watch it and stop it. The
+// work itself lives in `TransferEngine`; what is here is the volume side: the
+// job lifecycle, the snapshot the REST layer reads and the job-registry entry
+// the scheduler page shows.
+// ─────────────────────────────────────────────────────
+
+FileStatus FileManager::transferConflicts(const TransferRequest& req,
+                                          std::vector<std::string>& names,
+                                          std::string* detail)
+{
+    // Cheap by construction: N `stat()` calls on the selected entries, no walk.
+    // The REST handler runs this before it answers, which is what lets it ask
+    // "these names are taken, replace them?" without starting anything.
+    return TransferEngine::conflicts(*this, req, names, detail);
+}
+
+FileStatus FileManager::transferStart(const TransferRequest& req, std::string* detail)
+{
+    if (!supported()) return FileStatus::Unsupported;
+
+    // Both volumes must be usable *now*: an absent card has to be a clear error
+    // here, not a failure discovered in the middle of the job.
+    storage::IFileSystem* vol = nullptr;
+    FileStatus st = resolve(req.srcVolume, vol);
+    if (st != FileStatus::Ok) {
+        if (detail) *detail = "the source volume is not available";
+        return st;
+    }
+    st = resolve(req.dstVolume, vol);
+    if (st != FileStatus::Ok) {
+        if (detail) *detail = "the destination volume is not available";
+        return st;
+    }
+
+    if (transferMutex_ == nullptr) {
+        if (detail) *detail = "the transfer mutex is missing";
+        return FileStatus::IoError;
+    }
+
+    bool started = false;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+    // `transferTask_` is cleared by the task itself as its very last act, so this
+    // also covers the moment between "the report says done" and "the task is
+    // really gone" — a new request then cannot overwrite the request the old task
+    // is still reading.
+    if (!transferState_.busy && transferTask_ == nullptr) {
+        transferState_ = TransferReport{};
+        transferState_.busy = true;
+        transferState_.op = req.op;
+        transferState_.srcVolume = req.srcVolume;
+        transferState_.dstVolume = req.dstVolume;
+        transferState_.dstPath = req.dstPath;
+        transferCancel_ = false;
+        transferReq_ = req;
+        started = true;
+    }
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+
+    if (!started) {
+        if (detail) *detail = "another transfer is already running";
+        return FileStatus::Busy;
+    }
+
+    // The engine copies with a 4 KB window on the stack, so the task needs room
+    // for that plus the walk's bookkeeping (the same 8 KB the downloads use).
+    const BaseType_t res = xTaskCreate(transferTask, "file_transfer", 8192, this,
+                                       tskIDLE_PRIORITY + 1,
+                                       reinterpret_cast<TaskHandle_t*>(&transferTask_));
+    if (res != pdTRUE) {
+        transferTask_ = nullptr;
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+        transferState_.busy = false;
+        transferState_.finished = true;
+        transferState_.phase = TransferPhase::Done;
+        transferState_.error = "failed to start the transfer task";
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+        if (detail) *detail = "failed to start the transfer task";
+        ESP_LOGE(TAG, "failed to create the transfer task");
+        return FileStatus::IoError;
+    }
+
+    ESP_LOGI(TAG, "transfer started: %s %u entr%s %s:%s -> %s:%s",
+             (req.op == TransferOp::Move) ? "move" : "copy",
+             static_cast<unsigned>(req.paths.size()),
+             req.paths.size() == 1 ? "y" : "ies", req.srcVolume.c_str(),
+             req.paths.size() == 1 ? req.paths[0].c_str() : "(batch)",
+             req.dstVolume.c_str(), req.dstPath.c_str());
+
+    // The registry entry makes the transfer visible on the scheduler page, where
+    // it can be stopped as well; the byte total arrives with the measurement.
+    std::string arg = std::to_string(req.paths.size()) + (req.paths.size() == 1 ? " entry -> " : " entries -> ");
+    arg += req.dstVolume + req.dstPath;
+    ::dhcp::core::JobRegistry::instance().begin("transfer", "jobs.transfer", arg, 0);
+    return FileStatus::Ok;
+}
+
+void FileManager::transferCancel()
+{
+    if (transferMutex_ == nullptr) return;
+
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+    if (transferState_.busy) {
+        transferCancel_ = true;
+        ESP_LOGI(TAG, "transfer cancel requested");
+    }
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+
+    // Whichever endpoint asked (the Files page has its own cancel route), the
+    // scheduler page must show the operation as stopping.
+    ::dhcp::core::JobRegistry::instance().requestCancel("transfer");
+}
+
+bool FileManager::transferStopRequested()
+{
+    if (transferMutex_ == nullptr) return true;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+    const bool stop = transferCancel_;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+    return stop;
+}
+
+void FileManager::transferReport(TransferReport& out)
+{
+    if (transferMutex_ == nullptr) {
+        out = TransferReport{};
+        return;
+    }
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+    out = transferState_;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+}
+
+void FileManager::transferPublish(const TransferReport& report)
+{
+    if (transferMutex_ == nullptr) return;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(transferMutex_), portMAX_DELAY);
+    transferState_ = report;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(transferMutex_));
+}
+
+void FileManager::TransferObserver::onTransferProgress(const TransferReport& report)
+{
+    owner_.transferPublish(report);
+
+    // The scheduler page shows the same numbers. The registry counts in 32-bit
+    // steps; a transfer beyond 4 GB simply pins at the maximum, which is honest
+    // enough for a bar and keeps one truth for both places.
+    const auto clamp = [](uint64_t value) {
+        return (value > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(value);
+    };
+    ::dhcp::core::JobRegistry::instance().progress("transfer", clamp(report.doneBytes),
+                                                   clamp(report.totalBytes),
+                                                   report.current);
+}
+
+bool FileManager::TransferObserver::transferCancelRequested()
+{
+    return owner_.transferStopRequested();
+}
+
+void FileManager::transferTask(void* arg)
+{
+    auto* self = static_cast<FileManager*>(arg);
+
+    TransferObserver observer(*self);
+    TransferReport report;
+    TransferEngine::run(*self, self->transferReq_, report, observer);
+
+    // The engine published through the observer on its way, including the final
+    // state; the job record is closed here.
+    const ::dhcp::core::JobState state = report.cancelled ? ::dhcp::core::JobState::Cancelled
+                          : (report.failed > 0) ? ::dhcp::core::JobState::Failed
+                                                : ::dhcp::core::JobState::Done;
+    std::string summary = std::to_string(report.filesDone) + " file(s)";
+    if (report.skipped > 0) summary += ", " + std::to_string(report.skipped) + " skipped";
+    if (report.failed > 0) summary += ", " + std::to_string(report.failed) + " failed";
+    if (!report.error.empty()) summary += ": " + report.error;
+    ::dhcp::core::JobRegistry::instance().finish("transfer", state, summary);
+
+    ESP_LOGI(TAG, "transfer finished: %s (%s)", ::dhcp::core::jobStateText(state), summary.c_str());
+
+    // The task deletes itself, so the handle must be cleared before that.
+    self->transferTask_ = nullptr;
+    vTaskDelete(nullptr);
+}
 
 void FileManager::applyAccessFilter()
 {

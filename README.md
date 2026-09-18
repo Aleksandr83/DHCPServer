@@ -20,7 +20,7 @@ DHCP server and caching DNS proxy built on the **Waveshare ESP32-P4-ETH** (dual-
 - **DNS Proxy** — pipeline: logging → local hosts → **internal (PSRAM) cache** → external cache (REST) → forwarding to external DNS
 - **Block non-A/AAAA forwarding** — optional toggle on DNS Setup: queries of any type other than A/AAAA that are not answered from local hosts get an immediate NODATA reply and are never sent to the external cache/upstream (the client falls back to A/AAAA)
 - **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache. Every record carries a **usage counter**: it grows by one for each answer served from the cache and for each answer stored, the **least used** record is evicted when the pool fills up, and the status reports the total and the most-used name (the cache file keeps the counters, format version 2)
-- **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot)
+- **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot), and a planned restart no longer throws the working set away: with the "Save cache before reboot" switch on (**default**, next to "Save statistics before reboot" on the Internal Cache page) the device writes the whole table before restarting — from the Reboot button, a firmware update or the console's `reboot` — and loads it again at boot; every save also stores an **MD5 of the file** in NVS, and a file whose checksum does not match is refused (the boot restore logs it, the load button asks before overriding)
 - **Time Server (NTP)** — the device syncs its clock from an external NTP server (SNTP) and serves UTC time to LAN clients over NTP (UDP 123; configurable external NTP server, re-sync interval, named timezone selection with a custom-offset fallback; clock sync and serving can be switched on/off independently; optional terminal/REST logging of served requests). Until the clock has been synchronised (or set by hand) the server answers with LI=3/stratum 16 (RFC 5905) instead of a wrong time. The date/time can also be **set manually** from the web interface — typed in the selected timezone or taken from the computer's clock, and values earlier than the firmware build time are refused (the board has no battery-backed RTC)
 - **LAN-only hardening** — the built-in DNS and NTP servers answer only clients from the device's own subnet (**on by default**; a query from outside is dropped without any reply, so the device cannot be used as an open resolver or a reflection amplifier). The **file explorer applies the same rule** to `/api/files/*` (a foreign client gets `403`). NTP additionally rate-limits replies per client address (1..100/s, default 5), and the DHCP lease/offer table has a hard cap (`0` = auto = 2× the pool size, 8..512, configurable) so a DISCOVER flood with random MACs cannot grow it without limit
 - **File Explorer** — browse, download, upload, rename, delete and format the **internal FAT data partition** (~21 MB, `/fat`) and a **microSD card** in the board's slot (`/sdcard`; no card is fitted by default, so that volume reports “not mounted”). A card is picked up **and noticed again** while the device runs: a missing one is retried (at most once every few seconds), and a mounted one is asked on the bus whether it is still there (no card-detect line exists on the board), so pulling it out flips the volume to “not mounted” within a poll instead of reporting yesterday's capacities until the next reboot. One “⋯” button on the right holds the file actions (**New file**, **New folder**, **Select all**, **Upload file**, **Upload folder**, **Move ...**, **Delete** for the ticked rows, **Refresh**, **Format card**, **Check for errors**) and a **read-only volume check** walks the whole volume, reading every file to the end — a broken cluster chain is only visible that way — then offers the two actions that can make a card usable again (delete the unreadable entries, or format it). Formatting also works on a card that cannot be mounted (an interrupted format leaves one without a filesystem, and the format is the only thing that can give it back), and a card that stopped answering mid-format can be brought back by stopping the operation: its supply is cut for five seconds, which breaks the stuck driver call. Rows have their own menu (download/open/rename/delete). Uploads are atomic (`<name>.part` + rename) and **resumable**: the progress row carries pause and cancel buttons, and a paused (or interrupted) transfer continues from the byte the device reached instead of starting over — the temporary `*.part` names stay hidden from the explorer and cannot be created through the API. Text files can be edited in the browser, and the home page shows both volumes’ used/free space next to the RAM bars
@@ -236,17 +236,17 @@ Access: `http://192.168.1.201` (default static IP)
 | DHCP ▾ Static Bindings | `/pages/dhcp_static.html` | Static MAC→IP bindings (enable/DNS) |
 | DHCP ▾ Logging | `/pages/dhcp_logging.html` | DHCP REST logging (URL/auth/Test) |
 | DNS ▾ Setup | `/pages/dns_setup.html` | DNS forwarding, mode/address, query filters (LAN-only, non-A/AAAA blocking) |
-| DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, usage frequency (names used, most-used record), save/load `cache.dat` with progress |
+| DNS ▾ Internal Cache | `/pages/dns_internal.html` | Built-in PSRAM DNS cache: on/off, ignore TTL, "withstand a reboot" switches for the statistics (`Statistica.dat`) and the cache (`cache.dat`), usage frequency (names used, most-used record), save/load `cache.dat` with progress |
 | DNS ▾ External Cache | `/pages/dns_cache.html` | External REST cache URL, cache stats |
 | DNS ▾ Local Hosts | `/pages/dns_local_hosts.html` | Local domain→IP mappings |
 | DNS ▾ Logging | `/pages/dns_logging.html` | DNS REST logging |
 | Time ▾ General | `/pages/ntp_setup.html` | NTP server: on/off, LAN-only filter + reply rate limit, clock sync on/off, external NTP, timezone, sync interval, manual date/time setting (typed or taken from the computer) |
 | Time ▾ Logging | `/pages/ntp_logging.html` | NTP request logging (terminal + external REST URL/auth/Test) |
-| Settings ▾ Files | `/pages/files.html` | File explorer: internal FAT + microSD, download/upload/rename/delete, actions menu (new file, new folder, select all, upload file, upload folder, move/delete the selection, refresh, format card), text editor |
+| Settings ▾ Files | `/pages/files.html` | File explorer: internal FAT + microSD, download/upload/rename/delete, actions menu (new file, new folder, select all, upload file, upload folder, copy/move the selection — including **between the two volumes**, with progress and cancel — delete, refresh, format card), text editor |
 | Settings ▾ Security | `/pages/security.html` | Web login (username/password), max attempts, lockout period |
 | Settings ▾ Import | `/pages/settings_import.html` | Restore settings from an exported JSON file |
 | Settings ▾ Export | `/pages/settings_export.html` | Download the current settings as a JSON file |
-| Settings ▾ Device | `/pages/settings_device.html` | Reboot, factory reset (erases all settings) |
+| Settings ▾ Device | `/pages/settings_device.html` | Reboot — which first writes and *shows* what the two "before reboot" switches ask for (statistics, then the cache with its percentage) and only then restarts — and factory reset (erases all settings) |
 | Settings ▾ Task Scheduler | `/pages/jobs.html` | Long-running operations of the whole device: state, progress, current step, elapsed time, a stop button for every unfinished one (polls `GET /api/jobs` every 2 s) |
 | Help ▾ Version | `/pages/version.html` | Firmware version info, OTA firmware upload, web-file (SPIFFS) upload |
 
@@ -280,8 +280,9 @@ All endpoints require HTTP Basic Authentication.
 | GET | `/api/settings/export` | Export all settings as JSON (passwords excluded) |
 | POST | `/api/settings/import` | Import settings from JSON |
 | POST | `/api/settings/reset` | Factory reset all settings and reboot |
-| POST | `/api/device/reboot` | Reboot the device |
-| POST | `/api/ota/upload` | Upload firmware (raw body; `multipart/form-data` also accepted) |
+| POST | `/api/device/reboot` | Reboot the device (optional `{"saved": true}` = the restart files are already written) |
+| POST | `/api/device/reboot/prepare` | Start the files a planned restart wants (statistics and cache, each as a background job) and report what each step decided |
+| POST | `/api/ota/upload` | Upload firmware (raw body; `multipart/form-data` also accepted; `?saved=1` = the restart files are already written, skip them) |
 | POST | `/api/web/file?path=<rel>` | Upload a web (SPIFFS) file |
 | GET | `/api/files/volumes` | Explorer volumes (id, mount point, mounted/present, capacity, last mount error) |
 | GET | `/api/files/list?volume=<id>&path=<dir>` | Directory listing + free space |
@@ -290,7 +291,10 @@ All endpoints require HTTP Basic Authentication.
 | GET | `/api/files/upload/offset?volume=<id>&path=<file>` | How much of a paused upload is already on the device |
 | POST | `/api/files/upload/cancel?volume=<id>&path=<file>` | Throw away the temporary file of an upload |
 | POST | `/api/files/mkdir` | Create a directory |
-| POST | `/api/files/rename` | Rename / move |
+| POST | `/api/files/rename` | Rename / move (inside one volume) |
+| POST | `/api/files/transfer` | Copy or move files/directories **between volumes** (`op`, `src_volume`, `paths[]`, `dst_volume`, `dst_path`, `conflict`); runs outside the server task, answers `409` + the taken names before anything is copied |
+| GET | `/api/files/transfer` | Snapshot of the transfer job (phase, bytes, counters, first error), polled while it runs |
+| POST | `/api/files/transfer/cancel` | Ask the running transfer to stop (what was already copied stays) |
 | POST | `/api/files/delete` | Delete a file or directory (`recursive` for a non-empty one) |
 | POST | `/api/files/format` | Format the microSD card (`confirm: true`); runs outside the server task, so a long erase does not block the UI and can be stopped from the scheduler |
 | GET | `/api/files/text?volume=<id>&path=<file>` | Read a text file for the editor |
@@ -304,6 +308,7 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
 | GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
 | GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
+| GET | `/api/dns/stats/progress` | Background statistics-write state and verdict (`busy`, `last_result`) |
 | POST | `/api/dns/internal-cache/save` | Save the PSRAM cache to `cache.dat` (async) |
 | POST | `/api/dns/internal-cache/load` | Restore the cache from `cache.dat` (async) |
 | GET | `/api/time/settings` | NTP server configuration + status |
@@ -358,7 +363,9 @@ DHCPServer/
 │   ├── main.cpp            # Application entry point
 │   ├── CMakeLists.txt      # Component sources (wifi/ excluded on ESP32-P4)
 │   ├── Kconfig.projbuild   # Project configuration options
-│   ├── core/               # Version, Config, Subnet helper, CPU monitor
+│   ├── core/               # Version, Config, Subnet helper, CPU monitor,
+│   │                       # error log (Errors.log on FAT, written by its own
+│   │                       # task through a queue in PSRAM)
 │   ├── eth/                # Ethernet manager (ENC28J60 SPI on ESP32 /
 │   │                       #   internal EMAC + IP101GRI on ESP32-P4-ETH)
 │   ├── dhcp/               # DHCP server
@@ -437,11 +444,14 @@ Test files:
 - `test/test_wifi.cpp` — WiFiManager (needs hardware) and LedController
 - `test/test_pathutil.cpp` — file-explorer path policy (escape attempts, illegal names) — host-runnable
 - `test/test_uploadrange.cpp` — chunk arithmetic of a resumable upload (continue, complete, mismatched offset) — host-runnable
+- `test/test_transferengine.cpp` — copy/move between volumes against the real host filesystem: counters, tree copy, `move` deleting the source only after a complete copy, conflicts/skip/merge, cancel, a directory with more entries than one listing holds, refusing a destination that is too small — host-runnable
 - `test/test_filesink.cpp` — the temporary file of an upload: keep, continue, publish, discard (needs `-I test/stubs` for the logging stub) — host-runnable
 - `test/test_jobregistry.cpp` — rules of the job list behind the scheduler page (one-off removal, repeats, paused operations, cancellation) — host-runnable
 - `test/test_multipart.cpp` — `MultipartExtractor` for OTA bodies (any chunk size) — host-runnable
 - `test/test_filejson.cpp` — file-explorer/storage JSON payloads + structural comma checks — host-runnable
 - `test/test_internalcache.cpp` — the PSRAM DNS cache: usage counter (hit, store, refresh, recycled node), least-used eviction, TTL expiry, save/load roundtrip (format v2), a version 1 file and the counter saturating at the maximum instead of wrapping through zero — host-only (`-DDHCP_TEST_HOST -I test/stubs`, link `-lws2_32`): the stub clock makes TTL expiry testable without sleeping, and the test fills the whole pool, which is where it found the uninitialised bucket heads
+- `test/test_restartsavejobstate.cpp` — the state both "write a file before the restart" jobs use: single-flight (a second request is refused, not started), the verdict a finished job stores, no inherited verdict when a new run starts (the page would otherwise read the previous run's luck), a switch turned off mid-run not faking the outcome, and the poll sequence a page sees across two runs — host-only (`g++ -DDHCP_TEST_HOST`), which is the point: every bug this project had in this area lived in that logic rather than in the file I/O
+- `test/test_errorlogcore.cpp` — the part of the error log that is plain C++: the stamp (a device whose clock is not set gets `t+152s`, never a 1970 date that looks like a fact), the truncation marker on a message too long for one queue item, the drain into a target, and the drop counter — a full queue or a target that refuses a line must be **reported inside the log**, because a log with silent holes is worse than none
 
 > No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
 > has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4

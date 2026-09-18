@@ -143,10 +143,18 @@ public:
      * @param entriesWritten Optional out-param with the number of records saved.
      * @param progress Optional callback invoked periodically (done,total).
      * @param progressCtx User pointer passed to @p progress.
-     * @return false if the cache is disabled or the file could not be written.
+     * @param nothingToSave Optional out-param, set to true when the file was not
+     * written because there was nothing live to write (an empty table, or one
+     * whose entries have all expired). Callers that show the operator what
+     * happened must tell that case apart from a write that failed: "nothing to
+     * save" is normal on a freshly started device, and reporting it as an error
+     * is exactly the kind of lie this parameter exists to prevent.
+     * @return false if the cache is disabled, there was nothing to save, or the
+     * file could not be written.
      */
     bool saveToFile(const char* path, size_t* entriesWritten = nullptr,
-                    ProgressFn progress = nullptr, void* progressCtx = nullptr);
+                    ProgressFn progress = nullptr, void* progressCtx = nullptr,
+                    bool* nothingToSave = nullptr);
 
     /**
      * @brief Restore the cache from a file written by saveToFile().

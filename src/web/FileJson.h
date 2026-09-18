@@ -7,6 +7,7 @@
 
 #include "../core/JobRegistry.h"
 #include "../files/IFileManager.h"
+#include "../files/TransferEngine.h"
 #include "../storage/IFileSystem.h"
 #include "JsonWriter.h"
 
@@ -98,6 +99,32 @@ public:
     static std::string settings(const SettingsPayload& payload);
 
     /**
+     * @brief Body of `GET /api/files/transfer` — the snapshot of the transfer job.
+     *
+     * `{"phase":…,"busy":…,"finished":…,"cancelled":…,"instant":…,"op":…,
+     * "src_volume":…,"dst_volume":…,"dst_path":…,"current":…,"done_bytes":…,
+     * "total_bytes":…,"needed_bytes":…,"free_bytes":…,"files_done":…,
+     * "files_total":…,"dirs_done":…,"dirs_total":…,"skipped":…,"failed":…,
+     * "deleted":…,"error":…,"error_path":…}`
+     *
+     * One payload covers every state the page has to draw: while `busy` the bar
+     * uses `done_bytes`/`total_bytes` (`total_bytes == 0` means the measurement is
+     * still running, so the page draws an indeterminate bar rather than dividing
+     * by zero), and once `finished` the very same object is the summary — how much
+     * was copied, what was skipped and what failed.
+     */
+    static std::string transfer(const ::dhcp::files::TransferReport& report);
+
+    /**
+     * @brief Body of the `409` answer of `POST /api/files/transfer`.
+     *
+     * `{"status":"conflict","conflicts":[{"name":…}, …]}` — the names that
+     * are already in the destination. That is what the page turns into "replace
+     * them?" before it sends the same request again with an explicit policy.
+     */
+    static std::string transferConflicts(const std::vector<std::string>& names);
+
+    /**
      * @brief Body of `GET /api/files/check` — a volume-check report.
      *
      * `{"busy":…,"finished":…,"truncated":…,"cancelled":…,"volume":…,
@@ -131,6 +158,9 @@ public:
     static std::string jobs(const std::vector<::dhcp::core::JobInfo>& jobs);
 
 private:
+    /** @brief `[{"name":…}, …]` for the names taken in the destination. */
+    static std::string nameArray(const std::vector<std::string>& names);
+
     /** @brief `[{…}, …]` for the directory listing (comma-safe for 0/1/n entries). */
     static std::string entryArray(const std::vector<::dhcp::files::FileEntry>& entries);
 

@@ -58,7 +58,9 @@
                         <!-- Bulk actions: they need a selection, so they stay
                              disabled (not hidden) until something is ticked. -->
                         <button type="button" id="files-menu-move"
-                                data-i18n="files.move">Move ...</button>
+                                data-i18n="files.move">Move to ...</button>
+                        <button type="button" id="files-menu-copy"
+                                data-i18n="files.copy">Copy to ...</button>
                         <button type="button" id="files-menu-delete-selected" class="danger"
                                 data-i18n="files.delete">Delete</button>
                         <div class="files-menu-sep"></div>
@@ -155,21 +157,10 @@
         </div>
     </main>
 
-    <!-- In-page modal: native prompt()/confirm() are blocked in some embedded
-         browsers, and a menu-driven UI should not depend on them. -->
-    <div class="modal-backdrop" id="files-modal" style="display:none;">        <div class="modal-card" role="dialog" aria-modal="true">
-            <h3 id="files-modal-title"></h3>
-            <p class="hint" id="files-modal-hint" style="display:none;"></p>
-            <input type="text" id="files-modal-input" style="display:none;" maxlength="128">
-            <div class="modal-actions">
-                <button class="btn" id="files-modal-cancel" data-i18n="files.cancel">Cancel</button>
-                <!-- Optional third choice (e.g. Upload folder → "overwrite all"
-                     when names clash); hidden unless a caller asks for it. -->
-                <button class="btn" id="files-modal-extra" style="display:none;"></button>
-                <button class="btn btn-primary" id="files-modal-ok"></button>
-            </div>
-        </div>
-    </div>
+    <!-- The dialog the explorer asks its questions in is shared with the rest of
+         the UI (see `showDialog` in js/app.js): it used to be defined here, and
+         the Internal Cache and Version pages asked theirs with the browser's
+         own confirm() because of it. -->
 
     <!-- Destination picker of "Move ...": folders are entered by clicking them,
          the confirmation is the "Move here" button. Folders that are part of
@@ -177,14 +168,20 @@
          itself" impossible to pick instead of something to be refused later. -->
     <div class="modal-backdrop" id="files-picker" style="display:none;">
         <div class="modal-card" role="dialog" aria-modal="true">
-            <h3 data-i18n="files.picker_title">Move to</h3>
+            <h3 id="files-picker-title">Move to</h3>
+            <!-- The destination volume is part of the choice: the whole point of a
+                 transfer is that source and destination need not be one volume.
+                 Only mounted ones are offered (the buttons are built by JS). -->
+            <div class="files-picker-volumes" id="files-picker-volumes"></div>
             <p class="hint" id="files-picker-hint"></p>
             <div class="files-picker-path" id="files-picker-path"></div>
             <div class="files-picker-list" id="files-picker-list"></div>
             <div class="modal-actions">
                 <button class="btn" id="files-picker-cancel" data-i18n="files.cancel">Cancel</button>
-                <button class="btn btn-primary" id="files-picker-ok"
-                        data-i18n="files.move_here">Move here</button>
+                <!-- Label and meaning follow the operation (move / copy), so JS sets
+                     it — a script-written label must not keep `data-i18n`, or
+                     applyTranslations() would overwrite it on a language switch. -->
+                <button class="btn btn-primary" id="files-picker-ok">Move here</button>
             </div>
         </div>
     </div>
@@ -657,6 +654,7 @@
             // first" far better than an error after the click.
             const hasSelection = filesState.selected.size > 0;
             set('files-menu-move', mounted && hasSelection, false);
+            set('files-menu-copy', mounted && hasSelection, false);
             set('files-menu-delete-selected', mounted && hasSelection, false);
             set('files-menu-refresh', true, false);
             set('files-menu-format', mounted && isSd, !isSd);
@@ -704,7 +702,8 @@
             on('files-menu-select-all', () => selectAllToggle());
             on('files-menu-upload-file', () => pickUpload());
             on('files-menu-upload-folder', () => pickFolder());
-            on('files-menu-move', () => moveSelected());
+            on('files-menu-move', () => startTransfer('move'));
+            on('files-menu-copy', () => startTransfer('copy'));
             on('files-menu-delete-selected', () => deleteSelected());
             on('files-menu-refresh', () => reloadFiles());
             on('files-menu-format', () => formatVolume());
@@ -748,58 +747,12 @@
         }
 
         /* ─── In-page modal dialog ──────────────────────── */
-        /* Resolves with the typed value (input mode), `true` (confirm mode),
-           `'extra'` (the optional third button) or `null` when the operator
-           cancels / closes the dialog. */
-        let filesModalResolve = null;
-
-        function filesModalOpen({ title, hint, value, okLabel, danger, withInput, extraLabel }) {
-            const modal = document.getElementById('files-modal');
-            const input = document.getElementById('files-modal-input');
-            const hintEl = document.getElementById('files-modal-hint');
-            const ok = document.getElementById('files-modal-ok');
-            const extra = document.getElementById('files-modal-extra');
-
-            document.getElementById('files-modal-title').textContent = title;
-            hintEl.textContent = hint || '';
-            hintEl.style.display = hint ? '' : 'none';
-
-            input.style.display = withInput ? '' : 'none';
-            input.value = withInput ? (value || '') : '';
-
-            ok.textContent = okLabel;
-            ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
-            extra.textContent = extraLabel || '';
-            extra.style.display = extraLabel ? '' : 'none';
-
-            modal.style.display = 'flex';
-            if (withInput) {
-                input.focus();
-                input.select();
-            } else {
-                ok.focus();
-            }
-
-            return new Promise(resolve => { filesModalResolve = resolve; });
-        }
-
-        function filesModalClose(result) {
-            document.getElementById('files-modal').style.display = 'none';
-            const resolve = filesModalResolve;
-            filesModalResolve = null;
-            if (resolve) resolve(result);
-        }
-
-        document.getElementById('files-modal-ok').onclick = () => {
-            const input = document.getElementById('files-modal-input');
-            filesModalClose(input.style.display === 'none' ? true : input.value.trim());
-        };
-        document.getElementById('files-modal-extra').onclick = () => filesModalClose('extra');
-        document.getElementById('files-modal-cancel').onclick = () => filesModalClose(null);
-        document.getElementById('files-modal-input').onkeydown = (e) => {
-            if (e.key === 'Enter') document.getElementById('files-modal-ok').click();
-            if (e.key === 'Escape') filesModalClose(null);
-        };
+        /* The dialog lives in app.js now (`showDialog`), so the other pages ask
+           their questions with the very same one. The wrapper keeps this page's
+           call sites as they were: they pass title/hint/value/okLabel/danger/
+           withInput/extraLabel and get back the typed value, `true`, 'extra' or
+           null. */
+        const filesModalOpen = (opts) => showDialog(opts);
 
         /* ─── Selection ─────────────────────────────────── */
         /* The set holds NAMES of the current directory: the table is rebuilt on
@@ -867,19 +820,63 @@
             await loadList();
         }
 
-        /* ─── Destination picker (Move) ──────────────────── */
-        /* A small directory browser: a folder is entered by clicking it and the
-           confirmation is «Переместить сюда». Only directories are listed (a file
-           is not a destination), and every folder that is part of the selection
-           is left out — that makes "a folder into itself" impossible to pick
-           rather than something to be refused after the fact. */
+        /* ─── Destination picker (move / copy) ───────────── */
+        /* A small directory browser: a folder is entered by clicking it, the
+           volume is switched with the buttons on top, and the confirmation says
+           what it does ("Move here" / "Copy here"). Only directories are listed
+           (a file is not a destination), and when the destination volume is the
+           source volume, every folder that is part of the selection is left out
+           — that makes "a folder into itself" impossible to pick rather than
+           something to be refused after the fact. */
         let pickerResolve = null;
         let pickerPath = '/';
+        let pickerVolume = '';      // destination volume id
+        let pickerOp = 'move';      // 'move' | 'copy'
 
         function pickerForbidden() {
+            // Only the source volume can contain the selection.
+            if (pickerVolume !== filesState.volume) return new Set();
             return new Set(selectedEntries()
                 .filter(e => e.is_dir)
                 .map(e => filesJoin(filesState.path, e.name)));
+        }
+
+        /* The picker may look at a volume that is not the one being browsed, so it
+           cannot reuse folderListing() — that one is bound to filesState.volume
+           (the page's current listing) and would answer about the wrong volume. */
+        async function folderListingIn(volume, dir) {
+            try {
+                const resp = await apiFetch('/api/files/list?volume=' +
+                    encodeURIComponent(volume) + '&path=' + encodeURIComponent(dir));
+                if (!resp.ok) return null;
+                const data = await resp.json();
+                return data.entries || [];
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function renderPickerVolumes() {
+            const box = document.getElementById('files-picker-volumes');
+            box.innerHTML = '';
+            const mounted = (filesState.volumes || []).filter(v => v.mounted);
+            if (mounted.length < 2) return;   // one volume: nothing to choose
+
+            // A label, because a bare pair of buttons does not say what it
+            // switches — the destination volume of the transfer.
+            const label = document.createElement('span');
+            label.className = 'files-picker-volumes-label';
+            label.textContent = tr('files.picker_dest');
+            box.appendChild(label);
+
+            mounted.forEach(v => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'files-picker-item vol' + (v.id === pickerVolume ? ' active' : '');
+                b.textContent = tr(v.id === 'fat' ? 'files.volume_fat' : 'files.volume_sd');
+                b.onclick = () => { pickerVolume = v.id; pickerEnter('/'); };
+                box.appendChild(b);
+            });
         }
 
         function pickerMessage(list, text) {
@@ -891,9 +888,20 @@
 
         async function pickerEnter(path) {
             pickerPath = path;
+            renderPickerVolumes();
+
+            // The destination is a pair (volume, folder) — and the root of a
+            // volume is a perfectly good folder. Naming the volume in the path
+            // line is what makes "confirm right here" readable as a choice
+            // instead of an empty dead end.
+            const sameVolume = (pickerVolume === filesState.volume);
+            const isSource = sameVolume && path === filesState.path;
+            const volumeName = tr(pickerVolume === 'fat' ? 'files.volume_fat'
+                                                        : 'files.volume_sd');
+
             const pathEl = document.getElementById('files-picker-path');
-            pathEl.textContent = path === filesState.path
-                ? path + '   (' + tr('files.picker_source') + ')' : path;
+            pathEl.textContent = volumeName + ' · ' + path +
+                (isSource ? '   (' + tr('files.picker_source') + ')' : '');
 
             const list = document.getElementById('files-picker-list');
             list.innerHTML = '';
@@ -909,12 +917,12 @@
                 list.appendChild(up);
             }
 
-            // The source directory is never a destination: moving into itself
-            // would be a no-op, and the button says so instead of failing later.
-            document.getElementById('files-picker-ok').disabled =
-                (path === filesState.path);
+            // The source directory is never a destination: moving or copying
+            // into itself would be a no-op, and the button says so instead of
+            // failing later. Another volume has no such case.
+            document.getElementById('files-picker-ok').disabled = isSource;
 
-            const entries = await folderListing(path);
+            const entries = await folderListingIn(pickerVolume, path);
             if (entries === null) {
                 pickerMessage(list, tr('files.load_fail'));
                 return;
@@ -923,7 +931,12 @@
             const dirs = entries.filter(e => e.is_dir &&
                 !forbidden.has(filesJoin(path, e.name)));
             if (dirs.length === 0) {
-                pickerMessage(list, tr('files.picker_no_dirs'));
+                // An empty folder list is NOT a dead end: the destination folder
+                // itself (usually the root of the other volume) is what the
+                // button confirms. Say that — and say why the button is off in
+                // the source folder.
+                pickerMessage(list, isSource ? tr('files.picker_source_hint')
+                                            : tr('files.picker_no_dirs'));
                 return;
             }
             dirs.forEach(e => {
@@ -936,7 +949,13 @@
             });
         }
 
-        function movePickerOpen(count) {
+        function pickerOpen(op, count) {
+            pickerOp = op;
+            pickerVolume = filesState.volume;
+            document.getElementById('files-picker-title').textContent =
+                tr(op === 'move' ? 'files.picker_title' : 'files.picker_title_copy');
+            document.getElementById('files-picker-ok').textContent =
+                tr(op === 'move' ? 'files.move_here' : 'files.copy_here');
             document.getElementById('files-picker-hint').textContent =
                 tr('files.picker_selected') + ': ' + count;
             document.getElementById('files-picker').style.display = 'flex';
@@ -952,54 +971,166 @@
         }
 
         document.getElementById('files-picker-cancel').onclick = () => movePickerClose(null);
-        document.getElementById('files-picker-ok').onclick = () => movePickerClose(pickerPath);
+        // The answer is a pair (volume, folder): the picker may have been switched
+        // to the other volume before the operator confirmed.
+        document.getElementById('files-picker-ok').onclick = () =>
+            movePickerClose({ volume: pickerVolume, path: pickerPath });
         document.getElementById('files-picker').onclick = (ev) => {
             // Only a click on the backdrop itself (not inside the card) closes it.
             if (ev.target === document.getElementById('files-picker')) movePickerClose(null);
         };
 
-        /* The destination is picked from the volume itself, so it exists by
-           construction; what is still checked before anything moves is the names
-           already taken there, because FatFs' rename refuses an existing name and
-           the firmware maps that to a plain I/O error. */
-        async function moveSelected() {
+        /* ─── Copy / move between volumes ────────────────── */
+        /* The device does the work in a task of its own (a directory of a card is
+           gigabytes), so this side only asks and then follows: the POST starts
+           the job, the GET reports it, and a name that is already taken in the
+           destination comes back as `409` *before* anything is copied — that
+           answer is what the three-choice dialog exists for. Nothing is guessed
+           about the outcome here: the summary is built from the same counters the
+           device reports. */
+        let transferTimer = null;
+        let transferIdle = 0;
+
+        /** How many polls without any report before the page gives up (2 s each) */
+        const kTransferIdleLimit = 5;
+
+        async function conflictDialog(names) {
+            const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', …' : '');
+            const answer = await filesModalOpen({
+                title: tr('files.conflict_title') + ' (' + names.length + ')',
+                hint: shown + '   ·   ' + tr('files.conflict_hint'),
+                okLabel: tr('files.conflict_overwrite'),
+                extraLabel: tr('files.conflict_skip'),
+            });
+            if (answer === true) return 'overwrite';
+            if (answer === 'extra') return 'skip';
+            return null;                     // cancelled
+        }
+
+        function transferRequest(body) {
+            return apiFetch('/api/files/transfer', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+        }
+
+        async function startTransfer(op) {
             const entries = selectedEntries();
             if (entries.length === 0) {
                 filesStatus(tr('files.nothing_selected'), 'fail');
                 return;
             }
 
-            const target = await movePickerOpen(entries.length);
-            if (!target || target === filesState.path) return;
+            const target = await pickerOpen(op, entries.length);
+            if (!target) return;
 
-            const destEntries = await folderListing(target);
-            if (destEntries === null) {
-                filesStatus(tr('files.move_no_dir') + ': ' + target, 'fail');
-                return;
+            const body = {
+                op: op,
+                src_volume: filesState.volume,
+                paths: entries.map(e => filesJoin(filesState.path, e.name)),
+                dst_volume: target.volume,
+                dst_path: target.path,
+                conflict: 'ask',
+            };
+
+            let resp = await transferRequest(body);
+            if (resp.status === 409) {
+                const data = await resp.json().catch(() => null);
+                const names = ((data && data.conflicts) || []).map(c => c.name);
+                const policy = await conflictDialog(names);
+                if (!policy) return;         // the operator changed their mind
+                body.conflict = policy;
+                resp = await transferRequest(body);
             }
-            const taken = new Set(destEntries.map(e => e.name.toLowerCase()));
 
-            let done = 0, firstError = '';
-            for (const entry of entries) {
-                const from = filesJoin(filesState.path, entry.name);
-                if (taken.has(entry.name.toLowerCase())) {
-                    if (!firstError) firstError = entry.name + ': ' + tr('files.move_exists');
-                    continue;
-                }
-                const resp = await apiFetch('/api/files/rename', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ volume: filesState.volume, path: from,
-                                           to: filesJoin(target, entry.name) }),
-                });
-                if (resp.ok) done++;
-                else if (!firstError) firstError = entry.name + ': ' + await filesError(resp);
+            if (!resp.ok) {
+                filesStatus(tr('files.transfer_fail') + ': ' + await filesError(resp), 'fail');
+                return;
             }
 
             filesState.selected.clear();
-            let summary = tr('files.move_done') + ' ' + done + ' / ' + entries.length;
-            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
-            filesStatus(summary, firstError ? 'fail' : 'ok');
+            renderRows(filesState.entries);
+            transferFollow();
+        }
+
+        function cancelTransfer() {
+            apiFetch('/api/files/transfer/cancel', { method: 'POST' });
+        }
+
+        function transferFollow() {
+            // The same row the uploads use. The pause button has no meaning for a
+            // transfer (it cannot be resumed), so it goes away while one runs.
+            document.getElementById('files-progress-row').style.display = '';
+            document.getElementById('files-pause-btn').style.display = 'none';
+            document.getElementById('files-cancel-btn').onclick = () => cancelTransfer();
+            if (transferTimer) clearInterval(transferTimer);
+            transferTimer = setInterval(transferTick, 500);
+            transferIdle = 0;
+            transferTick();
+        }
+
+        function transferStop() {
+            if (transferTimer) { clearInterval(transferTimer); transferTimer = null; }
+            document.getElementById('files-progress-row').style.display = 'none';
+            document.getElementById('files-pause-btn').style.display = '';
+            // Hand the row back to the upload code, which sets its own handler
+            // again when a new upload starts.
+            document.getElementById('files-cancel-btn').onclick = () => cancelUpload();
+        }
+
+        async function transferTick() {
+            const resp = await apiFetch('/api/files/transfer');
+            if (!resp.ok) { transferStop(); return; }
+            const r = await resp.json().catch(() => null);
+            if (!r) { transferStop(); return; }
+
+            const label = document.getElementById('files-progress-label');
+            const percent = document.getElementById('files-progress-percent');
+            const bar = document.getElementById('files-progress-bar');
+            const opName = tr(r.op === 'move' ? 'files.move' : 'files.copy');
+
+            if (r.phase === 'measuring') {
+                // The walk moves no bytes, so there is no percentage yet: say what
+                // is happening instead of leaving a bar sitting at zero.
+                label.textContent = opName + ' · ' + tr('files.transfer_measuring') +
+                                    ' (' + r.files_total + ')';
+                percent.textContent = '';
+                bar.style.width = '0%';
+                return;
+            }
+
+            if (r.busy) {
+                const done = r.total_bytes > 0
+                    ? Math.min(100, Math.round(r.done_bytes * 100 / r.total_bytes)) : 0;
+                bar.style.width = done + '%';
+                percent.textContent = done + ' %';
+                label.textContent = opName + ' · ' + (r.current || '') + '   ' +
+                                    filesFmtSize(r.done_bytes) + ' / ' + filesFmtSize(r.total_bytes);
+                return;
+            }
+
+            if (!r.busy && !r.finished) {
+                // The device accepted the request but has not reported the job yet.
+                // A few polls are normal (the task is starting); a device that never
+                // does report must not leave the row sitting there forever.
+                if (++transferIdle >= kTransferIdleLimit) {
+                    transferStop();
+                    filesStatus(tr('files.transfer_fail'), 'fail');
+                }
+                return;
+            }
+
+            transferStop();
+            let summary = (r.cancelled ? tr('files.transfer_cancelled')
+                                       : tr('files.transfer_done')) +
+                          ' · ' + r.files_done + ' / ' + r.files_total;
+            if (r.skipped > 0) summary += '   ·   ' + tr('files.transfer_skipped') + ': ' + r.skipped;
+            if (r.failed > 0) {
+                summary += '   ·   ' + tr('files.fail') + ': ' + r.failed;
+                if (r.error_path || r.error) summary += ' (' + (r.error_path || r.error) + ')';
+            }
+            filesStatus(summary, (r.failed > 0 || r.error) ? 'fail' : 'ok');
             await loadList();
         }
 

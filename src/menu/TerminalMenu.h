@@ -42,6 +42,18 @@ public:
                  const std::string& prompt = "dhcp> ");
 
     /**
+     * @brief What the two console commands that touch stored state have to do.
+     *
+     * `reboot` keeps the main-page statistics, a factory reset deletes them —
+     * both live in the DNS server, and the menu must not include its header: that
+     * include drags `namespace dhcp::dhcp` into this translation unit, after which
+     * `dhcp::core::…` in this file silently resolves to `dhcp::dhcp::core` and
+     * stops compiling. Two callbacks keep the layering and the compile unit clean.
+     */
+    using Hook = std::function<void()>;
+    void setLifecycleHooks(Hook beforeReboot, Hook factoryReset);
+
+    /**
      * @brief Start the terminal menu task.
      * Reads commands from stdin and processes them.
      */
@@ -73,6 +85,8 @@ private:
     dhcp::wifi::IWiFiManager& wifi_;
     dhcp::led::ILedController& led_;
     dhcp::web::AuthManager* auth_;
+    Hook beforeReboot_;
+    Hook factoryReset_;
     std::string prompt_;
     bool running_ = false;
 };

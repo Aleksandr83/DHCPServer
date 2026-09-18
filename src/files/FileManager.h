@@ -9,6 +9,8 @@
 
 #include "sdkconfig.h"
 #include "IFileManager.h"
+#include "IFileOps.h"
+#include "TransferEngine.h"
 
 namespace dhcp {
 namespace files {
@@ -23,7 +25,7 @@ namespace files {
  * target-specific part (which volumes exist at all) in one place instead of
  * scattering `#if CONFIG_IDF_TARGET_*` across the module.
  */
-class FileManager : public IFileManager {
+class FileManager : public IFileManager, public IFileOps {
 public:
     /** @brief Minimum delay between mount attempts for a missing volume. */
     static constexpr uint32_t kRetryMs = 5000;
@@ -89,6 +91,24 @@ public:
                           std::string* detail = nullptr) override;
     void checkCancel() override;
     CheckReport checkReport() override;
+
+    // IFileOps — the seam the transfer engine works through. The signatures
+    // match IFileManager where the operation is the same, so one override each
+    // satisfies both interfaces; only the copy-specific entry points are new.
+    FileStatus scan(const std::string& volumeId, const std::string& path,
+                    IDirVisitor& visitor, std::string* detail = nullptr) override;
+    FileStatus createWriter(const std::string& volumeId, const std::string& path,
+                            std::unique_ptr<IFileSink>& out,
+                            std::string* detail = nullptr) override;
+
+    // File transfers between volumes (copy / move)
+    FileStatus transferConflicts(const TransferRequest& req,
+                                 std::vector<std::string>& names,
+                                 std::string* detail = nullptr) override;
+    FileStatus transferStart(const TransferRequest& req,
+                             std::string* detail = nullptr) override;
+    void transferCancel() override;
+    void transferReport(TransferReport& out) override;
     void applyAccessFilter() override;
     bool allowClient(uint32_t clientIp4Host) override;
     uint32_t foreignBlocked() const override { return foreignBlocked_; }
@@ -107,6 +127,26 @@ private:
 
     /** @brief Task body of a volume check (owns the walk and the report). */
     static void checkTask(void* arg);
+
+    /** @brief Task body of a transfer: runs the engine, then closes the job. */
+    static void transferTask(void* arg);
+
+    /**
+     * @brief Publishes the engine's progress and answers its cancel questions.
+     *
+     * The engine reports through the observer instead of writing the snapshot
+     * itself, so the mutex that protects it (and the job registry) stays in one
+     * place — this class — and the engine remains free of both.
+     */
+    class TransferObserver : public ITransferObserver {
+    public:
+        explicit TransferObserver(FileManager& owner) : owner_(owner) {}
+        void onTransferProgress(const TransferReport& report) override;
+        bool transferCancelRequested() override;
+
+    private:
+        FileManager& owner_;
+    };
 
     /** @brief The walk itself; runs in the task created by @ref checkStart. */
     void checkWalk(const std::string& mountPoint);
@@ -142,6 +182,19 @@ private:
     bool checkCancel_ = false;
     std::string checkMount_;
     CheckReport checkState_;
+
+    // Transfer job (one at a time; same shape as the check job).
+    void* transferMutex_ = nullptr;
+    void* transferTask_ = nullptr;
+    bool transferCancel_ = false;
+    TransferRequest transferReq_;
+    TransferReport transferState_;
+
+    /** @brief Publish @p report as the current snapshot (locks the mutex). */
+    void transferPublish(const TransferReport& report);
+
+    /** @brief True when the operator asked the transfer to stop. */
+    bool transferStopRequested();
 
     // LAN-only access (see IFileManager::applyAccessFilter)
     bool allowOwnSubnet_ = true;

@@ -110,6 +110,59 @@ std::string FileJson::checkErrorArray(const std::vector<::dhcp::files::CheckErro
     return out;
 }
 
+std::string FileJson::transfer(const ::dhcp::files::TransferReport& report)
+{
+    JsonWriter out;
+    out.str("phase", ::dhcp::files::transferPhaseName(report.phase));
+    out.boolean("busy", report.busy);
+    out.boolean("finished", report.finished);
+    out.boolean("cancelled", report.cancelled);
+    out.boolean("instant", report.instant);
+    out.str("op", report.op == ::dhcp::files::TransferOp::Move ? "move" : "copy");
+    out.str("src_volume", report.srcVolume);
+    out.str("dst_volume", report.dstVolume);
+    out.str("dst_path", report.dstPath);
+    out.str("current", report.current);
+    out.num("done_bytes", static_cast<int64_t>(report.doneBytes));
+    out.num("total_bytes", static_cast<int64_t>(report.totalBytes));
+    out.num("needed_bytes", static_cast<int64_t>(report.neededBytes));
+    out.num("free_bytes", static_cast<int64_t>(report.freeBytes));
+    out.num("files_done", report.filesDone);
+    out.num("files_total", report.filesTotal);
+    out.num("dirs_done", report.dirsDone);
+    out.num("dirs_total", report.dirsTotal);
+    out.num("skipped", report.skipped);
+    out.num("failed", report.failed);
+    out.num("deleted", report.deleted);
+    out.str("error", report.error);
+    out.str("error_path", report.errorPath);
+    return out.toString();
+}
+
+std::string FileJson::nameArray(const std::vector<std::string>& names)
+{
+    // Objects rather than bare strings: a name may hold any character a FAT
+    // volume allows, and JsonWriter is the one place that knows how to escape
+    // it — the page reads `conflicts[].name`.
+    std::string list = "[";
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i != 0) list += ',';
+        JsonWriter w;
+        w.str("name", names[i]);
+        list += w.toString();
+    }
+    list += ']';
+    return list;
+}
+
+std::string FileJson::transferConflicts(const std::vector<std::string>& names)
+{
+    JsonWriter out;
+    out.str("status", "conflict");
+    out.literal("conflicts", nameArray(names));
+    return out.toString();
+}
+
 std::string FileJson::check(const ::dhcp::files::CheckReport& report)
 {
     JsonWriter w;

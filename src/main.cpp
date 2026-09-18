@@ -26,6 +26,7 @@
 #include "core/Version.h"
 #include "core/Config.h"
 #include "core/CpuMonitor.h"
+#include "core/ErrorLog.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
 #include "files/FileManager.h"
@@ -111,6 +112,13 @@ extern "C" void app_main(void)
         std::make_unique<dhcp::storage::FatFileSystem>("fat", "fat", "/fat"));
     s_fileManager.addVolume(std::make_unique<dhcp::storage::SdFileSystem>());
     s_fileManager.mountAll();
+
+    // ─── Error log ──────────────────────────────────
+    // Critical errors go to /fat/logs/Errors.log: the terminal is not always
+    // there (that is how a failed Statistica.dat write stayed unexplained), and
+    // the web file explorer can read the file. One low-priority task writes it
+    // through a queue in PSRAM, so no caller ever waits for the FAT.
+    dhcp::core::ErrorLog::instance().start("/fat");
     // LAN-only access policy (device address + netmask from the DHCP settings).
     s_fileManager.applyAccessFilter();
 #endif
@@ -137,6 +145,12 @@ extern "C" void app_main(void)
     s_ledController.turnOff();
 
     // ─── Start terminal menu ────────────────────────
+    // The console follows the same policy as the web UI: `reboot` keeps the
+    // main-page statistics (Statistica.dat) and the cache (cache.dat), a factory
+    // reset deletes the statistics file.
+    s_terminalMenu.setLifecycleHooks(
+        []() { s_dnsServer.saveStatsBeforeRestart(); s_dnsServer.saveCacheBeforeRestart(); },
+        []() { s_dnsServer.deleteStatsFile(); });
     s_terminalMenu.start();
 
     ESP_LOGI(TAG, "DHCPServer initialized. Type 'help' in terminal.");

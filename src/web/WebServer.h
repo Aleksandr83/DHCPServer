@@ -65,8 +65,11 @@ private:
     static esp_err_t postSettingsImportHandler(httpd_req* req) { return RestApi::handlePostSettingsImport(req); }
     static esp_err_t postSettingsResetHandler(httpd_req* req) { return RestApi::handlePostSettingsReset(req); }
     static esp_err_t postRebootHandler(httpd_req* req) { return RestApi::handlePostDeviceReboot(req); }
+    static esp_err_t postRebootPrepareHandler(httpd_req* req) { return RestApi::handlePostDeviceRebootPrepare(req); }
     static esp_err_t getInternalCacheFileHandler(httpd_req* req) { return RestApi::handleGetInternalCacheFile(req); }
     static esp_err_t getInternalCacheProgressHandler(httpd_req* req) { return RestApi::handleGetInternalCacheProgress(req); }
+    // Progress/verdict of the statistics write a planned restart asks for.
+    static esp_err_t getStatsProgressHandler(httpd_req* req) { return RestApi::handleGetStatsProgress(req); }
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }
     static esp_err_t postInternalCacheLoadHandler(httpd_req* req) { return RestApi::handlePostInternalCacheLoad(req); }
     static esp_err_t getTimeSettingsHandler(httpd_req* req) { return RestApi::handleGetTimeSettings(req); }
@@ -91,6 +94,9 @@ private:
     static esp_err_t postFileCheckHandler(httpd_req* req) { return RestApi::handlePostFileCheck(req); }
     static esp_err_t postFileCheckCancelHandler(httpd_req* req) { return RestApi::handlePostFileCheckCancel(req); }
     static esp_err_t getFileCheckHandler(httpd_req* req) { return RestApi::handleGetFileCheck(req); }
+    static esp_err_t postFileTransferHandler(httpd_req* req) { return RestApi::handlePostFileTransfer(req); }
+    static esp_err_t getFileTransferHandler(httpd_req* req) { return RestApi::handleGetFileTransfer(req); }
+    static esp_err_t postFileTransferCancelHandler(httpd_req* req) { return RestApi::handlePostFileTransferCancel(req); }
     static esp_err_t getJobsHandler(httpd_req* req) { return RestApi::handleGetJobs(req); }
     static esp_err_t postJobCancelHandler(httpd_req* req) { return RestApi::handlePostJobCancel(req); }
 

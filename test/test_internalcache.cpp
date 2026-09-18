@@ -197,6 +197,68 @@ static int test_recycled_node_starts_from_zero()
     return 0;
 }
 
+/**
+ * "Nothing to write" is not a failed write.
+ *
+ * The reboot flow tells the operator what happened to the cache, and a device
+ * that has just started (or whose entries have all expired) has nothing to
+ * write. Telling that apart from a real failure is what the out-parameter is
+ * for: reporting "the cache could not be saved" on a fresh device is a lie the
+ * operator would chase for nothing.
+ */
+static int test_save_reports_nothing_to_save()
+{
+    resetClock();
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+
+    // 1. Nothing stored at all.
+    bool nothing = false;
+    size_t written = 99;
+    TEST_ASSERT_FALSE(c.saveToFile("test_cache_none.dat", &written, nullptr, nullptr, &nothing));
+    TEST_ASSERT_TRUE(nothing);
+    TEST_ASSERT_EQ(written, 0u);
+
+    // 2. Entries stored, but every one of them expired: still nothing to write.
+    c.store("gone.test", 1, ipA("10.1.1.1"), 10);
+    advanceMs(11000);
+    nothing = false;
+    TEST_ASSERT_FALSE(c.saveToFile("test_cache_none.dat", &written, nullptr, nullptr, &nothing));
+    TEST_ASSERT_TRUE(nothing);
+
+    // 3. One live entry: the file is written and the flag stays down.
+    c.store("live.test", 1, ipA("10.2.2.2"), 60);
+    nothing = true;
+    TEST_ASSERT_TRUE(c.saveToFile("test_cache_one.dat", &written, nullptr, nullptr, &nothing));
+    TEST_ASSERT_FALSE(nothing);
+    TEST_ASSERT_EQ(written, 1u);
+
+    // 4. Without the out-parameter the call behaves exactly as before (it is
+    // optional, and the older call sites still pass four arguments).
+    nothing = true;
+    TEST_ASSERT_TRUE(c.saveToFile("test_cache_one.dat", &written));
+    TEST_ASSERT_EQ(written, 1u);
+
+    // 5. The distinction survives the "ignore TTL" mode: with TTL expiry off the
+    // expired entry above is live again, so there IS something to write.
+    InternalDnsCache forever;
+    TEST_ASSERT_TRUE(forever.enable(1));
+    forever.setIgnoreTtl(true);
+    forever.store("forever.test", 1, ipA("10.3.3.3"), 10);
+    advanceMs(60000);
+    nothing = true;
+    TEST_ASSERT_TRUE(forever.saveToFile("test_cache_ignore.dat", &written, nullptr, nullptr, &nothing));
+    TEST_ASSERT_FALSE(nothing);
+    TEST_ASSERT_EQ(written, 1u);
+
+    std::remove("test_cache_none.dat");
+    std::remove("test_cache_one.dat");
+    std::remove("test_cache_ignore.dat");
+    c.disable();
+    forever.disable();
+    return 0;
+}
+
 /** Save/load keeps the counters: the file carries them (format version 2). */
 static int test_save_load_keeps_counters()
 {
@@ -480,6 +542,7 @@ void app_main()
     failures += test_usage_counter_saturates_at_max();
     failures += test_age_across_the_32_bit_millisecond_mark();
     failures += test_save_and_load_across_the_mark();
+    failures += test_save_reports_nothing_to_save();
     failures += test_ignore_ttl();
 
     if (failures == 0) {

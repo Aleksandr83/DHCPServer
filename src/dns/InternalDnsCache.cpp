@@ -530,9 +530,11 @@ uint64_t getU64(const uint8_t* s)
 } // namespace
 
 bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
-                                  ProgressFn progress, void* progressCtx)
+                                  ProgressFn progress, void* progressCtx,
+                                  bool* nothingToSave)
 {
     if (entriesWritten) *entriesWritten = 0;
+    if (nothingToSave) *nothingToSave = false;
     if (!path || !*path) return false;
     if (!arena_) return false;
 
@@ -565,6 +567,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         }
         if (keep == 0) {
             unlock();
+            if (nothingToSave) *nothingToSave = true;
             ESP_LOGW(TAG, "saveToFile: cache is empty — nothing to save");
             return false;
         }

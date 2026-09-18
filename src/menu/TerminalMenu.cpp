@@ -40,6 +40,12 @@ TerminalMenu::TerminalMenu(dhcp::wifi::IWiFiManager& wifi,
 {
 }
 
+void TerminalMenu::setLifecycleHooks(Hook beforeReboot, Hook factoryReset)
+{
+    beforeReboot_ = std::move(beforeReboot);
+    factoryReset_ = std::move(factoryReset);
+}
+
 void TerminalMenu::start()
 {
     running_ = true;
@@ -104,6 +110,11 @@ void TerminalMenu::processLine(const std::string& line)
         }
     } else if (cmd == "reboot") {
         println("Rebooting...");
+        // Same policy as the web paths: a planned restart keeps the counters of the
+        // main page (Statistica.dat on the internal volume). The pause is there
+        // because this path had none — the file is 44 bytes, but it goes to flash.
+        if (beforeReboot_) beforeReboot_();
+        vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();
     } else {
         println("Unknown command. Type 'help' for available commands.");
@@ -169,6 +180,8 @@ void TerminalMenu::cmdSettingsReset()
         println("Settings reset FAILED (NVS erase error).");
         return;
     }
+    // The statistics describe the settings that were just erased.
+    if (factoryReset_) factoryReset_();
     println("All settings erased. Rebooting to factory defaults...");
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();

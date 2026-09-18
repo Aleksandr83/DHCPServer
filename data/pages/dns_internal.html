@@ -21,12 +21,31 @@
         </div>
 
         <div id="dns-internal-options" style="display:none;">
-            <div class="card toggle-row">
-                <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
-                <label class="toggle-switch">
-                    <input type="checkbox" id="dns-internal-ignore-ttl" onchange="toggleInternalIgnoreTtl()">
-                    <span class="toggle-slider"></span>
-                </label>
+            <!-- One card, three switches: the two "before reboot" switches live in
+                 the Ignore-TTL block (the operator asked for them there), and it is
+                 the same card the page already uses for a row of toggles. -->
+            <div class="card">
+                <div class="toggle-row" style="margin-bottom:0.5rem;">
+                    <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-ignore-ttl" onchange="toggleInternalIgnoreTtl()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row" style="margin-bottom:0.5rem;">
+                    <span data-i18n="dns_internal.save_stats">Save statistics before reboot</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-save-stats" onchange="toggleInternalSaveStats()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="dns_internal.save_cache">Save cache before reboot</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-save-cache" onchange="toggleInternalSaveCache()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
 
             <!-- Persistence: save the PSRAM cache to /fat/cache.dat and restore it -->
@@ -69,6 +88,14 @@
             cb.checked = !!data.cache_internal;
             const ittl = document.getElementById('dns-internal-ignore-ttl');
             ittl.checked = !!data.cache_internal_ignore_ttl;
+            // Absent field = the firmware's own default, which is ON; showing it
+            // off would make the page disagree with the device.
+            const sst = document.getElementById('dns-internal-save-stats');
+            sst.checked = (data.cache_internal_save_stats === undefined)
+                ? true : !!data.cache_internal_save_stats;
+            const sca = document.getElementById('dns-internal-save-cache');
+            sca.checked = (data.cache_internal_save_cache === undefined)
+                ? true : !!data.cache_internal_save_cache;
             // The internal cache needs PSRAM — disable the toggle without it.
             cb.disabled = !internalAvailable;
             const note = document.getElementById('dns-internal-psram-note');
@@ -86,6 +113,10 @@
             opt.style.display = active ? 'block' : 'none';
             const ittl = document.getElementById('dns-internal-ignore-ttl');
             if (ittl) ittl.disabled = !active;
+            const sst = document.getElementById('dns-internal-save-stats');
+            if (sst) sst.disabled = !active;
+            const sca = document.getElementById('dns-internal-save-cache');
+            if (sca) sca.disabled = !active;
         }
 
         async function toggleInternalCache() {
@@ -107,6 +138,35 @@
             if (result.status === 'error') {
                 alert('Error: ' + (result.message || 'Unknown error'));
                 ittl.checked = !checked;
+            }
+        }
+
+        /* The device keeps the main-page counters (From cache / Forward / Avg hit)
+           across a restart: it writes Statistica.dat before rebooting — from the
+           Reboot button, a firmware update or the terminal menu — and reads it
+           back once at boot. A lost file only means the page starts from zero. */
+        async function toggleInternalSaveStats() {
+            const sst = document.getElementById('dns-internal-save-stats');
+            const checked = sst.checked;
+            const result = await saveDnsPartial({ cache_internal_save_stats: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                sst.checked = !checked;
+            }
+        }
+
+        /* The cache itself (cache.dat) is kept across a planned restart the same
+           way: the device writes the whole table to /fat/cache.dat before it
+           reboots — the Reboot button, a firmware update or the terminal menu —
+           and loads it again at boot. It is megabytes, so the device stays up
+           for a moment longer before it actually restarts. */
+        async function toggleInternalSaveCache() {
+            const sca = document.getElementById('dns-internal-save-cache');
+            const checked = sca.checked;
+            const result = await saveDnsPartial({ cache_internal_save_cache: checked });
+            if (result.status === 'error') {
+                alert('Error: ' + (result.message || 'Unknown error'));
+                sca.checked = !checked;
             }
         }
 
@@ -192,7 +252,7 @@
             });
         }
 
-        async function startPersistJob(save, btn) {
+        async function startPersistJob(save, btn, force) {
             const out = document.getElementById('dns-internal-file-status');
             enablePersistButtons(false);
             out.textContent = save ? tr('dns_internal.saving') : tr('dns_internal.loading');
@@ -200,8 +260,43 @@
             try {
                 const resp = await apiFetch(
                     save ? '/api/dns/internal-cache/save' : '/api/dns/internal-cache/load',
-                    { method: 'POST' });
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ force: !!force }),
+                    });
                 const d = await resp.json();
+
+                // The device refuses a cache file it did not write (the checksum
+                // it keeps in NVS does not match the file on the card). That is
+                // not an error to swallow: the operator decides whether the file
+                // is worth loading anyway, and the question is asked in the page
+                // (js/app.js `showDialog`) rather than by the browser — that one
+                // cannot be styled, translated or screenshotted.
+                if (!save && !force && resp.status === 409 && d.code === 'md5_mismatch') {
+                    const why = (d.reason === 'unknown')
+                        ? tr('dns_internal.md5_unknown')
+                        : (d.reason === 'mismatch')
+                            ? tr('dns_internal.md5_mismatch')
+                            : tr('dns_internal.md5_unreadable');
+                    const answer = await showDialog({
+                        title: tr('dns_internal.md5_ask'),
+                        hint: why + '\n\n' +
+                              tr('dns_internal.md5_file') + ': ' + (d.file_md5 || '—') + '\n' +
+                              tr('dns_internal.md5_stored') + ': ' + (d.stored_md5 || '—'),
+                        okLabel: tr('dns_internal.md5_load_anyway'),
+                        cancelLabel: tr('common.cancel'),
+                        danger: true,
+                    });
+                    if (answer) {
+                        return await startPersistJob(save, btn, true);
+                    }
+                    out.textContent = tr('dns_internal.md5_cancelled');
+                    out.className = 'test-conn-result test-conn-warn';
+                    enablePersistButtons(true);
+                    return;
+                }
+
                 if (resp.ok && d.status === 'started') {
                     setPersistBusy(true, save);
                     pollPersistProgress(save);

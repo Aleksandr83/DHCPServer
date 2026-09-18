@@ -145,6 +145,10 @@ void WebServer::registerRoutes()
     reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);
     reg("/api/settings/reset",       HTTP_POST,  postSettingsResetHandler);
     reg("/api/device/reboot",        HTTP_POST,  postRebootHandler);
+    reg("/api/device/reboot/prepare", HTTP_POST, postRebootPrepareHandler);
+    // Statistics a planned restart asks for (Statistica.dat on FAT): the write
+    // runs as a background job, this reports whether it finished or failed.
+    reg("/api/dns/stats/progress",   HTTP_GET,  getStatsProgressHandler);
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     reg("/api/dns/internal-cache/file", HTTP_GET,  getInternalCacheFileHandler);
     reg("/api/dns/internal-cache/progress", HTTP_GET, getInternalCacheProgressHandler);
@@ -174,6 +178,10 @@ void WebServer::registerRoutes()
     reg("/api/files/check",          HTTP_POST,  postFileCheckHandler);
     reg("/api/files/check/cancel",   HTTP_POST,  postFileCheckCancelHandler);
     reg("/api/files/check",          HTTP_GET,   getFileCheckHandler);
+    // Copy / move between volumes (long-running: POST starts it, GET polls)
+    reg("/api/files/transfer",        HTTP_POST,  postFileTransferHandler);
+    reg("/api/files/transfer/cancel", HTTP_POST,  postFileTransferCancelHandler);
+    reg("/api/files/transfer",        HTTP_GET,   getFileTransferHandler);
     // Task scheduler: one list for every long-running operation.
     reg("/api/jobs",                 HTTP_GET,   getJobsHandler);
     reg("/api/jobs/cancel",          HTTP_POST,  postJobCancelHandler);

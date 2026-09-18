@@ -54,6 +54,9 @@ static const char* KEY_DNS_CACHE_AUTH_P = "dns_cach_auth_p";
 static const char* KEY_DNS_IC_ENABLE  = "dns_ic_enable";
 static const char* KEY_DNS_IC_SIZE_MB = "dns_ic_size_mb";
 static const char* KEY_DNS_IC_IGN_TTL = "dns_ic_ign_ttl";
+static const char* KEY_DNS_IC_STATS   = "dns_ic_stats";
+static const char* KEY_DNS_IC_SAVE_CACHE = "dns_ic_save_cache";
+static const char* KEY_DNS_IC_FILE_MD5 = "dns_ic_file_md5";
 static const char* KEY_DNS_BLK_NON_AA = "dns_blk_nonaa";
 static const char* KEY_DNS_ALLOW_LAN = "dns_allow_lan";
 static const char* KEY_DNS_HOSTS      = "dns_hosts";
@@ -393,6 +396,9 @@ DnsConfig Config::getDns() const
         cfg.cacheInternalSizeMb = sz;
     }
     cfg.cacheInternalIgnoreTtl = readI32(KEY_DNS_IC_IGN_TTL, 0) != 0;
+    cfg.cacheInternalSaveStats = readI32(KEY_DNS_IC_STATS, 1) != 0;  // default ON
+    cfg.cacheInternalSaveCache = readI32(KEY_DNS_IC_SAVE_CACHE, 1) != 0;  // default ON
+    cfg.cacheInternalFileMd5 = readStr(KEY_DNS_IC_FILE_MD5, "");
     cfg.blockForwardNonAA = readI32(KEY_DNS_BLK_NON_AA, 0) != 0;
     cfg.allowOwnSubnet = readI32(KEY_DNS_ALLOW_LAN, 1) != 0;   // default ON
     return cfg;
@@ -422,6 +428,9 @@ void Config::setDns(const DnsConfig& cfg)
     writeI32(KEY_DNS_IC_ENABLE, cfg.cacheInternal ? 1 : 0);
     writeI32(KEY_DNS_IC_SIZE_MB, static_cast<int32_t>(cfg.cacheInternalSizeMb));
     writeI32(KEY_DNS_IC_IGN_TTL, cfg.cacheInternalIgnoreTtl ? 1 : 0);
+    writeI32(KEY_DNS_IC_STATS, cfg.cacheInternalSaveStats ? 1 : 0);
+    writeI32(KEY_DNS_IC_SAVE_CACHE, cfg.cacheInternalSaveCache ? 1 : 0);
+    writeStr(KEY_DNS_IC_FILE_MD5, cfg.cacheInternalFileMd5);
     writeI32(KEY_DNS_BLK_NON_AA, cfg.blockForwardNonAA ? 1 : 0);
     writeI32(KEY_DNS_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
 }

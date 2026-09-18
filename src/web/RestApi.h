@@ -52,6 +52,12 @@ public:
     static esp_err_t handlePostSettingsImport(httpd_req* req);
     static esp_err_t handlePostSettingsReset(httpd_req* req);
     static esp_err_t handlePostDeviceReboot(httpd_req* req);
+    // Start the files a planned restart wants (statistics and cache, each as a
+    // background job) and report what each step decided, so the page can show
+    // what is happening and poll both verdicts.
+    static esp_err_t handlePostDeviceRebootPrepare(httpd_req* req);
+    // Progress/verdict of the background statistics write (Statistica.dat)
+    static esp_err_t handleGetStatsProgress(httpd_req* req);
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     static esp_err_t handleGetInternalCacheFile(httpd_req* req);
     static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
@@ -81,6 +87,9 @@ public:
     static esp_err_t handlePostFileCheck(httpd_req* req);
     static esp_err_t handlePostFileCheckCancel(httpd_req* req);
     static esp_err_t handleGetFileCheck(httpd_req* req);
+    static esp_err_t handlePostFileTransfer(httpd_req* req);
+    static esp_err_t handleGetFileTransfer(httpd_req* req);
+    static esp_err_t handlePostFileTransferCancel(httpd_req* req);
     // Task scheduler (long-running operations)
     static esp_err_t handleGetJobs(httpd_req* req);
     static esp_err_t handlePostJobCancel(httpd_req* req);

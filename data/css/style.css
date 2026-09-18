@@ -1025,6 +1025,12 @@ th {
     font-size: 1.05rem;
 }
 
+/* A hint may be several lines (the cache-file question lists two digests), and
+   keeping the line breaks is what makes such a text readable. */
+.modal-card .hint {
+    white-space: pre-line;
+}
+
 .modal-card input[type="text"] {
     width: 100%;
     margin: 0.4rem 0 0.8rem;
@@ -1081,6 +1087,40 @@ th {
 
 .files-picker-item.up {
     color: var(--accent);
+}
+
+/* Destination volume of a copy/move: a small row of buttons above the folder
+   list. The active one is highlighted like the volume tabs on the page, because
+   the whole point of the row is to show *where* the files are going — without
+   it the root of the other volume looks like an empty dead end. */
+.files-picker-volumes {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.5rem;
+}
+
+.files-picker-volumes-label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin-right: 0.2rem;
+}
+
+.files-picker-item.vol {
+    display: inline-block;
+    width: auto;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    padding: 0.3rem 0.7rem;
+}
+
+.files-picker-item.vol.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
 }
 
 /* One unreadable entry in the check report: monospace and wrapping, so a long

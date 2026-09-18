@@ -89,6 +89,20 @@ struct DnsConfig {
     bool    cacheInternal = false;   // master switch
     uint32_t cacheInternalSizeMb = 20;  // max table size in MB (1..20)
     bool cacheInternalIgnoreTtl = false;// store TTL but never expire by it
+    // Keep the counters the main page shows across a restart: they are written to
+    // Statistica.dat on the internal volume before a reboot and read back at boot.
+    bool cacheInternalSaveStats = true; // default ON (the operator asked for it)
+    // Keep the cache itself across a restart: cache.dat is written before a reboot
+    // (seconds on a full table) and loaded again at boot. Same policy as above —
+    // a planned restart preserves it, a power cut does not.
+    bool cacheInternalSaveCache = true; // default ON (the operator asked for it)
+    // MD5 of cache.dat as this device last wrote it (32 lowercase hex characters,
+    // empty = never written). Checked before the file is loaded: a mismatch means
+    // a half-written file, a damaged block, or a file replaced behind the
+    // firmware's back, and in all three cases loading it would quietly fill the
+    // cache with whatever the file happens to hold. Device state, not a setting:
+    // it is deliberately absent from the settings export/import.
+    std::string cacheInternalFileMd5;
     // Do not forward queries of any type other than A/AAAA to the external
     // cache/upstream DNS — answer NODATA instead (client falls back to A/AAAA).
     bool blockForwardNonAA = false;

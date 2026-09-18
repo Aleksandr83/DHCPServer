@@ -32,8 +32,6 @@
     <div id="footer-placeholder"></div>
     <script src="../js/app.js"></script>
     <script>
-        const sleep = ms => new Promise(r => setTimeout(r, ms));
-
         // fetch() has no timeout. When the device reboots mid-request the TCP
         // connection can be dropped silently, leaving the promise hanging
         // forever. Abort after a grace period so the UI always moves on.
@@ -47,7 +45,7 @@
         // After a reboot the device is unreachable for a few seconds. Poll a
         // light endpoint until it answers again (any HTTP response means it is
         // back up), so the page can reload into a live state instead of
-        // staying on "rebooting..." forever.
+        // staying on "rebooting..." forever. `sleep` comes from app.js.
         async function waitForDeviceBack(maxAttempts = 25, intervalMs = 2000) {
             for (let i = 0; i < maxAttempts; i++) {
                 await sleep(intervalMs);
@@ -68,16 +66,50 @@
             return false;
         }
 
+        // ─── The preparation itself lives in js/app.js ─────
+        // `prepareRestartFlow` writes what the switches ask for, shows every
+        // step through `setStep` and asks before losing the cache. It is shared
+        // with the Version page, which runs it before a firmware upload.
+        function setStep(text, cls) {
+            const statusEl = document.getElementById('reboot-status');
+            statusEl.className = cls || '';
+            statusEl.textContent = text;
+        }
+
         async function rebootDevice() {
-            if (!confirm(tr('settings_device.confirm_reboot'))) return;
+            // The question is asked by the page (js/app.js `showDialog`), not by
+            // the browser: the native dialog cannot be translated or styled, and
+            // it is blocked in some embedded browsers.
+            if (!await showDialog({ title: tr('settings_device.confirm_reboot'),
+                                    okLabel: tr('settings_device.reboot_button'),
+                                    cancelLabel: tr('common.cancel') })) return;
 
             const btn = document.getElementById('reboot-btn');
             const statusEl = document.getElementById('reboot-status');
             btn.disabled = true;
             statusEl.className = '';
             statusEl.textContent = tr('settings_device.rebooting');
+
+            const prepared = await prepareRestartFlow(setStep);
+
+            if (prepared === 'cancelled') {
+                // The flow has already said what happened, and nothing was sent.
+                btn.disabled = false;
+                return;
+            }
+
+            statusEl.className = 'status-ok';
+            statusEl.textContent = tr('settings_device.ok_reboot');
             try {
-                const resp = await fetchWithTimeout('/api/device/reboot', { method: 'POST' });
+                // "saved" only ever comes from a preparation that finished: on
+                // 'failed' and on 'doubt' the device writes the file itself
+                // while the restart is in flight.
+                const opts = { method: 'POST' };
+                if (prepared === 'ready') {
+                    opts.headers = { 'Content-Type': 'application/json' };
+                    opts.body = JSON.stringify({ saved: true });
+                }
+                const resp = await fetchWithTimeout('/api/device/reboot', opts);
                 const data = await resp.json().catch(() => null);
                 if (data && data.status !== 'ok') {
                     statusEl.className = 'status-err';
@@ -89,8 +121,6 @@
                 // Server reboots before the response arrives — a dropped or
                 // aborted connection is the expected successful outcome.
             }
-            statusEl.className = 'status-ok';
-            statusEl.textContent = tr('settings_device.ok_reboot');
 
             // Reload once the device is back so the page shows live state.
             if (await waitForDeviceBack()) {
@@ -99,7 +129,13 @@
         }
 
         async function resetSettings() {
-            if (!confirm(tr('settings_device.confirm_reset'))) return;
+            // The destructive one: the title says what is about to happen, the
+            // hint spells out the consequences, and the button is the red one.
+            if (!await showDialog({ title: tr('settings_device.reset_title'),
+                                    hint: tr('settings_device.confirm_reset'),
+                                    okLabel: tr('settings_device.reset_button'),
+                                    cancelLabel: tr('common.cancel'),
+                                    danger: true })) return;
 
             const btn = document.getElementById('reset-btn');
             const statusEl = document.getElementById('reset-status');

@@ -253,6 +253,39 @@ static int jsonGetInt(const std::string& json, const std::string& key, int def)
     return std::atoi(&json[pos]);
 }
 
+/**
+ * @brief Parse a JSON array of strings (`"paths":["/a","/b"]`).
+ *
+ * The transfer API is the only endpoint that takes a list, and the names are
+ * filesystem names: `storage::PathUtil` rejects everything inside a segment that
+ * would need an escape (quotes, backslashes), so a plain scan between quotes is
+ * enough here — and it keeps the parser as small as the rest of this file.
+ */
+static std::vector<std::string> jsonGetStrArray(const std::string& json,
+                                                const std::string& key,
+                                                size_t maxItems = 512)
+{
+    std::vector<std::string> out;
+
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return out;
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) return out;
+    const auto end = json.find(']', pos);
+    if (end == std::string::npos) return out;
+
+    size_t i = pos + 1;
+    while (i < end && out.size() < maxItems) {
+        const auto open = json.find('"', i);
+        if (open == std::string::npos || open >= end) break;
+        const auto close = json.find('"', open + 1);
+        if (close == std::string::npos || close > end) break;
+        out.push_back(json.substr(open + 1, close - open - 1));
+        i = close + 1;
+    }
+    return out;
+}
+
 // ─────────────────────────────────────────────────────
 // GET /api/status
 // ─────────────────────────────────────────────────────
@@ -671,6 +704,8 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     addJsonBool(json, "cache_internal", cfg.cacheInternal, true);
     addJsonInt(json, "cache_internal_size_mb", cfg.cacheInternalSizeMb, true);
     addJsonBool(json, "cache_internal_ignore_ttl", cfg.cacheInternalIgnoreTtl, true);
+    addJsonBool(json, "cache_internal_save_stats", cfg.cacheInternalSaveStats, true);
+    addJsonBool(json, "cache_internal_save_cache", cfg.cacheInternalSaveCache, true);
     addJsonBool(json, "block_forward_non_aa", cfg.blockForwardNonAA, true);
     addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
     addJsonBool(json, "cache_internal_available",
@@ -723,6 +758,12 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     if (cfg.cacheInternalSizeMb < 1) cfg.cacheInternalSizeMb = 1;
     if (cfg.cacheInternalSizeMb > 20) cfg.cacheInternalSizeMb = 20;
     cfg.cacheInternalIgnoreTtl = jsonGetBool(body, "cache_internal_ignore_ttl", false);
+    // Absent means "keep the current setting", not "turn it off": the page always
+    // sends the merged object, and a partial client must not silence the file.
+    cfg.cacheInternalSaveStats =
+        jsonGetBool(body, "cache_internal_save_stats", cfg.cacheInternalSaveStats);
+    cfg.cacheInternalSaveCache =
+        jsonGetBool(body, "cache_internal_save_cache", cfg.cacheInternalSaveCache);
     cfg.blockForwardNonAA = jsonGetBool(body, "block_forward_non_aa", false);
     cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
 
@@ -1005,6 +1046,8 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonBool(json, "cache_internal", dns.cacheInternal, true);
     addJsonInt(json, "cache_internal_size_mb", dns.cacheInternalSizeMb, true);
     addJsonBool(json, "cache_internal_ignore_ttl", dns.cacheInternalIgnoreTtl, true);
+    addJsonBool(json, "cache_internal_save_stats", dns.cacheInternalSaveStats, true);
+    addJsonBool(json, "cache_internal_save_cache", dns.cacheInternalSaveCache, true);
     addJsonBool(json, "block_forward_non_aa", dns.blockForwardNonAA, true);
     addJsonBool(json, "allow_own_subnet", dns.allowOwnSubnet, true);
     json += "}";
@@ -1141,6 +1184,8 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 key != "cache_auth_user" && key != "cache_internal" &&
                 key != "cache_internal_size_mb" &&
                 key != "cache_internal_ignore_ttl" &&
+                key != "cache_internal_save_stats" &&
+                key != "cache_internal_save_cache" &&
                 key != "block_forward_non_aa" &&
                 key != "allow_own_subnet" &&
                 key != "external_ntp" && key != "timezone" &&
@@ -1266,6 +1311,12 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.cacheInternalIgnoreTtl =
                     jsonGetBool(seg, "cache_internal_ignore_ttl",
                                 cur.cacheInternalIgnoreTtl);
+                cur.cacheInternalSaveStats =
+                    jsonGetBool(seg, "cache_internal_save_stats",
+                                cur.cacheInternalSaveStats);
+                cur.cacheInternalSaveCache =
+                    jsonGetBool(seg, "cache_internal_save_cache",
+                                cur.cacheInternalSaveCache);
                 cur.blockForwardNonAA =
                     jsonGetBool(seg, "block_forward_non_aa",
                                 cur.blockForwardNonAA);
@@ -1489,6 +1540,10 @@ esp_err_t RestApi::handlePostSettingsReset(httpd_req* req)
         return ESP_OK;
     }
 
+    // A factory reset must not keep the statistics: they describe the settings
+    // that were just erased.
+    if (s_dns) s_dns->deleteStatsFile();
+
     ESP_LOGW(TAG, "Factory reset requested from web UI — rebooting...");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req,
@@ -1508,14 +1563,79 @@ esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    ESP_LOGW(TAG, "Reboot requested from web UI");
+    // The Device Management page saves the files itself — it can show what is
+    // being written and how far it is, which a reboot handler that blocks on a
+    // multi-megabyte write cannot. It then calls this endpoint with
+    // `{"saved": true}` and there is nothing left to do here. A client that
+    // just calls reboot keeps the old behaviour: the device writes whatever the
+    // "before reboot" switches ask for.
+    const std::string body = readBody(req, 256);
+    const bool alreadySaved = jsonGetBool(body, "saved", false);
+
+    ESP_LOGW(TAG, "Reboot requested from web UI (pre-saved=%d)", alreadySaved ? 1 : 0);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req,
         "{\"status\":\"ok\",\"message\":\"Device is rebooting...\",\"reboot\":true}");
 
+    if (!alreadySaved) {
+        // Keep the counters of the main page. The write runs on its own task —
+        // the response is already sent, but the httpd task would otherwise be
+        // busy with the file and could not answer anyone until it returned.
+        if (s_dns) s_dns->saveStatsBeforeRestart();
+
+        // ...and the cache itself, which is megabytes and therefore takes as long
+        // as it takes: the response is already sent, so the operator only notices
+        // that the device stays up a little longer before it restarts.
+        if (s_dns) s_dns->saveCacheBeforeRestart();
+    }
+
     // Give the response time to be sent before reboot
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/device/reboot/prepare — start the files a restart wants
+//
+// Split from the reboot itself so the page can do the two steps in order and
+// report them, and split from the writes themselves: the statistics file is 44
+// bytes and the cache is megabytes, but both now run as background jobs — the
+// page polls GET /api/dns/stats/progress and
+// GET /api/dns/internal-cache/progress and asks for the restart when they are
+// done. Waiting here instead would block the only httpd task, and then nothing
+// could be polled at all.
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostDeviceRebootPrepare(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    // The policy lives in the DNS server (the switches); this handler only
+    // reports what each step decided.
+    const char* stats = "skipped";
+    const char* cache = "skipped";
+    if (s_dns) {
+        switch (s_dns->startStatsSaveJob()) {
+            case ::dhcp::dns::DnsServer::RestartSave::Ok:     stats = "started"; break;
+            case ::dhcp::dns::DnsServer::RestartSave::Busy:   stats = "busy";    break;
+            case ::dhcp::dns::DnsServer::RestartSave::Failed: stats = "failed";  break;
+            default:                                          stats = "skipped"; break;
+        }
+        switch (s_dns->startCacheSaveForRestart()) {
+            case ::dhcp::dns::DnsServer::RestartSave::Ok:            cache = "started"; break;
+            case ::dhcp::dns::DnsServer::RestartSave::NothingToSave: cache = "empty";   break;
+            case ::dhcp::dns::DnsServer::RestartSave::Busy:          cache = "busy";    break;
+            case ::dhcp::dns::DnsServer::RestartSave::Failed:        cache = "failed";  break;
+            default:                                                 cache = "skipped"; break;
+        }
+    }
+
+    const std::string json = std::string("{\"status\":\"ok\",\"stats\":\"") + stats +
+                             "\",\"cache\":\"" + cache + "\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "Restart prepared: stats=%s cache=%s", stats, cache);
     return ESP_OK;
 }
 
@@ -1589,7 +1709,19 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    ESP_LOGI(TAG, "OTA update starting...");
+    // `?saved=1` means the caller has already written the files a restart wants
+    // (`POST /api/device/reboot/prepare`, then `/api/dns/internal-cache/progress`
+    // until the job ends) — the Version page does exactly that before it starts
+    // the upload, so the operator sees the steps and is asked when the cache
+    // could not be written. Without the flag the device saves them itself, right
+    // before it restarts, which is what a script that just posts the image gets.
+    bool alreadySaved = false;
+    {
+        const char* q = strchr(req->uri, '?');
+        if (q && strstr(q, "saved=1")) alreadySaved = true;
+    }
+
+    ESP_LOGI(TAG, "OTA update starting (pre-saved=%d)...", alreadySaved ? 1 : 0);
 
     // ── Body layout ────────────────────────────────────
     size_t ctLen = httpd_req_get_hdr_value_len(req, "Content-Type");
@@ -1750,6 +1882,14 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
     body += "}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, body.c_str());
+
+    // Keep the counters across the update: the new image is already in place and
+    // the restart is about to happen, so this is the last moment to write them.
+    // Skipped when the caller has already done it (see `saved=1` above).
+    if (!alreadySaved) {
+        if (s_dns) s_dns->saveStatsBeforeRestart();
+        if (s_dns) s_dns->saveCacheBeforeRestart();
+    }
 
     // Give the response (and the log) time to get out before the reboot.
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -2168,6 +2308,44 @@ esp_err_t RestApi::handleGetInternalCacheFile(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// GET /api/dns/stats/progress
+// ─────────────────────────────────────────────────────
+// State of the background statistics write: {busy, last_result}. The same shape
+// as the cache endpoint next to it, because the page reads them the same way —
+// `last_result` is a word (ok | skipped | failed, "" = nothing finished yet),
+// and there is no progress to report: 44 bytes have no percentage.
+
+esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::DnsServer::StatsProgress p;
+    if (s_dns) p = s_dns->statsProgress();
+
+    const char* result = "";
+    switch (p.result) {
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Ok:      result = "ok";      break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Skipped: result = "skipped"; break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Failed:  result = "failed";  break;
+        default:                                                 result = "";        break;
+    }
+
+    std::string json = "{";
+    addJsonBool(json, "busy", p.busy, false);
+    addJsonString(json, "last_result", result, true);
+    // The device's own words about the last failure ("cannot publish the file").
+    // They travel to the page for one reason: the operator does not always have
+    // a terminal, and "the statistics could not be saved" without the reason is
+    // exactly the message that made him ask what went wrong.
+    addJsonString(json, "last_detail", p.detail, true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/dns/internal-cache/progress
 // ─────────────────────────────────────────────────────
 // Progress of the background save/load job. Response: {busy, save, done,
@@ -2190,6 +2368,18 @@ esp_err_t RestApi::handleGetInternalCacheProgress(httpd_req* req)
     std::string json = "{";
     addJsonBool(json, "busy", p.busy, false);
     addJsonBool(json, "save", p.isSave, true);
+    // "busy went false" cannot tell a written file from a failed write, and a
+    // bare boolean could not tell "there was nothing to write" from either —
+    // which is how a fresh device ended up reporting a failure that never
+    // happened. The verdict is a word: ok | empty | failed ("" = none yet).
+    const char* result = "";
+    switch (p.result) {
+        case ::dhcp::dns::DnsServer::PersistResult::Ok:     result = "ok";     break;
+        case ::dhcp::dns::DnsServer::PersistResult::Empty:  result = "empty";  break;
+        case ::dhcp::dns::DnsServer::PersistResult::Failed: result = "failed"; break;
+        default:                                            result = "";       break;
+    }
+    addJsonString(json, "last_result", result, true);
     addJsonInt(json, "done", static_cast<int64_t>(p.done), true);
     addJsonInt(json, "total", static_cast<int64_t>(p.total), true);
     addJsonInt(json, "percent", static_cast<int64_t>(percent), true);
@@ -2272,7 +2462,39 @@ esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
         return ESP_OK;
     }
 
-    if (!s_dns->startPersistJob(false)) {
+    // The file is only loaded when it is the one this device wrote: the device
+    // keeps an MD5 of every cache it saves, and a mismatch means a half-written
+    // file, a damaged block or a file put there behind the firmware's back.
+    // Instead of loading it silently the handler answers 409 with both digests
+    // and lets the page ask the operator; `{"force": true}` is that answer.
+    // Hashing costs one read pass over the file, and the caller is waiting for
+    // an answer anyway.
+    const std::string body = readBody(req, 512);
+    const bool force = jsonGetBool(body, "force", false);
+    if (!force) {
+        const ::dhcp::dns::DnsServer::CacheFileMd5 st = s_dns->checkCacheFileMd5();
+        if (!st.match) {
+            const char* reason = !st.fileExists ? "missing"
+                                 : !st.readable  ? "unreadable"
+                                 : !st.hasStored ? "unknown"
+                                                 : "mismatch";
+            std::string json = "{\"status\":\"error\",\"code\":\"md5_mismatch\",\"reason\":\"";
+            json += reason;
+            json += "\",\"file_md5\":\"";
+            json += st.fileMd5;
+            json += "\",\"stored_md5\":\"";
+            json += st.storedMd5;
+            json += "\",\"message\":\"the cache file checksum does not match the one stored for it\"}";
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req, json.c_str());
+            ESP_LOGW(TAG, "Load refused (%s): file=%s stored=%s", reason,
+                     st.fileMd5.empty() ? "-" : st.fileMd5.c_str(),
+                     st.storedMd5.empty() ? "-" : st.storedMd5.c_str());
+            return ESP_OK;
+        }
+    }
+
+    if (!s_dns->startPersistJob(false, force)) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Could not start load\"}");
         return ESP_OK;
@@ -2822,6 +3044,103 @@ esp_err_t RestApi::handlePostFileDelete(httpd_req* req)
     const auto st = s_files->remove(volume, path, recursive, &detail);
     return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
 }
+
+esp_err_t RestApi::handleGetFileTransfer(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    ::dhcp::files::TransferReport report;
+    s_files->transferReport(report);
+
+    const std::string body = FileJson::transfer(report);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body.c_str(), body.size());
+}
+
+esp_err_t RestApi::handlePostFileTransferCancel(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    // A cancel is a request, not an outcome: the task stops at its next chunk,
+    // and the snapshot then says `cancelled` with what was copied so far. The
+    // same call the scheduler page makes through /api/jobs/cancel.
+    s_files->transferCancel();
+    return sendFileResult(req, ::dhcp::files::FileStatus::Ok,
+                          "{\"status\":\"ok\"}", nullptr);
+}
+
+esp_err_t RestApi::handlePostFileTransfer(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const std::string body = readBody(req);
+
+    ::dhcp::files::TransferRequest transfer;
+    transfer.srcVolume = jsonGetStr(body, "src_volume");
+    transfer.dstVolume = jsonGetStr(body, "dst_volume");
+    transfer.dstPath = jsonGetStr(body, "dst_path");
+    transfer.paths = jsonGetStrArray(body, "paths");
+
+    const std::string op = jsonGetStr(body, "op");
+    transfer.op = (op == "move") ? ::dhcp::files::TransferOp::Move
+                                : ::dhcp::files::TransferOp::Copy;
+
+    const std::string conflict = jsonGetStr(body, "conflict");
+    if (conflict == "overwrite") {
+        transfer.conflict = ::dhcp::files::TransferConflict::Overwrite;
+    } else if (conflict == "skip") {
+        transfer.conflict = ::dhcp::files::TransferConflict::Skip;
+    } else {
+        transfer.conflict = ::dhcp::files::TransferConflict::Ask;
+    }
+
+    // Validate and ask about taken names *before* the job starts. The engine does
+    // the path policy (PathUtil), so a bad request is a 400 here and not a job
+    // that fails in the background.
+    std::string detail;
+    std::vector<std::string> names;
+    const ::dhcp::files::FileStatus checked = s_files->transferConflicts(transfer, names, &detail);
+    if (checked != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, checked, "", &detail);
+    }
+
+    if (!names.empty() && transfer.conflict == ::dhcp::files::TransferConflict::Ask) {
+        const std::string payload = FileJson::transferConflicts(names);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, payload.c_str(), payload.size());
+    }
+
+    const ::dhcp::files::FileStatus started = s_files->transferStart(transfer, &detail);
+    return sendFileResult(req, started, "{\"status\":\"started\"}", &detail);
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/files/transfer | GET /api/files/transfer | POST .../transfer/cancel
+//
+// POST: {"op":"copy"|"move", "src_volume":"sd", "paths":["/a","/b"],
+//         "dst_volume":"fat", "dst_path":"/backup",
+//         "conflict":"ask"|"overwrite"|"skip"}
+// GET : the snapshot of the running (or last) transfer
+//
+// Copying between the internal FAT partition and the card is a stream, not a
+// rename: FatFs is one filesystem per volume, so a cross-volume move is a copy
+// followed by a delete, and a directory of a card is gigabytes. The work
+// therefore runs in a task of its own — the same reason the format and the
+// volume check do — and this handler only validates, asks about names that are
+// already taken and starts the job.
+//
+// The conflict question is answered *before* anything is copied: with
+// `"conflict":"ask"` (the default) a taken destination name comes back as
+// `409` + `{"status":"conflict","conflicts":[…]}` and the page repeats the
+// request with `overwrite` or `skip` once the operator has decided. That keeps
+// one answer per entry without a job that has to wait for the browser.
 
 // ─────────────────────────────────────────────────────
 // POST /api/files/format  {"volume":"sd","confirm":true}
