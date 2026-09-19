@@ -1017,6 +1017,11 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     addJsonBool(json, "cache_internal_ignore_ttl", cfg.cacheInternalIgnoreTtl, true);
     addJsonBool(json, "cache_internal_save_stats", cfg.cacheInternalSaveStats, true);
     addJsonBool(json, "cache_internal_save_cache", cfg.cacheInternalSaveCache, true);
+    addJsonBool(json, "cache_internal_autosave", cfg.cacheInternalAutosave, true);
+    addJsonInt(json, "cache_internal_autosave_period",
+               static_cast<int>(cfg.cacheInternalAutosavePeriod), true);
+    addJsonInt(json, "cache_internal_autosave_interval",
+               static_cast<int>(cfg.cacheInternalAutosaveInterval), true);
     addJsonBool(json, "block_forward_non_aa", cfg.blockForwardNonAA, true);
     addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
     addJsonBool(json, "cache_internal_available",
@@ -1075,6 +1080,20 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         jsonGetBool(body, "cache_internal_save_stats", cfg.cacheInternalSaveStats);
     cfg.cacheInternalSaveCache =
         jsonGetBool(body, "cache_internal_save_cache", cfg.cacheInternalSaveCache);
+    cfg.cacheInternalAutosave =
+        jsonGetBool(body, "cache_internal_autosave", cfg.cacheInternalAutosave);
+    // An index the page sends is turned into a period here, so a wrong value
+    // ends up as the shortest period instead of reaching the timer.
+    cfg.cacheInternalAutosavePeriod = core::autosavePeriodFromIndex(
+        static_cast<uint8_t>(jsonGetInt(
+            body, "cache_internal_autosave_period",
+            static_cast<int>(cfg.cacheInternalAutosavePeriod))));
+    // Clamped against the longest month: the calendar is the task's business.
+    cfg.cacheInternalAutosaveInterval = core::autosaveClampInterval(
+        cfg.cacheInternalAutosavePeriod,
+        static_cast<uint16_t>(jsonGetInt(
+            body, "cache_internal_autosave_interval",
+            static_cast<int>(cfg.cacheInternalAutosaveInterval))), 0);
     cfg.blockForwardNonAA = jsonGetBool(body, "block_forward_non_aa", false);
     cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
 
@@ -1121,6 +1140,10 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         s_dns->applyInternalCache(cfg.cacheInternal,
                                   cfg.cacheInternalSizeMb,
                                   cfg.cacheInternalIgnoreTtl);
+        // Stage 153: the automatic save of that cache, applied live too.
+        s_dns->applyCacheAutosave(cfg.cacheInternalAutosave,
+                                  cfg.cacheInternalAutosavePeriod,
+                                  cfg.cacheInternalAutosaveInterval);
         // Block forwarding of non-A/AAAA queries — apply live.
         s_dns->setBlockForwardNonAA(cfg.blockForwardNonAA);
         s_dns->applySubnetFilter();
@@ -2808,6 +2831,28 @@ esp_err_t RestApi::handlePostInternalCacheSave(httpd_req* req)
 // /fat/cache.dat. The handler returns immediately {status:started}; the UI
 // polls GET .../progress until busy=false. Fails with 409 when another job is
 // running or the cache is disabled, and with 404 when there is no file.
+
+// POST /api/dns/internal-cache/reset — forget every cached answer without
+// touching the file on the card. Clearing is what InternalDnsCache::clear()
+// already does; nothing is persisted here, and the reply is a plain "ok"
+// because the page only needs to know that the entries are gone.
+esp_err_t RestApi::handlePostInternalCacheReset(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    if (!s_dns || !s_dns->internalCache().available()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "internal cache is not available");
+        return ESP_OK;
+    }
+
+    s_dns->internalCache().clear();
+    ESP_LOGI(TAG, "internal cache cleared from the web interface");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
 
 esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
 {

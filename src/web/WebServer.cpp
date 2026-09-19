@@ -169,6 +169,7 @@ const WebRoute WebServer::kRoutes[] = {
     { "/api/dns/internal-cache/progress", RouteMethod::Get,   &WebServer::getInternalCacheProgressHandler },
     { "/api/dns/internal-cache/save",     RouteMethod::Post,  &WebServer::postInternalCacheSaveHandler },
     { "/api/dns/internal-cache/load",     RouteMethod::Post,  &WebServer::postInternalCacheLoadHandler },
+    { "/api/dns/internal-cache/reset",    RouteMethod::Post,  &WebServer::postInternalCacheResetHandler },
     // Time (NTP) server
     { "/api/time/settings",               RouteMethod::Get,   &WebServer::getTimeSettingsHandler },
     { "/api/time/settings",               RouteMethod::Post,  &WebServer::postTimeSettingsHandler },

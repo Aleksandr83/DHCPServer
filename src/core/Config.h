@@ -1,6 +1,8 @@
 #ifndef DHCP_CORE_CONFIG_H
-#include "core/NetworkDefaults.h"
 #define DHCP_CORE_CONFIG_H
+
+#include "core/NetworkDefaults.h"
+#include "core/AutosavePeriod.h"
 
 #include <string>
 #include <vector>
@@ -105,6 +107,12 @@ struct DnsConfig {
     // (seconds on a full table) and loaded again at boot. Same policy as above —
     // a planned restart preserves it, a power cut does not.
     bool cacheInternalSaveCache = true; // default ON (the operator asked for it)
+    /// @brief Autosave the internal cache on a timer (stage 153).
+    bool cacheInternalAutosave = false;
+    /// @brief The unit of the interval: minutes, hours or days.
+    AutosavePeriod cacheInternalAutosavePeriod = AutosavePeriod::Hour;
+    /// @brief Every N of that unit (1..60 minutes, 1..24 hours, 1..month days).
+    uint16_t cacheInternalAutosaveInterval = 1;
     // MD5 of cache.dat as this device last wrote it (32 lowercase hex characters,
     // empty = never written). Checked before the file is loaded: a mismatch means
     // a half-written file, a damaged block, or a file replaced behind the

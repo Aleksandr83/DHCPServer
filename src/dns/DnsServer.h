@@ -5,6 +5,7 @@
 #include "DnsCache.h"
 #include "DnsLogger.h"
 #include "InternalDnsCache.h"
+#include "CacheAutosave.h"
 #include "RestartSaveJobState.h"
 #include "../dhcp/IDhcpServer.h"
 
@@ -107,6 +108,16 @@ public:
      * and updates the ignore-TTL flag. Safe to call from the REST handler.
      */
     void applyInternalCache(bool enabled, uint32_t sizeMb, bool ignoreTtl);
+
+    /**
+     * @brief Apply the automatic-save settings of the built-in cache.
+     *
+     * Stage 153: turning it on starts (or re-arms) the timer, turning it off
+     * stops it. Called with the values the operator saved, and again whenever
+     * they change.
+     */
+    void applyCacheAutosave(bool enabled, core::AutosavePeriod unit,
+                             uint16_t interval);
 
     /**
      * @brief Built-in cache statistics + per-query counters (main page).
@@ -503,6 +514,8 @@ private:
     DnsLogger logger_;
     DnsCache cache_;
     InternalDnsCache internalCache_;
+    /// Stage 153: writes the cache to the card on a timer (see CacheAutosave).
+    CacheAutosave cacheAutosave_{internalCache_, kCacheDatPath};
 };
 
 } // namespace dns

@@ -59,6 +59,9 @@ static const char* KEY_DNS_IC_SIZE_MB = "dns_ic_size_mb";
 static const char* KEY_DNS_IC_IGN_TTL = "dns_ic_ign_ttl";
 static const char* KEY_DNS_IC_STATS   = "dns_ic_stats";
 static const char* KEY_DNS_IC_SAVE_CACHE = "dns_ic_save_cache";
+static const char* KEY_DNS_IC_AUTOSAVE        = "dns_ic_autosave";
+static const char* KEY_DNS_IC_AUTOSAVE_PERIOD = "dns_ic_autosave_period";
+static const char* KEY_DNS_IC_AUTOSAVE_INTERVAL = "dns_ic_autosave_interval";
 static const char* KEY_DNS_IC_FILE_MD5 = "dns_ic_file_md5";
 static const char* KEY_DNS_BLK_NON_AA = "dns_blk_nonaa";
 static const char* KEY_DNS_ALLOW_LAN = "dns_allow_lan";
@@ -431,6 +434,16 @@ DnsConfig Config::getDns() const
     cfg.cacheInternalIgnoreTtl = readI32(KEY_DNS_IC_IGN_TTL, 0) != 0;
     cfg.cacheInternalSaveStats = readI32(KEY_DNS_IC_STATS, 1) != 0;  // default ON
     cfg.cacheInternalSaveCache = readI32(KEY_DNS_IC_SAVE_CACHE, 1) != 0;  // default ON
+    // Rule 39/153: autosave of the cache is off unless the operator turns
+    // it on; the period is an index (0 = hour, 1 = day, 2 = 30 days).
+    cfg.cacheInternalAutosave = readI32(KEY_DNS_IC_AUTOSAVE, 0) != 0;
+    cfg.cacheInternalAutosavePeriod = autosavePeriodFromIndex(
+        static_cast<uint8_t>(readI32(KEY_DNS_IC_AUTOSAVE_PERIOD, 0)));
+    // The month is unknown here (that needs the clock), so the clamp uses the
+    // longest one; the task clamps again with the month that is running.
+    cfg.cacheInternalAutosaveInterval = autosaveClampInterval(
+        cfg.cacheInternalAutosavePeriod,
+        static_cast<uint16_t>(readI32(KEY_DNS_IC_AUTOSAVE_INTERVAL, 1)), 0);
     cfg.cacheInternalFileMd5 = readStr(KEY_DNS_IC_FILE_MD5, "");
     cfg.blockForwardNonAA = readI32(KEY_DNS_BLK_NON_AA, 0) != 0;
     cfg.allowOwnSubnet = readI32(KEY_DNS_ALLOW_LAN, 1) != 0;   // default ON
@@ -463,6 +476,11 @@ void Config::setDns(const DnsConfig& cfg)
     writeI32(KEY_DNS_IC_IGN_TTL, cfg.cacheInternalIgnoreTtl ? 1 : 0);
     writeI32(KEY_DNS_IC_STATS, cfg.cacheInternalSaveStats ? 1 : 0);
     writeI32(KEY_DNS_IC_SAVE_CACHE, cfg.cacheInternalSaveCache ? 1 : 0);
+    writeI32(KEY_DNS_IC_AUTOSAVE, cfg.cacheInternalAutosave ? 1 : 0);
+    writeI32(KEY_DNS_IC_AUTOSAVE_PERIOD,
+             static_cast<int32_t>(cfg.cacheInternalAutosavePeriod));
+    writeI32(KEY_DNS_IC_AUTOSAVE_INTERVAL,
+             static_cast<int32_t>(cfg.cacheInternalAutosaveInterval));
     writeStr(KEY_DNS_IC_FILE_MD5, cfg.cacheInternalFileMd5);
     writeI32(KEY_DNS_BLK_NON_AA, cfg.blockForwardNonAA ? 1 : 0);
     writeI32(KEY_DNS_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);

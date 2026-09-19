@@ -90,6 +90,7 @@ private:
     static esp_err_t getStatsProgressHandler(httpd_req* req) { return RestApi::handleGetStatsProgress(req); }
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }
     static esp_err_t postInternalCacheLoadHandler(httpd_req* req) { return RestApi::handlePostInternalCacheLoad(req); }
+static esp_err_t postInternalCacheResetHandler(httpd_req* req) { return RestApi::handlePostInternalCacheReset(req); }
     static esp_err_t getTimeSettingsHandler(httpd_req* req) { return RestApi::handleGetTimeSettings(req); }
     static esp_err_t postTimeSettingsHandler(httpd_req* req) { return RestApi::handlePostTimeSettings(req); }
     static esp_err_t getTimeNowHandler(httpd_req* req) { return RestApi::handleGetTimeNow(req); }

@@ -637,6 +637,27 @@ Info about the cache file (auth required).
 }
 ```
 
+#### `POST /api/dns/internal-cache/reset`
+
+Forget every cached answer the device holds in PSRAM (auth required). The file
+on the card is deliberately not touched: this drops what the cache holds right
+now, it does not delete what was persisted, and the next save overwrites that
+file anyway. The request body is not read, so `{}` is enough.
+
+**Request:**
+```json
+{}
+```
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok"
+}
+```
+
+**Response `500 Internal Server Error`:** the internal cache is not available —
+no PSRAM on this device, or the cache is switched off.
 #### `GET /api/dns/internal-cache/progress`
 
 Progress of the running background save/load job (auth required).

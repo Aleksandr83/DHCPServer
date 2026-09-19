@@ -74,6 +74,7 @@ public:
     static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
     static esp_err_t handlePostInternalCacheSave(httpd_req* req);
     static esp_err_t handlePostInternalCacheLoad(httpd_req* req);
+    static esp_err_t handlePostInternalCacheReset(httpd_req* req);
     // Time (NTP) server
     static esp_err_t handleGetTimeSettings(httpd_req* req);
     static esp_err_t handlePostTimeSettings(httpd_req* req);

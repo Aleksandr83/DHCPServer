@@ -126,6 +126,10 @@ bool DnsServer::start()
     // Built-in PSRAM cache config (hash table; enabled only when PSRAM exists).
     applyInternalCache(dnsCfg.cacheInternal, dnsCfg.cacheInternalSizeMb,
                        dnsCfg.cacheInternalIgnoreTtl);
+    // Stage 153: the timer that writes that cache to the card by itself.
+    applyCacheAutosave(dnsCfg.cacheInternalAutosave,
+                       dnsCfg.cacheInternalAutosavePeriod,
+                       dnsCfg.cacheInternalAutosaveInterval);
     blockForwardNonAA_ = dnsCfg.blockForwardNonAA;
     applySubnetFilter();
     // The cache lookup runs in a dedicated worker task so the DNS server
@@ -229,6 +233,10 @@ bool DnsServer::startPersistJob(bool save, bool force)
         ESP_LOGW(TAG, "Persist job already running — rejected");
         return false;
     }
+
+    // Stage 153: a manual save is a save, so the next automatic one is a whole
+    // period away (the operator asked for the countdown to shift).
+    cacheAutosave_.notifyManualSave();
 
     BaseType_t res = xTaskCreate(
         persistJobTask, "ic_persist", DNS_PERSIST_TASK_STACK_BYTES, this,
@@ -517,6 +525,20 @@ void DnsServer::applyInternalCache(bool enabled, uint32_t sizeMb, bool ignoreTtl
     }
     ESP_LOGI(TAG, "Internal DNS cache configured: size=%u MB ignore_ttl=%d",
              (unsigned)sizeMb, ignoreTtl ? 1 : 0);
+}
+
+void DnsServer::applyCacheAutosave(bool enabled, core::AutosavePeriod unit,
+                                   uint16_t interval)
+{
+    // Stopping the operation on the scheduler page switches autosave off for
+    // good, and that has to survive a reboot: the settings are written here.
+    cacheAutosave_.setDisabledHandler([] {
+        auto cfg = core::Config::instance().getDns();
+        cfg.cacheInternalAutosave = false;
+        core::Config::instance().setDns(cfg);
+        ESP_LOGI(TAG, "autosave stopped and switched off in the settings");
+    });
+    cacheAutosave_.configure(enabled, unit, interval);
 }
 
 InternalDnsCache::FileInfo DnsServer::internalCacheFileInfo() const
@@ -834,6 +856,10 @@ DnsServer::RestartSave DnsServer::startCacheSaveForRestart()
 
 bool DnsServer::saveCacheBeforeRestart()
 {
+    // Stage 153: saving before a restart is a save as well, so the automatic one
+    // is a whole period away afterwards.
+    cacheAutosave_.notifyManualSave();
+
     const RestartSave started = startCacheSaveForRestart();
     if (started == RestartSave::Skipped || started == RestartSave::NothingToSave) return true;
     if (started == RestartSave::Failed) return false;

@@ -21,9 +21,9 @@
         </div>
 
         <div id="dns-internal-options" style="display:none;">
-            <!-- One card, three switches: the two "before reboot" switches live in
-                 the Ignore-TTL block (the operator asked for them there), and it is
-                 the same card the page already uses for a row of toggles. -->
+            <!-- One card, two switches: the statistics switch lives here by the
+                 operator's request, the cache switch moved down into the Cache
+                 card where the rest of the cache controls are. -->
             <div class="card">
                 <div class="toggle-row" style="margin-bottom:0.5rem;">
                     <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
@@ -39,13 +39,6 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
-                <div class="toggle-row">
-                    <span data-i18n="dns_internal.save_cache">Save cache before reboot</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="dns-internal-save-cache" onchange="toggleInternalSaveCache()">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
             </div>
 
             <!-- Persistence: save the PSRAM cache to /fat/cache.dat and restore it -->
@@ -57,7 +50,39 @@
                 <div class="test-conn-row">
                     <button class="btn btn-primary" onclick="saveInternalCacheFile(this)" data-i18n="dns_internal.save_file">Save to file</button>
                     <button class="btn" onclick="loadInternalCacheFile(this)" data-i18n="dns_internal.load_file">Load from file</button>
+                    <button class="btn" onclick="resetInternalCache(this)" data-i18n="dns_internal.reset">Reset</button>
                 </div>
+                <div class="toggle-row">
+                    <span data-i18n="dns_internal.save_cache">Save cache before reboot</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-save-cache" onchange="toggleInternalSaveCache()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <span data-i18n="dns_internal.autosave">Autosave</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-autosave" onchange="toggleInternalAutosave()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row" id="dns-internal-autosave-period-row" style="display:none;">
+                    <span data-i18n="dns_internal.autosave_period">Save every</span>
+                    <span>
+                        <input type="number" id="dns-internal-autosave-interval"
+                               min="1" max="24" step="1" value="1" style="width:4.5rem;"
+                               oninput="applyAutosaveIntervalMax()">
+                        <select id="dns-internal-autosave-unit" onchange="applyAutosaveIntervalMax()">
+                            <option value="2" data-i18n="dns_internal.period_minute">minutes</option>
+                            <option value="0" data-i18n="dns_internal.period_hour">hours</option>
+                            <option value="1" data-i18n="dns_internal.period_day">days</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="saveInternalAutosavePeriod(this)"
+                                data-i18n="dns_internal.autosave_save">Save</button>
+                    </span>
+                </div>
+
                 <!-- Live progress while a save/load job is running -->
                 <div id="dns-internal-progress-row" style="display:none; margin-top:0.6rem;">
                     <div style="display:flex; justify-content:space-between; font-size:0.85rem; margin-bottom:0.3rem;">
@@ -96,6 +121,17 @@
             const sca = document.getElementById('dns-internal-save-cache');
             sca.checked = (data.cache_internal_save_cache === undefined)
                 ? true : !!data.cache_internal_save_cache;
+            // Stage 153: autosave is off unless the device says otherwise, and
+            // its period selector only shows while the switch is on.
+            const auto = document.getElementById('dns-internal-autosave');
+            auto.checked = !!data.cache_internal_autosave;
+            auto.disabled = !internalAvailable;
+            const unit = document.getElementById('dns-internal-autosave-unit');
+            unit.value = String(Number(data.cache_internal_autosave_period) || 0);
+            const field = document.getElementById('dns-internal-autosave-interval');
+            field.value = String(Number(data.cache_internal_autosave_interval) || 1);
+            applyAutosaveIntervalMax();
+            updateAutosavePeriodVisibility();
             // The internal cache needs PSRAM — disable the toggle without it.
             cb.disabled = !internalAvailable;
             const note = document.getElementById('dns-internal-psram-note');
@@ -179,6 +215,88 @@
         }
 
         // ─── Persistence (cache.dat on FAT) ───
+
+        /* Stage 153: the device writes the cache to the card by itself — every
+           hour, every day or every thirty days. A manual save shifts that
+           countdown, so the next automatic one is a whole period away. */
+        async function toggleInternalAutosave() {
+            const box = document.getElementById('dns-internal-autosave');
+            const checked = box.checked;
+            updateAutosavePeriodVisibility();
+            const result = await saveDnsPartial({ cache_internal_autosave: checked });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                box.checked = !checked;
+                updateAutosavePeriodVisibility();
+            }
+        }
+
+        // The interval is how many of the unit fit into the next one up: 60
+        // minutes in an hour, 24 hours in a day, and for days the length of the
+        // month we are in right now (28…31) — the browser's own up/down arrows
+        // walk inside that range, and the maximum is recomputed when the unit
+        // changes.
+        function autosaveIntervalMax(unitValue) {
+            const unit = Number(unitValue);
+            if (unit === 2) return 60;                       // minutes
+            if (unit === 0) return 24;                       // hours
+            const now = new Date();
+            return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        }
+
+        function applyAutosaveIntervalMax() {
+            const unit = document.getElementById('dns-internal-autosave-unit');
+            const field = document.getElementById('dns-internal-autosave-interval');
+            if (!unit || !field) return;
+            const max = autosaveIntervalMax(unit.value);
+            field.max = String(max);
+            const value = Number(field.value) || 1;
+            if (value > max) field.value = String(max);
+            if (value < 1) field.value = '1';
+        }
+
+        async function saveAutosavePeriod() {
+            const unit = document.getElementById('dns-internal-autosave-unit');
+            const field = document.getElementById('dns-internal-autosave-interval');
+            const result = await saveDnsPartial({
+                cache_internal_autosave_period: Number(unit.value) || 0,
+                cache_internal_autosave_interval: Number(field.value) || 1,
+            });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+            }
+        }
+
+        // The unit and the number are only prepared here: the device is told
+        // when the operator presses Save, so a half-typed interval never reaches
+        // the settings (and never restarts the timer twice).
+        async function saveInternalAutosavePeriod(btn) {
+            applyAutosaveIntervalMax();
+            const out = document.getElementById('dns-internal-file-status');
+            if (btn) btn.disabled = true;
+            if (out) {
+                out.textContent = tr('dns_internal.saving');
+                out.className = 'test-conn-result test-conn-warn';
+            }
+            await saveAutosavePeriod();
+            if (out) {
+                out.textContent = tr('dns_internal.saved');
+                out.className = 'test-conn-result test-conn-ok';
+            }
+            if (btn) btn.disabled = false;
+        }
+
+        // The period only makes sense while the switch is on.
+        function updateAutosavePeriodVisibility() {
+            const box = document.getElementById('dns-internal-autosave');
+            const row = document.getElementById('dns-internal-autosave-period-row');
+            if (row) row.style.display = (box && box.checked) ? '' : 'none';
+            if (box && box.checked) applyAutosaveIntervalMax();
+        }
         let persistPollTimer = null;
 
         async function updateInternalCacheFileStatus() {
@@ -326,6 +444,45 @@
 
         async function loadInternalCacheFile(btn) {
             await startPersistJob(false, btn);
+        }
+
+        // Drop every entry held in PSRAM. The file on the card is left alone:
+        // this is the button for a cache full of answers the operator does not
+        // trust any more, not a request to lose what was persisted (the next
+        // save overwrites that file anyway). The question is asked in the page
+        // (js/app.js showDialog), not by the browser.
+        async function resetInternalCache(btn) {
+            const answer = await showDialog({
+                title: tr('dns_internal.reset_ask'),
+                hint: tr('dns_internal.reset_hint'),
+                okLabel: tr('dns_internal.reset'),
+                cancelLabel: tr('common.cancel'),
+                danger: true,
+            });
+            if (!answer) return;
+
+            const out = document.getElementById('dns-internal-file-status');
+            enablePersistButtons(false);
+            out.textContent = tr('dns_internal.resetting');
+            out.className = 'test-conn-result test-conn-warn';
+            try {
+                const resp = await apiFetch('/api/dns/internal-cache/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const d = await resp.json();
+                const ok = resp.ok && d.status === 'ok';
+                out.textContent = ok ? tr('dns_internal.reset_done')
+                                     : tr('dns_internal.reset_failed');
+                out.className = ok ? 'test-conn-result test-conn-ok'
+                                   : 'test-conn-result test-conn-fail';
+                updateInternalCacheFileStatus();
+            } catch (e) {
+                out.textContent = tr('dns_internal.reset_failed');
+                out.className = 'test-conn-result test-conn-fail';
+            }
+            enablePersistButtons(true);
         }
 
         loadInternalCacheSettings();
