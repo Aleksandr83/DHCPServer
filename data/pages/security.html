@@ -49,8 +49,19 @@
             const pass = document.getElementById('auth-password').value;
             if (pass) payload.password = pass;
 
-            await postJSON('/api/security/settings', payload);
-            alert('Security settings saved!');
+            const result = await postJSON('/api/security/settings', payload);
+            // The answer is read here like on every other page: a device that
+            // refuses the change (a password too short, a user name it will not
+            // take) must not be reported as a success. This page used to ignore
+            // the answer and say "saved" no matter what came back.
+            if (result && result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                return;
+            }
+            await showDialog({ title: tr('security.saved'),
+                               hideCancel: true });
         }
 
         // Load settings on page load

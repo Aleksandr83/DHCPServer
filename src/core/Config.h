@@ -31,6 +31,14 @@ struct DhcpConfig {
     // flood with random MACs must not grow it without bound). 0 = auto
     // (2× the pool size, clamped 8..512); otherwise clamped to 8..512.
     uint32_t maxLeaseEntries = 0;
+    // "Assign addresses only to allowed computers": while this is ON a client
+    // that is neither in the allowed-computers list nor covered by an ENABLED
+    // static binding is refused outright (no OFFER, no ACK), so it loses its
+    // address at the next renewal. While it is OFF the list is ignored
+    // completely and addresses are handed out as before.
+    // OFF by default: an appliance that filters clients after a firmware update
+    // would take a LAN hostage.
+    bool allowOnly = false;
     bool logTerminal = false;
     // DNS handed to DHCP clients: "auto" = built-in DNS server if running,
     // otherwise the router; "manual" = use dnsAddress
@@ -181,7 +189,8 @@ struct FileConfig {
  * @brief Configuration manager using NVS.
  *
  * All settings are persisted in NVS under the "dhcp" namespace.
- * Static bindings and DNS cache are stored as blobs (max 512 bytes each).
+ * Static bindings, local hosts and the DNS cache are stored as blobs (max 512
+ * bytes each); the allow-list budget is larger — see kMaxAllowedBytes.
  */
 class Config {
 public:
@@ -205,6 +214,17 @@ public:
     // Serialized size (bytes) of the current bindings in NVS storage.
     size_t staticBindingsBytes() const;
     static constexpr size_t kMaxBindingsBytes = 512;
+
+    // ─── Allowed computers (DHCP allow-list) ────────
+    // The list is ONE NVS text blob in the codec of dhcp::dhcp::DhcpAllowedList
+    // ("mac|name|enabled" per line, at most 25 entries). It is stored as text
+    // rather than as a structure so the codec lives in exactly one place — the
+    // module that also builds the MAC hash table from it.
+    std::string getAllowedComputers() const;              // raw text ("" = unset)
+    bool setAllowedComputers(const std::string& text);    // false: over the limit
+    // Serialized size (bytes) of the current list in NVS storage.
+    size_t allowedComputersBytes() const;
+    static constexpr size_t kMaxAllowedBytes = 1024;
 
     // ─── DNS ─────────────────────────────────────────
     DnsConfig getDns() const;

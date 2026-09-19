@@ -200,6 +200,44 @@ main.container {
     color: var(--accent);
 }
 
+/* A group inside a dropdown (Settings → Security). Its toggle is styled like the
+   menu items around it and the list opens *in place* with an indent, which reads
+   the same on the desktop popup and in the mobile column layout. */
+.nav-submenu-toggle {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-family: inherit;
+    padding: 0.45rem 0.7rem;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.nav-submenu-toggle::after {
+    content: ' ▾';
+    font-size: 0.75rem;
+}
+
+.nav-submenu-toggle:hover,
+.nav-submenu.open .nav-submenu-toggle {
+    background: var(--bg-secondary);
+    color: var(--accent);
+}
+
+.nav-submenu-list {
+    display: none;
+    padding-left: 0.75rem;
+}
+
+.nav-submenu.open .nav-submenu-list {
+    display: block;
+}
+
 .lang-switch button {
     background: transparent;
     border: 1px solid var(--border);
@@ -1193,6 +1231,20 @@ th {
     height: 14px;
 }
 
+/* A disabled icon button must not react to the pointer: the allow-list "detect
+   the name" button ships disabled, because the probe behind it does not exist
+   yet (next stage). Without this the :hover rule below would still light it up
+   and the button would look ready. */
+.files-icon-btn:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.files-icon-btn:disabled:hover {
+    color: var(--text-secondary);
+    background: none;
+}
+
 /* One button, two meanings: "pause" while a transfer runs and "resume" once the
    operator has stopped it. The tooltip is switched in JS (from the dictionary),
    the icon here — `display` alone keeps the layout from jumping. */
@@ -1370,6 +1422,10 @@ th {
         padding: 0 0 0 0.75rem;
     }
     .nav-dropdown-menu a {
+        font-size: 1rem;
+        padding: 0.3rem 0;
+    }
+    .nav-submenu-toggle {
         font-size: 1rem;
         padding: 0.3rem 0;
     }

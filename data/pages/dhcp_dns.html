@@ -72,10 +72,13 @@
         async function saveDnsDhcpSettings() {
             const result = await saveDhcpPartial(readDhcpForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
-            alert('DNS settings saved!');
+            await showDialog({ title: tr('dhcp_dns.saved'),
+                               hideCancel: true });
             await loadDhcpSettings();
         }
 

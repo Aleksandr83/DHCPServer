@@ -93,6 +93,47 @@ public:
     virtual void reloadStaticBindings() = 0;
 
     /**
+     * @brief Reload the allowed-computers allow-list ("allowed computers").
+     *
+     * Re-reads the NVS text blob plus the "assign addresses only to allowed
+     * computers" switch (DHCP -> General) and rebuilds the MAC hash table.
+     * Called at boot, after the list is saved in the web UI and after a
+     * settings import. Without PSRAM the table is unavailable, and the policy
+     * then fails open (see DhcpAllowedList).
+     */
+    virtual void reloadAllowedComputers() = 0;
+
+    /** @brief True when the allow-list MAC table is built and usable. */
+    virtual bool allowedListAvailable() const = 0;
+
+    /** @brief Number of MAC addresses in the active allow-list table. */
+    virtual size_t allowedListCount() const = 0;
+
+    /**
+     * @brief What the device could find out about a client's name.
+     */
+    struct ClientNameResult {
+        std::string name;      // "" when nothing is known
+        /** Where the name came from: "lease", "ptr", "netbios" or "none".
+         *  A name is somebody's claim about the computer, and the caller is
+         *  supposed to say whose claim it is. */
+        std::string source;
+        uint32_t ipNet = 0;    // address the lookup used (0 = none known)
+    };
+
+    /**
+     * @brief Ask what this MAC is called.
+     *
+     * Chain of sources, cheapest first: (1) the name the client itself wrote
+     * into its DHCP request — no traffic at all; (2) a reverse DNS (PTR) query
+     * to the router, which registers the names it hands addresses to. A probe
+     * needs an address, taken from the lease/offer table or, failing that, from
+     * the ARP cache. Whatever comes back is filtered before it is returned; an
+     * empty name with `source == "none"` is a real answer, not an error.
+     */
+    virtual ClientNameResult lookupClientName(const uint8_t mac[6]) const = 0;
+
+    /**
      * @brief Re-apply the lease/offer table cap from the configuration.
      *
      * 0 means "auto" = 2× the configured pool size (clamped 8..512); an

@@ -49,6 +49,8 @@
     "dhcp_logging": "Logging",
     "dhcp_dns": "DNS",
     "dhcp_static": "Static Bindings",
+    "security_general": "General",
+    "security_allowed": "Allowed computers",
     "dns": "DNS",
     "dns_general": "General",
     "dns_internal": "Internal Cache",
@@ -92,6 +94,8 @@
     "server_ip_desc": "IP address of this device on the network",
     "lease_time": "Lease Time (s)",
     "max_leases": "Max lease entries (0 = auto)",
+    "allow_only": "Assign addresses only to allowed computers",
+    "allow_only_hint": "The list itself is managed on the Allowed computers page (DHCP menu).",
     "max_leases_effective": "Limit:",
     "leases_used": "in use:",
     "lease_rejects": "refused:",
@@ -103,6 +107,9 @@
     "add": "Add",
     "remove": "Remove",
     "save": "Save",
+    "saved_ip": "Server IP saved!",
+    "saved_ip_hint": "The device will use this address after a reboot.",
+    "err_ip": "Enter a valid IP address",
     "mac_example": "e.g. 24:0A:C4:01:23:45",
     "enable_disable": "Enable/Disable",
     "log_terminal": "Log to Terminal",
@@ -131,10 +138,42 @@
     "title": "DHCP Logging"
   },
   "dhcp_dns": {
-    "title": "DHCP DNS"
+    "title": "DHCP DNS",
+    "saved": "DNS settings saved!"
   },
   "dhcp_static": {
-    "title": "Static Bindings"
+    "title": "Static Bindings",
+    "saved": "Static bindings saved!"
+  },
+  "dhcp_allowed": {
+    "title": "Allowed Computers",
+    "desc": "If \"Assign addresses only to allowed computers\" is switched on in DHCP → General, only the computers in this list receive an address.",
+    "info_static": "A computer with a Static Binding whose Enable checkbox is on is always allowed — listing it here is optional.",
+    "state_on": "The list is active: addresses go only to allowed computers and to enabled static bindings.",
+    "state_off": "The list is inactive: \"Assign addresses only to allowed computers\" in DHCP → General is switched off.",
+    "state_empty": "The list is empty while the switch is on — no computer will get an address.",
+    "unavailable": "The PSRAM MAC table is unavailable — the list is not applied and every computer is served.",
+    "count": "Entries:",
+    "count_active": "enabled:",
+    "lookup_name": "Detect the computer name by MAC",
+    "clear_name": "Clear the name",
+    "lookup_err": "Could not look the name up",
+    "lookup_replace_title": "Replace the name?",
+    "lookup_replace_hint": "The field already holds a different name.",
+    "lookup_replace_ok": "Replace",
+    "note_found": "Name reported by the computer:",
+    "note_found_ptr": "Name found through reverse DNS:",
+    "note_found_netbios": "Name found through NetBIOS:",
+    "note_looking": "Looking the name up…",
+    "note_none_no_ip": "The name is unknown: the computer has no address from this device, so there is nobody to ask.",
+    "note_save": "press Save",
+    "note_none": "The name is unknown: the computer did not report one, reverse DNS returned no name for its address and NetBIOS did not answer.",
+    "note_no_mac": "Enter the MAC address first.",
+    "save_needs_mac": "A row has a name but no MAC address — fill the address in or remove the row.",
+    "note_cleared": "The name field is cleared · press Save",
+    "full": "The list is full.",
+    "saved": "Allowed computers saved!",
+    "err_save": "Could not save the list"
   },
   "dns": {
     "title": "DNS Setup",
@@ -174,10 +213,12 @@
     "local_ip6": "IPv6 Address",
     "add": "Add",
     "remove": "Remove",
-    "save": "Save"
+    "save": "Save",
+    "saved": "DNS settings saved!"
   },
   "dns_logging": {
-    "title": "DNS Logging"
+    "title": "DNS Logging",
+    "saved": "DNS settings saved!"
   },
   "time": {
     "title": "Time Server",
@@ -195,6 +236,7 @@
     "custom_offset": "Custom offset",
     "sync_interval": "Sync interval (hours)",
     "save": "Save",
+    "saved": "Time settings saved!",
     "manual_title": "Set date/time manually",
     "manual_date": "Date (YYYY-MM-DD)",
     "manual_time": "Time (HH:MM:SS)",
@@ -219,10 +261,12 @@
     "test_ok": "Connection OK",
     "test_fail": "Connection failed",
     "test_not_saved": "Login/password not saved",
-    "save": "Save"
+    "save": "Save",
+    "saved": "Time settings saved!"
   },
   "dns_cache": {
-    "title": "External Cache"
+    "title": "External Cache",
+    "saved": "DNS settings saved!"
   },
   "dns_internal": {
     "title": "Internal Cache",
@@ -254,7 +298,8 @@
     "md5_load_anyway": "Load anyway"
   },
   "dns_local_hosts": {
-    "title": "Local Hosts"
+    "title": "Local Hosts",
+    "saved": "Local hosts saved!"
   },
   "security": {
     "title": "Security Settings",
@@ -262,7 +307,8 @@
     "password": "Password",
     "max_attempts": "Max Attempts",
     "lockout_period": "Lockout Period (s)",
-    "save": "Save"
+    "save": "Save",
+    "saved": "Security settings saved!"
   },
   "settings_export": {
     "title": "Export Settings",
@@ -461,7 +507,10 @@
 
   "common": {
     "ok": "OK",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "warning": "Warning",
+    "error": "Error",
+    "unknown_error": "Unknown error"
   },
 
   "restart": {

@@ -22,6 +22,9 @@ static const char* KEY_DHCP_SERVER_IP = "dhcp_srv_ip";
 static const char* KEY_DHCP_LEASE     = "dhcp_lease";
 static const char* KEY_DHCP_MAX_LEASES = "dhcp_max_ent";
 static const char* KEY_DHCP_LOG_TERM   = "dhcp_log_term";
+// Allowed computers / "only allowed" policy (NVS keys limited to 15 chars).
+static const char* KEY_DHCP_ALLOW_ONLY = "dhcp_allow_only";
+static const char* KEY_DHCP_ALLOWED    = "dhcp_allowed";
 static const char* KEY_DHCP_BINDINGS  = "dhcp_bindings";
 static const char* KEY_DHCP_DNS_MODE  = "dhcp_dns_mode";
 static const char* KEY_DHCP_DNS_ADDR  = "dhcp_dns_addr";
@@ -255,6 +258,7 @@ DhcpConfig Config::getDhcp() const
         }
         cfg.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
     }
+    cfg.allowOnly = readI32(KEY_DHCP_ALLOW_ONLY, 0) != 0;   // OFF by default
     cfg.logTerminal = readI32(KEY_DHCP_LOG_TERM, 0) != 0;
     cfg.dnsMode = readStr(KEY_DHCP_DNS_MODE, "auto");
     cfg.dnsAddress = readStr(KEY_DHCP_DNS_ADDR, "");
@@ -276,6 +280,7 @@ void Config::setDhcp(const DhcpConfig& cfg)
     writeStr(KEY_DHCP_SERVER_IP, cfg.serverIp);
     writeI32(KEY_DHCP_LEASE, static_cast<int32_t>(cfg.leaseTimeSec));
     writeI32(KEY_DHCP_MAX_LEASES, static_cast<int32_t>(cfg.maxLeaseEntries));
+    writeI32(KEY_DHCP_ALLOW_ONLY, cfg.allowOnly ? 1 : 0);
     writeI32(KEY_DHCP_LOG_TERM, cfg.logTerminal ? 1 : 0);
     writeStr(KEY_DHCP_DNS_MODE, cfg.dnsMode.empty() ? "auto" : cfg.dnsMode);
     writeStr(KEY_DHCP_DNS_ADDR, cfg.dnsAddress);
@@ -362,6 +367,34 @@ size_t Config::staticBindingsBytes() const
                 (b.useDns ? "1" : "0");
     }
     return text.size();
+}
+
+// ─── Allowed computers (DHCP allow-list) ────────────
+
+std::string Config::getAllowedComputers() const
+{
+    std::vector<uint8_t> blob;
+    if (!readBlob(KEY_DHCP_ALLOWED, blob)) return std::string();
+    return std::string(blob.begin(), blob.end());
+}
+
+bool Config::setAllowedComputers(const std::string& text)
+{
+    if (text.empty()) {
+        return eraseKey(KEY_DHCP_ALLOWED);
+    }
+    if (text.size() > kMaxAllowedBytes) {
+        ESP_LOGE(TAG, "Allowed computers too large: %zu > %zu",
+                 text.size(), kMaxAllowedBytes);
+        return false;
+    }
+    std::vector<uint8_t> blob(text.begin(), text.end());
+    return writeBlob(KEY_DHCP_ALLOWED, blob);
+}
+
+size_t Config::allowedComputersBytes() const
+{
+    return getAllowedComputers().size();
 }
 
 // ─── DNS ────────────────────────────────────────────

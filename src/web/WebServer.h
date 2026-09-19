@@ -4,6 +4,8 @@
 #include "IWebServer.h"
 #include "AuthManager.h"
 #include "RestApi.h"
+#include "RouteTable.h"
+#include <cstddef>
 #include <cstdint>
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -42,6 +44,19 @@ public:
 
 private:
     void registerRoutes();
+
+    /**
+     * @brief The route table, defined in WebServer.cpp next to the handlers.
+     *
+     * `count` receives the number of routes. It is a function of its own
+     * because two places need the table: `start()` takes the HTTP server's
+     * handler limit from its size, and `registerRoutes()` walks it.
+     */
+    static const WebRoute* routes(size_t& count);
+
+    /** @brief One row per reachable path, in registration order. */
+    static const WebRoute kRoutes[];
+
     static esp_err_t staticFileHandler(httpd_req* req);
     static esp_err_t err404Handler(httpd_req* req, httpd_err_code_t err);
 
@@ -51,6 +66,9 @@ private:
     static esp_err_t postDhcpSettingsHandler(httpd_req* req) { return RestApi::handlePostDhcpSettings(req); }
     static esp_err_t getStaticBindingsHandler(httpd_req* req)  { return RestApi::handleGetStaticBindings(req); }
     static esp_err_t postStaticBindingsHandler(httpd_req* req) { return RestApi::handlePostStaticBindings(req); }
+    static esp_err_t getAllowedComputersHandler(httpd_req* req)  { return RestApi::handleGetAllowedComputers(req); }
+    static esp_err_t postAllowedComputersHandler(httpd_req* req) { return RestApi::handlePostAllowedComputers(req); }
+    static esp_err_t postLookupClientNameHandler(httpd_req* req) { return RestApi::handlePostLookupClientName(req); }
     static esp_err_t getLeasesHandler(httpd_req* req)  { return RestApi::handleGetLeases(req); }
     static esp_err_t getDnsSettingsHandler(httpd_req* req)  { return RestApi::handleGetDnsSettings(req); }
     static esp_err_t postDnsSettingsHandler(httpd_req* req) { return RestApi::handlePostDnsSettings(req); }

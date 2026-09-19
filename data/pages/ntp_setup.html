@@ -392,7 +392,9 @@
             const checked = document.getElementById('time-enabled').checked;
             const result = await saveTimePartial({ enabled: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('time-enabled').checked = !checked;
             } else {
                 await loadTimeSettings();
@@ -403,7 +405,9 @@
             const checked = document.getElementById('time-sync-enabled').checked;
             const result = await saveTimePartial({ sync_enabled: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('time-sync-enabled').checked = !checked;
             } else {
                 await loadTimeSettings();
@@ -417,7 +421,9 @@
             const checked = document.getElementById('time-allow-own-subnet').checked;
             const result = await saveTimePartial({ allow_own_subnet: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('time-allow-own-subnet').checked = !checked;
             } else {
                 await loadTimeSettings();
@@ -427,11 +433,14 @@
         async function saveTimeSettings() {
             const result = await saveTimePartial(readTimeForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
             await loadTimeSettings();
-            alert('Time settings saved!');
+            await showDialog({ title: tr('time.saved'),
+                               hideCancel: true });
         }
 
         // Re-render the timezone <option> labels after the dictionary loads

@@ -38,6 +38,17 @@ public:
     static esp_err_t handlePostDhcpSettings(httpd_req* req);
     static esp_err_t handleGetStaticBindings(httpd_req* req);
     static esp_err_t handlePostStaticBindings(httpd_req* req);
+    // Allowed computers (DHCP allow-list): the list the "assign addresses only
+    // to allowed computers" switch in the DHCP settings works with.
+    static esp_err_t handleGetAllowedComputers(httpd_req* req);
+    static esp_err_t handlePostAllowedComputers(httpd_req* req);
+    /**
+     * @brief What is this MAC called? (POST /api/dhcp/lookup-name)
+     *
+     * Answers with the name the client reported about itself and the source it
+     * came from, or an empty name: "unknown" is a real answer, not an error.
+     */
+    static esp_err_t handlePostLookupClientName(httpd_req* req);
     static esp_err_t handleGetLeases(httpd_req* req);
     static esp_err_t handleGetDnsSettings(httpd_req* req);
     static esp_err_t handlePostDnsSettings(httpd_req* req);

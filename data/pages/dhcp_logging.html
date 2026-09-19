@@ -109,7 +109,9 @@
             const checked = document.getElementById('dhcp-log-terminal').checked;
             const result = await saveDhcpPartial({ log_terminal: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dhcp-log-terminal').checked = !checked;
             }
         }
@@ -118,7 +120,9 @@
             const checked = document.getElementById('dhcp-log-rest').checked;
             const result = await saveDhcpPartial({ log_rest: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dhcp-log-rest').checked = !checked;
             }
         }
@@ -131,7 +135,9 @@
                 log_auth_password: document.getElementById('dhcp-log-auth-pass').value
             });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dhcp-log-auth').checked = !checked;
             }
             updateDhcpLogAuthVisibility();
@@ -150,7 +156,9 @@
         async function saveDhcpSettings() {
             const result = await saveDhcpPartial(readDhcpForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
             await loadDhcpSettings();

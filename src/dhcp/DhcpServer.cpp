@@ -1,4 +1,7 @@
 #include "DhcpServer.h"
+#include "DhcpClientName.h"
+#include "PtrProbe.h"
+#include "NbstatProbe.h"
 #include "../core/Config.h"
 
 #include <cstdio>
@@ -7,6 +10,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
@@ -277,6 +281,13 @@ DhcpServer::DhcpServer()
 DhcpServer::~DhcpServer()
 {
     stop();
+    // The allow-list table lives in this PSRAM block for the whole lifetime of
+    // the object (see DhcpAllowedList: the two buffers are never freed, which is
+    // what makes the lock-free lookup safe).
+    if (allowedStorage_) {
+        heap_caps_free(allowedStorage_);
+        allowedStorage_ = nullptr;
+    }
 }
 
 // ─────────────────────────────────────────────────────
@@ -351,6 +362,9 @@ bool DhcpServer::start()
     // Load static bindings
     reloadStaticBindings();
 
+    // Allowed-computers allow-list (policy switch + PSRAM MAC table)
+    reloadAllowedComputers();
+
     // Lease/offer table cap (DoS hardening) — auto or configured.
     applyLeaseLimit();
 
@@ -418,7 +432,49 @@ void DhcpServer::reloadStaticBindings()
                  b.mac.c_str(), b.ip.c_str(), b.gateway.c_str(),
                  b.useGateway ? 1 : 0, b.enabled ? 1 : 0, b.useDns ? 1 : 0);
     }
+    refreshAllowedStaticRefs();
     ESP_LOGI(TAG, "Static bindings reloaded (%zu entries)", staticBindings_.size());
+}
+
+void DhcpServer::refreshAllowedStaticRefs()
+{
+    allowedStaticRefs_.clear();
+    allowedStaticRefs_.reserve(staticBindings_.size());
+    for (const auto& entry : staticBindings_) {
+        DhcpAllowedList::StaticRef ref;
+        memcpy(ref.mac, entry.mac, 6);
+        ref.enabled = entry.enabled;
+        allowedStaticRefs_.push_back(ref);
+    }
+}
+
+void DhcpServer::reloadAllowedComputers()
+{
+    allowOnly_ = core::Config::instance().getDhcp().allowOnly;
+
+    auto list = DhcpAllowedList::parse(core::Config::instance().getAllowedComputers());
+
+    // The table is allocated on first use (and retried if an earlier attempt ran
+    // before PSRAM was usable): one block, two buffers of kSlots slots.
+    if (!allowedList_.available()) {
+        if (!allowedStorage_) {
+            allowedStorage_ = heap_caps_malloc(DhcpAllowedList::storageBytes(),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!allowedStorage_) {
+                ESP_LOGW(TAG, "Allowed computers: no PSRAM for the %u-byte hash "
+                              "table - the allow-only policy is inactive",
+                         (unsigned)DhcpAllowedList::storageBytes());
+            }
+        }
+        if (allowedStorage_) allowedList_.init(allowedStorage_);
+    }
+
+    size_t skipped = 0;
+    const bool ready = allowedList_.rebuild(list, &skipped);
+    ESP_LOGI(TAG, "Allowed computers reloaded: %zu entries, %zu skipped, "
+                  "allow-only=%d, table=%s",
+             allowedList_.count(), skipped, allowOnly_ ? 1 : 0,
+             ready ? "in PSRAM" : "unavailable");
 }
 
 // ─────────────────────────────────────────────────────
@@ -571,6 +627,15 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
 
     if (msgType == 0) return false;
 
+    // The name the client reports about itself (option 12, else option 81).
+    // Free — it is already in the packet that was just parsed — but never
+    // trusted: DhcpClientName filters it before it can reach JSON or NVS.
+    const size_t kOptionsOffset = sizeof(DhcpMessage) - sizeof(msg->options);
+    const std::string clientName =
+        (len > kOptionsOffset)
+            ? DhcpClientName::fromOptions(msg->options, len - kOptionsOffset)
+            : std::string();
+
     // Log incoming DHCP messages if terminal logging enabled
     if (logTerminal_) {
         const char* typeStr = "UNKNOWN";
@@ -586,10 +651,27 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                  msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
     }
 
+    // ─── Allowed computers (DHCP -> General) ───
+    // With the switch ON, a client that is neither in the allow-list nor
+    // covered by an ENABLED static binding gets nothing: the request is dropped
+    // here, before OFFER/ACK are built, so a lease that already exists is never
+    // renewed (the device loses its address at the next renewal) and a new one
+    // is never handed out.
+    if (!DhcpAllowedList::isClientAllowed(msg->chaddr, allowOnly_,
+                                          allowedList_, allowedStaticRefs_)) {
+        if (logTerminal_) {
+            ESP_LOGW(TAG, "DHCP refused (not an allowed computer): "
+                          "MAC=%02x:%02x:%02x:%02x:%02x:%02x",
+                     msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
+                     msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
+        }
+        return false;
+    }
+
     switch (msgType) {
     case DHCP_DISCOVER:
         if (logTerminal_) ESP_LOGI(TAG, "DHCP DISCOVER — broadcasting OFFER");
-        sendDhcpOffer(msg->chaddr, msg->xid, requestedIp, msg->giaddr);
+        sendDhcpOffer(msg->chaddr, msg->xid, requestedIp, msg->giaddr, clientName);
         break;
 
     case DHCP_REQUEST:
@@ -644,7 +726,7 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                     }
                     if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending ACK");
                     sendDhcpAck(msg->chaddr, msg->xid, assignIp, msg->giaddr);
-                    addLease(msg->chaddr, assignIp);
+                    addLease(msg->chaddr, assignIp, clientName);
                 } else {
                     if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending NAK (conflict)");
                     sendDhcpNak(msg->chaddr, msg->xid, msg->giaddr);
@@ -686,7 +768,8 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
 // ─────────────────────────────────────────────────────
 
 void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
-                                uint32_t requestedIp, uint32_t relayIp)
+                                uint32_t requestedIp, uint32_t relayIp,
+                                const std::string& clientName)
 {
     uint32_t offerIp = 0;
     if (requestedIp &&
@@ -713,7 +796,7 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     // Reserve the offered IP so concurrent DISCOVERs don't get the same one.
     // When the lease table is at its cap the reservation fails and no OFFER is
     // sent (the client retries; nothing is leaked).
-    if (!reserveOffer(clientMac, offerIp)) {
+    if (!reserveOffer(clientMac, offerIp, clientName)) {
         ESP_LOGW(TAG, "No OFFER for %02x:%02x:%02x:%02x:%02x:%02x: lease table full",
                  clientMac[0], clientMac[1], clientMac[2],
                  clientMac[3], clientMac[4], clientMac[5]);
@@ -1062,23 +1145,25 @@ bool DhcpServer::canAddLeaseEntry(uint32_t ip)
     return false;
 }
 
-void DhcpServer::addLease(const uint8_t* mac, uint32_t ip)
+void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const std::string& hostname)
 {
     DhcpLease lease;
     memcpy(lease.mac, mac, 6);
     lease.ip = ip;
     lease.expiry = getCurrentTimeSec() + leaseTimeSec_;
+    lease.hostname = hostname;
     leases_[ip] = lease;
 
     if (logTerminal_) {
-        ESP_LOGI(TAG, "Lease added: " IP_FMT " -> %02x:%02x:%02x:%02x:%02x:%02x (expires in %lu s)",
+        ESP_LOGI(TAG, "Lease added: " IP_FMT " -> %02x:%02x:%02x:%02x:%02x:%02x (expires in %lu s)%s%s",
                  IP_FMT_ARGS(ip),
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                 (unsigned long)leaseTimeSec_);
+                 (unsigned long)leaseTimeSec_,
+                 hostname.empty() ? "" : " name=", hostname.c_str());
     }
 }
 
-bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
+bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const std::string& hostname)
 {
     // Reserve the offered IP for a short hold so concurrent DISCOVERs from
     // different clients don't get offered the same address. The reservation
@@ -1089,6 +1174,9 @@ bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
     auto existing = leases_.find(ip);
     if (existing != leases_.end() &&
         existing->second.expiry > getCurrentTimeSec() + kOfferHoldSec) {
+        // A confirmed lease of this client stays as it is, but a name it now
+        // reports is worth keeping: the operator sees the freshest one.
+        if (!hostname.empty()) existing->second.hostname = hostname;
         return true;
     }
 
@@ -1100,6 +1188,7 @@ bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip)
     memcpy(lease.mac, mac, 6);
     lease.ip = ip;
     lease.expiry = getCurrentTimeSec() + kOfferHoldSec;
+    lease.hostname = hostname;
     leases_[ip] = lease;
 
     if (logTerminal_) {
@@ -1126,6 +1215,130 @@ void DhcpServer::removeExpiredLeases()
 uint32_t DhcpServer::getCurrentTimeSec() const
 {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
+}
+
+std::string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const
+{
+    const uint32_t now = getCurrentTimeSec();
+    for (const auto& entry : leases_) {
+        const DhcpLease& lease = entry.second;
+        if (lease.expiry <= now) continue;          // a stale entry is not a fact
+        if (memcmp(lease.mac, mac, 6) != 0) continue;
+        if (!lease.hostname.empty()) return lease.hostname;
+    }
+    return std::string();
+}
+
+bool DhcpServer::clientIpByMac(const uint8_t mac[6], uint32_t& ipNet) const
+{
+    const uint32_t now = getCurrentTimeSec();
+    for (const auto& entry : leases_) {
+        const DhcpLease& lease = entry.second;
+        if (lease.expiry <= now) continue;
+        if (memcmp(lease.mac, mac, 6) == 0) {
+            ipNet = entry.first;
+            return true;
+        }
+    }
+
+    // No lease: the computer may have a fixed address, or one from before this
+    // device was installed. The ARP cache still knows where it lives — and
+    // without an address no probe is possible at all.
+    LOCK_TCPIP_CORE();
+    bool found = false;
+    for (size_t i = 0; i < ARP_TABLE_SIZE && !found; i++) {
+        ip4_addr_t* ip = nullptr;
+        struct netif* nif = nullptr;
+        struct eth_addr* eth = nullptr;
+        if (etharp_get_entry(i, &ip, &nif, &eth) != 1 || !ip || !eth) continue;
+        if (memcmp(eth->addr, mac, 6) == 0) {
+            ipNet = ip->addr;
+            found = true;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    return found;
+}
+
+uint32_t DhcpServer::nameServerIp() const
+{
+    if (dnsMode_ == "manual" && dnsManualIp_ != 0) return dnsManualIp_;
+    return serverGateway_;   // usually the router, which registers the names
+}
+
+IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6]) const
+{
+    ClientNameResult result;
+
+    uint32_t ipNet = 0;
+    const bool haveIp = clientIpByMac(mac, ipNet);
+    if (haveIp) result.ipNet = ipNet;
+
+    // Step 1 — what the client said about itself. Costs nothing.
+    result.name = clientHostnameByMac(mac);
+    if (!result.name.empty()) {
+        result.source = "lease";
+        return result;
+    }
+
+    // Step 2 — reverse DNS through the router. Needs an address, so a client
+    // this device has never seen (no lease, nothing in the ARP cache) cannot be
+    // asked about at all: that is the honest answer, not a failure.
+    const uint32_t nameServer = nameServerIp();
+    if (haveIp && nameServer != 0) {
+        const std::string raw = PtrProbe::query(ipNet, nameServer);
+        if (!raw.empty()) {
+            // A PTR value is a claim by a DNS server, and it is usually a FQDN:
+            // the field wants the computer's name, so take the host label and
+            // filter the text like every other name.
+            std::string name = DhcpClientName::sanitize(raw);
+            while (!name.empty() && name.back() == '.') name.pop_back();
+            name = DhcpClientName::shortLabel(name);
+            if (!name.empty()) {
+                result.name = name;
+                result.source = "ptr";
+                ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
+                              "%s (PTR via " IP_FMT ")",
+                         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                         name.c_str(), IP_FMT_ARGS(nameServer));
+                return result;
+            }
+        }
+    }
+
+    // Step 3 — NetBIOS node status (NBSTAT, UDP 137). Windows and Samba
+    // computers that never put a host name into their DHCP request still answer
+    // this one; a Linux box, a phone or a router simply stays silent, and
+    // silence is an answer too — a made-up name would be worse than an empty
+    // field. The name arrives in the NetBIOS upper case and is left as it is.
+    if (haveIp) {
+        const std::string raw = NbstatProbe::query(ipNet);
+        if (!raw.empty()) {
+            const std::string name = DhcpClientName::sanitize(raw);
+            if (!name.empty()) {
+                result.name = name;
+                result.source = "netbios";
+                ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
+                              "%s (NBSTAT via " IP_FMT ")",
+                         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                         name.c_str(), IP_FMT_ARGS(ipNet));
+                return result;
+            }
+        }
+    }
+
+    result.source = "none";
+    if (logTerminal_) {
+        // Step 3 — NetBIOS node status is tried for every client we have an
+        // address for, so the log says "ip=?" when that was the reason nothing
+        // was probed at all.
+        ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: nothing "
+                      "found (ip=%s, dns=" IP_FMT ")",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                 haveIp ? ipToStr(result.ipNet).c_str() : "-",
+                 IP_FMT_ARGS(nameServer));
+    }
+    return result;
 }
 
 uint32_t DhcpServer::leaseCount() const

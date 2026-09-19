@@ -86,9 +86,12 @@
             });
             const result = await postJSON('/api/dns/local-hosts', { hosts });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
             } else {
-                alert('Local hosts saved!');
+                await showDialog({ title: tr('dns_local_hosts.saved'),
+                                   hideCancel: true });
                 loadLocalHosts();
             }
         }

@@ -217,7 +217,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
    semantics (and its callers were left untouched).
 
    Resolves with the typed value (input mode), `true` (confirm mode), 'extra'
-   (the optional third button) or null when the operator cancels or closes it. */
+   (the optional third button) or null when the operator cancels or closes it.
+
+   A question and a message are not the same thing: a message has exactly one
+   answer and no way to say "no", so `hideCancel` leaves the dialog with a
+   single button. That is what replaced the browser's own `alert()`, which
+   cannot be translated, styled or captured in a screenshot. */
 let uiDialogResolve = null;
 
 function uiDialog() {
@@ -266,7 +271,7 @@ function closeDialog(result) {
 }
 
 function showDialog({ title, hint, value, okLabel, cancelLabel, danger,
-                      withInput, extraLabel }) {
+                      withInput, extraLabel, hideCancel }) {
     const modal = uiDialog();
     const input = document.getElementById('ui-modal-input');
     const hintEl = document.getElementById('ui-modal-hint');
@@ -282,7 +287,11 @@ function showDialog({ title, hint, value, okLabel, cancelLabel, danger,
 
     ok.textContent = okLabel || tr('common.ok');
     ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
-    document.getElementById('ui-modal-cancel').textContent = cancelLabel || tr('common.cancel');
+    const cancel = document.getElementById('ui-modal-cancel');
+    cancel.textContent = cancelLabel || tr('common.cancel');
+    // Not every dialog is a question: a message must not offer a choice it does
+    // not have, so its Cancel button is simply not drawn.
+    cancel.style.display = hideCancel ? 'none' : '';
     extra.textContent = extraLabel || '';
     extra.style.display = extraLabel ? '' : 'none';
 
@@ -615,8 +624,25 @@ function toggleDropdown(event) {
     if (!dd) return;
     const wasOpen = dd.classList.contains('open');
     document.querySelectorAll('.nav-dropdown.open')
-        .forEach(d => d.classList.remove('open'));
+        .forEach(d => { d.classList.remove('open'); closeSubmenus(d); });
     if (!wasOpen) dd.classList.add('open');
+}
+
+/* Toggle a group inside an open dropdown (Settings → Security). It deliberately
+   leaves the surrounding dropdown alone: the menu it lives in has to stay open,
+   and a click on the group is not a click "outside" the menu. */
+function toggleSubmenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const group = event.currentTarget.closest('.nav-submenu');
+    if (group) group.classList.toggle('open');
+}
+
+/* Collapse the groups of a dropdown that is being closed: reopening a menu shows
+   its plain list instead of remembering an expanded group from last time. */
+function closeSubmenus(root) {
+    root.querySelectorAll('.nav-submenu.open')
+        .forEach(g => g.classList.remove('open'));
 }
 
 /* ─── Page Load Handler ────────────────────────────── */
@@ -647,7 +673,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('click', (e) => {
         if (!e.target.closest('.nav-dropdown')) {
             document.querySelectorAll('.nav-dropdown.open')
-                .forEach(d => d.classList.remove('open'));
+                .forEach(d => { d.classList.remove('open'); closeSubmenus(d); });
         }
     });
 

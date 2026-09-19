@@ -151,7 +151,9 @@
             const checked = el.checked;
             const result = await saveDnsPartial({ [key]: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 el.checked = !checked;
             }
         }
@@ -166,7 +168,9 @@
             const checked = document.getElementById('dns-log-rest').checked;
             const result = await saveDnsPartial({ log_rest: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dns-log-rest').checked = !checked;
             }
             updateRestSentDisabled();
@@ -180,7 +184,9 @@
                 log_auth_password: document.getElementById('dns-log-auth-pass').value
             });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dns-log-auth').checked = !checked;
             }
             updateDnsLogAuthVisibility();
@@ -199,11 +205,14 @@
         async function saveDnsSettings() {
             const result = await saveDnsPartial(readDnsForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
             await loadDnsSettings();
-            alert('DNS settings saved!');
+            await showDialog({ title: tr('dns_logging.saved'),
+                               hideCancel: true });
         }
 
         loadDnsSettings();

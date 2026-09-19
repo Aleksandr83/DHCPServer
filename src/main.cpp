@@ -198,6 +198,11 @@ static void onNetworkConnected()
                   s_netAdapter.ip4().c_str(), s_netAdapter.ip6().c_str());
     s_terminalMenu.println(buf);
 
+    // Allowed computers (DHCP allow-list): build the PSRAM MAC hash table from
+    // NVS before the server starts, and regardless of whether it is enabled --
+    // the web page reports the table state, so it must exist either way.
+    s_dhcpServer.reloadAllowedComputers();
+
     // Start DHCP server (check config enabled flag)
     if (!s_dhcpServer.isRunning()) {
         auto dhcpCfg = ::dhcp::core::Config::instance().getDhcp();

@@ -37,7 +37,19 @@
                         <!-- Shown only where the build has FAT volumes (ESP32-P4);
                              app.js reveals it when /api/status reports files_enabled. -->
                         <a href="/pages/files.html" id="nav-files" data-i18n="nav.files" style="display:none;">Files</a>
-                        <a href="/pages/security.html" data-i18n="nav.security">Security</a>
+                        <!-- Security is a group of its own inside Settings: it has
+                             more than one page now (General and the allow-list),
+                             and the allow-list used to sit under DHCP where it had
+                             nothing to do with handing out addresses. Clicking the
+                             group expands it in place (app.js: toggleSubmenu). -->
+                        <div class="nav-submenu">
+                            <button type="button" class="nav-submenu-toggle"
+                                    onclick="toggleSubmenu(event)" data-i18n="nav.security">Security</button>
+                            <div class="nav-submenu-list">
+                                <a href="/pages/security.html" data-i18n="nav.security_general">General</a>
+                                <a href="/pages/security_allowed.html" data-i18n="nav.security_allowed">Allowed computers</a>
+                            </div>
+                        </div>
                         <a href="/pages/settings_import.html" data-i18n="nav.settings_import">Import</a>
                         <a href="/pages/settings_export.html" data-i18n="nav.settings_export">Export</a>
                         <a href="/pages/settings_device.html" data-i18n="nav.settings_device">Device</a>

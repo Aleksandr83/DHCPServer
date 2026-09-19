@@ -124,7 +124,9 @@
             const checked = cb.checked;
             const result = await saveDnsPartial({ cache_internal: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 cb.checked = !checked;
             }
             updateInternalOptionsVisibility();
@@ -136,7 +138,9 @@
             const checked = ittl.checked;
             const result = await saveDnsPartial({ cache_internal_ignore_ttl: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 ittl.checked = !checked;
             }
         }
@@ -150,7 +154,9 @@
             const checked = sst.checked;
             const result = await saveDnsPartial({ cache_internal_save_stats: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 sst.checked = !checked;
             }
         }
@@ -165,7 +171,9 @@
             const checked = sca.checked;
             const result = await saveDnsPartial({ cache_internal_save_cache: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 sca.checked = !checked;
             }
         }

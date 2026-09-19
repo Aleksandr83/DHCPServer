@@ -118,9 +118,12 @@
             });
             const result = await postJSON('/api/dhcp/static-bindings', { bindings });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
             } else {
-                alert('Static bindings saved!');
+                await showDialog({ title: tr('dhcp_static.saved'),
+                                   hideCancel: true });
                 loadStaticBindings();
             }
         }

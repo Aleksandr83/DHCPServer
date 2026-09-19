@@ -92,7 +92,9 @@
             const checked = document.getElementById('dns-enabled').checked;
             const result = await saveDnsPartial({ enabled: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dns-enabled').checked = !checked;
             } else {
                 const fresh = await fetchJSON('/api/dns/settings');
@@ -104,7 +106,9 @@
             const checked = document.getElementById('dns-block-non-aa').checked;
             const result = await saveDnsPartial({ block_forward_non_aa: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dns-block-non-aa').checked = !checked;
             }
         }
@@ -116,7 +120,9 @@
             const checked = document.getElementById('dns-allow-own-subnet').checked;
             const result = await saveDnsPartial({ allow_own_subnet: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dns-allow-own-subnet').checked = !checked;
             }
         }
@@ -124,11 +130,14 @@
         async function saveDnsSettings() {
             const result = await saveDnsPartial(readDnsForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
             await loadDnsSettings();
-            alert('DNS settings saved!');
+            await showDialog({ title: tr('dns.saved'),
+                               hideCancel: true });
         }
 
         loadDnsSettings();

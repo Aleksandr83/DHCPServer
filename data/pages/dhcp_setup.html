@@ -58,15 +58,27 @@
             <br>
             <button class="btn btn-primary" onclick="saveDhcpSettings()" data-i18n="dhcp.save">Save</button>
         </div>
+
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="dhcp.allow_only">Assign addresses only to allowed computers</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dhcp-allow-only" onchange="toggleAllowOnly()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="dhcp.allow_only_hint">The list itself is managed on the Allowed computers page (DHCP menu).</p>
+        </div>
     </main>
 
     <div id="footer-placeholder"></div>
     <script src="../js/app.js"></script>
     <script>
         // DHCP General page — owns {enabled, server_ip, start_ip, end_ip,
-        // subnet, gateway, lease_time, max_lease_entries}. The logging / dns /
-        // static-bindings sub-pages own the rest; every save merges with the
-        // current server state via saveDhcpPartial().
+        // subnet, gateway, lease_time, max_lease_entries, allow_only}. The
+        // logging / dns / static-bindings sub-pages own the rest; every save
+        // merges with the current server state via saveDhcpPartial().
+        // The allowed-computers LIST is owned by the Allowed computers page.
         function readDhcpForm() {
             return {
                 enabled: document.getElementById('dhcp-enabled').checked,
@@ -76,6 +88,7 @@
                 subnet: document.getElementById('dhcp-subnet').value,
                 gateway: document.getElementById('dhcp-gateway').value,
                 lease_time: parseInt(document.getElementById('dhcp-lease').value) || 86400,
+                allow_only: document.getElementById('dhcp-allow-only').checked,
                 // 0 = auto (2x the pool size); the device clamps 8..512.
                 max_lease_entries: (() => {
                     const v = parseInt(document.getElementById('dhcp-max-leases').value, 10);
@@ -119,6 +132,7 @@
             document.getElementById('dhcp-lease').value = data.lease_time || '';
             document.getElementById('dhcp-max-leases').value =
                 (data.max_lease_entries === undefined ? 0 : data.max_lease_entries);
+            document.getElementById('dhcp-allow-only').checked = !!data.allow_only;
             updateLeaseLimitHint(data);
             updateServerStatus(data);
         }
@@ -141,7 +155,9 @@
             const checked = document.getElementById('dhcp-enabled').checked;
             const result = await saveDhcpPartial({ enabled: checked });
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 document.getElementById('dhcp-enabled').checked = !checked;
             } else {
                 const fresh = await fetchJSON('/api/dhcp/settings');
@@ -152,21 +168,46 @@
         async function saveDhcpSettings() {
             const result = await saveDhcpPartial(readDhcpForm());
             if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
                 return;
             }
             await loadDhcpSettings();
         }
 
+        // The policy switch is saved on its own (like Enable/Disable) so the
+        // operator sees it take effect immediately; the list it applies to is
+        // edited on the Allowed computers page.
+        async function toggleAllowOnly() {
+            const checked = document.getElementById('dhcp-allow-only').checked;
+            const result = await saveDhcpPartial({ allow_only: checked });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                document.getElementById('dhcp-allow-only').checked = !checked;
+            }
+        }
+
         async function saveServerIp() {
             const ip = document.getElementById('dhcp-server-ip').value.trim();
-            if (!ip) return alert('Enter a valid IP address');
-            const result = await saveDhcpPartial({ server_ip: ip });
-            if (result.status === 'error') {
-                alert('Error: ' + (result.message || 'Unknown error'));
+            if (!ip) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('dhcp.err_ip'),
+                                   hideCancel: true });
                 return;
             }
-            alert('Server IP saved! Device will use this IP after reboot.');
+            const result = await saveDhcpPartial({ server_ip: ip });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                return;
+            }
+            await showDialog({ title: tr('dhcp.saved_ip'),
+                               hint: tr('dhcp.saved_ip_hint'),
+                               hideCancel: true });
         }
 
         loadDhcpSettings();

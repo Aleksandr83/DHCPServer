@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dhcp">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Allowed Computers — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="dhcp_allowed.title">Allowed Computers</h1>
+
+        <div class="card">
+            <p class="hint" data-i18n="dhcp_allowed.desc">If "Assign addresses only to allowed computers" is switched on in DHCP → General, only the computers in this list receive an address.</p>
+            <p class="hint" data-i18n="dhcp_allowed.info_static">A computer with a Static Binding whose Enable checkbox is on is always allowed — listing it here is optional.</p>
+            <p class="hint" id="allowed-state"></p>
+        </div>
+
+        <div class="card">
+            <p data-i18n="dhcp.mac_example" style="color:var(--text-secondary);font-size:0.85rem;">e.g. 24:0A:C4:01:23:45</p>
+            <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th data-i18n="dhcp.binding_enabled">On</th>
+                        <th data-i18n="dhcp.mac">MAC Address</th>
+                        <th data-i18n="dhcp.name">Name</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="allowed-body"></tbody>
+            </table>
+            </div>
+            <p class="hint" id="allowed-count"></p>
+            <button class="btn btn-success" onclick="addAllowed()" data-i18n="dhcp.add">Add</button>
+            <button class="btn btn-primary" onclick="saveAllowed()" data-i18n="dhcp.save">Save</button>
+            <p class="hint" id="allowed-note"></p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Allowed computers page. It owns the LIST only; the "assign addresses
+        // only to allowed computers" switch belongs to DHCP -> General, so every
+        // save sends its current value back unchanged (the list must not flip a
+        // setting the operator changed on another page).
+        // max_entries comes from the device; the fallback is the limit of a
+        // firmware that does not report the field, i.e. the older, smaller one.
+        let allowedState = { allow_only: false, available: true, max_entries: 12, list: [] };
+
+        function allowedRow(mac, name, enabled) {
+            const tbody = document.getElementById('allowed-body');
+            const idx = tbody.children.length;
+            // A row without an address is not an entry yet: its Enable flag starts
+            // off and stays off while the MAC is empty, because an allow-list entry
+            // that allows nothing is a state nobody asked for. Rows that come from
+            // the device always have a MAC, so their flag is shown as stored.
+            const checked = (mac || '').trim() !== '' && enabled !== false;
+            const tr_ = document.createElement('tr');
+            tr_.innerHTML = `
+                <td>
+                    <div style="display:flex;align-items:center;justify-content:center;gap:0.35rem;">
+                        <input type="checkbox" class="allowed-enabled" data-idx="${idx}" style="width:auto;flex:none;padding:0;margin:0;" oninput="updateAllowedCount()" ${checked ? 'checked' : ''}>
+                    </div>
+                </td>
+                <td><input type="text" value="${mac || ''}" data-idx="${idx}" class="allowed-mac" placeholder="24:0A:C4:01:23:45" oninput="macEdited(this)"></td>
+                <td>
+                    <div style="display:flex;align-items:center;gap:0.35rem;">
+                        <input type="text" value="${name || ''}" data-idx="${idx}" class="allowed-name" style="flex:1;min-width:0;">
+                        <!-- "Detect the name by MAC": asks the device what it knows
+                             about this MAC — the name the client sent in its own
+                             DHCP request, then reverse DNS, then NetBIOS (see
+                             lookupAllowedName) — so "unknown" is a normal answer
+                             and it is said in words. -->
+                        <button type="button" class="files-icon-btn allowed-name-refresh"
+                                onclick="lookupAllowedName(this)" aria-label="" title="">
+                            <svg viewBox="0 0 16 16" aria-hidden="true" fill="none"
+                                 stroke="currentColor" stroke-width="1.6"
+                                 stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M13.1 8a5.1 5.1 0 1 1-1.5-3.6"></path>
+                                <path d="M13.3 2.7v3.1h-3.1"></path>
+                            </svg>
+                        </button>
+                        <!-- Clears the field. Like the lookup it only edits what is
+                             in the input: saving is the operator's click on Save, so
+                             a wrong press costs a page reload and nothing else. -->
+                        <button type="button" class="files-icon-btn allowed-name-clear"
+                                onclick="clearAllowedName(this)" aria-label="" title="">
+                            <svg viewBox="0 0 16 16" aria-hidden="true" fill="none"
+                                 stroke="currentColor" stroke-width="1.6"
+                                 stroke-linecap="round">
+                                <path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </td>
+                <td><button class="btn btn-danger" onclick="this.closest('tr').remove(); updateAllowedCount();" data-i18n="dhcp.remove">Remove</button></td>
+            `;
+            tbody.appendChild(tr_);
+        }
+
+        // The Enable flag follows the address: a row whose MAC was erased cannot
+        // allow anybody, so the checkbox goes off with it. It does not come back by
+        // itself — ticking it again is the operator's decision, not a guess.
+        function macEdited(input) {
+            const row = input.closest('tr');
+            const box = row?.querySelector('.allowed-enabled');
+            if (box && (input.value || '').trim() === '') box.checked = false;
+            updateAllowedCount();
+        }
+
+        // Both icon buttons carry their text in JS rather than in data-i18n:
+        // applyTranslations() only fills textContent/placeholder, so a tooltip and
+        // an aria-label have to be set here (and re-set on every language switch,
+        // like the state line above).
+        function applyRowTitles() {
+            const lookup = tr('dhcp_allowed.lookup_name');
+            const clear = tr('dhcp_allowed.clear_name');
+            document.querySelectorAll('.allowed-name-refresh').forEach(btn => {
+                btn.title = lookup;
+                btn.setAttribute('aria-label', lookup);
+            });
+            document.querySelectorAll('.allowed-name-clear').forEach(btn => {
+                btn.title = clear;
+                btn.setAttribute('aria-label', clear);
+            });
+        }
+
+        function renderAllowed(list) {
+            const tbody = document.getElementById('allowed-body');
+            tbody.innerHTML = '';
+            list.forEach(e => allowedRow(e.mac, e.name, e.enabled));
+            if (list.length === 0) allowedRow('', '', true);
+            applyRowTitles();
+            updateAllowedCount();
+        }
+
+        // Result of the last "detect the name" — kept next to the table instead
+        // of in a dialog, because a lookup that finds nothing is an answer too
+        // and the operator has to read it while looking at the row. The text is
+        // held as a dictionary KEY (plus the name it mentions) rather than as a
+        // finished string: a language switch has to translate it too, and a
+        // message that stays in the previous language is a small lie.
+        let lastNote = { key: '', name: '', tail: '', save: false };
+
+        function setAllowedNote(key, opts = {}) {
+            lastNote = { key: key || '', name: opts.name || '',
+                         tail: opts.tail || '', save: !!opts.save };
+            renderAllowedNote();
+        }
+
+        function renderAllowedNote() {
+            const el = document.getElementById('allowed-note');
+            if (!el) return;
+            if (!lastNote.key) { el.textContent = ''; return; }
+            let text = tr(lastNote.key);
+            if (lastNote.name) text += ' ' + lastNote.name;
+            if (lastNote.tail) text += ' ' + lastNote.tail;
+            if (lastNote.save) text += ' · ' + tr('dhcp_allowed.note_save');
+            el.textContent = text;
+        }
+
+        /* Ask the device what this MAC is called. The device answers from the
+           cheapest source it has: the name the client wrote into its own DHCP
+           request, then a reverse DNS (PTR) query to the router, then a NetBIOS
+           node-status query to the computer itself — which is why this takes up
+           to about a second and a half when the name is not already known, and
+           why the button is disabled while it runs. The field is filled, never
+           saved: the operator presses Save, which is also how a wrong
+           suggestion is dropped. */
+        async function lookupAllowedName(btn) {
+            const row = btn.closest('tr');
+            const mac = row.querySelector('.allowed-mac')?.value?.trim();
+            const input = row.querySelector('.allowed-name');
+            if (!mac) {
+                setAllowedNote('dhcp_allowed.note_no_mac');
+                return;
+            }
+
+            btn.disabled = true;
+            setAllowedNote('dhcp_allowed.note_looking');
+            try {
+                const r = await postJSON('/api/dhcp/lookup-name', { mac });
+                if (r.status === 'error') {
+                    setAllowedNote('dhcp_allowed.lookup_err',
+                                   { tail: ': ' + (r.message || '') });
+                    return;
+                }
+                if (!r.name) {
+                    // Two different nothings: no address to ask about, or an
+                    // address nobody answered for.
+                    setAllowedNote(r.ip ? 'dhcp_allowed.note_none'
+                                        : 'dhcp_allowed.note_none_no_ip');
+                    return;
+                }
+                const foundBy = r.source === 'ptr' ? 'dhcp_allowed.note_found_ptr'
+                              : r.source === 'netbios' ? 'dhcp_allowed.note_found_netbios'
+                              : 'dhcp_allowed.note_found';
+                const current = (input.value || '').trim();
+                // The same name written in different letters is still the same
+                // name — NetBIOS answers in upper case, where the list may hold
+                // lower case — so the replace dialog is not shown: a question
+                // with one sensible answer is not worth asking. The field keeps
+                // the spelling it already has, and there is nothing to save.
+                const same = current.toLowerCase() === r.name.toLowerCase();
+                if (current && !same) {
+                    const replace = await showDialog({
+                        title: tr('dhcp_allowed.lookup_replace_title'),
+                        hint: tr('dhcp_allowed.lookup_replace_hint') + '\n\n' +
+                              current + ' → ' + r.name,
+                        okLabel: tr('dhcp_allowed.lookup_replace_ok'),
+                        cancelLabel: tr('common.cancel'),
+                    });
+                    if (!replace) {
+                        setAllowedNote(foundBy, { name: r.name });
+                        return;
+                    }
+                }
+                if (!same) input.value = r.name;
+                setAllowedNote(foundBy, { name: r.name, save: !same });
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // How many of the rows would actually allow a client right now: the
+        // switch decides whether the list is used at all, the per-row Enable
+        // checkbox decides which entries are in it. A row without a MAC is not an
+        // entry, so it is not counted and not saved — the page's own empty starter
+        // row is the same kind of thing, and it disappears from the count too.
+        function currentRows() {
+            const rows = [];
+            document.querySelectorAll('#allowed-body tr').forEach(row => {
+                const mac = row.querySelector('.allowed-mac')?.value?.trim();
+                const name = row.querySelector('.allowed-name')?.value?.trim();
+                if (!mac) return;
+                rows.push({ mac, name, enabled: row.querySelector('.allowed-enabled')?.checked !== false });
+            });
+            return rows;
+        }
+
+        // Rows that hold something but have no address. They cannot be entries —
+        // the device answers "invalid MAC" for the whole list — so the page says
+        // what to fix instead of sending them: an entry the operator typed must
+        // never vanish without a word.
+        function rowsWithoutMac() {
+            let n = 0;
+            document.querySelectorAll('#allowed-body tr').forEach(row => {
+                const mac = row.querySelector('.allowed-mac')?.value?.trim();
+                const name = row.querySelector('.allowed-name')?.value?.trim();
+                if (!mac && name) n++;
+            });
+            return n;
+        }
+
+        // Counted from the rows themselves, so every edit that can change the
+        // number calls this: the MAC field, the Enable checkbox, the row buttons
+        // and the reload path. The checkbox was the one edit that did not, which
+        // made "enabled: N" lag behind the boxes until something else happened.
+        function updateAllowedCount() {
+            const el = document.getElementById('allowed-count');
+            if (!el) return;
+            const rows = currentRows();
+            const on = rows.filter(r => r.enabled).length;
+            let text = tr('dhcp_allowed.count') + ' ' + rows.length + ' / ' +
+                       (allowedState.max_entries || 12);
+            if (on !== rows.length) text += ' · ' + tr('dhcp_allowed.count_active') + ' ' + on;
+            el.textContent = text;
+        }
+
+        // The state line is plain text: the operator asked for one colour in
+        // the information block (no red warnings, no green "everything is
+        // fine") — the wording itself says which state the list is in.
+        function updateAllowedState(data) {
+            const el = document.getElementById('allowed-state');
+            if (el) {
+                const n = (data.list || []).filter(e => e.enabled !== false).length;
+                if (!data.available) {
+                    el.textContent = tr('dhcp_allowed.unavailable');
+                } else if (!data.allow_only) {
+                    el.textContent = tr('dhcp_allowed.state_off');
+                } else if (n === 0) {
+                    el.textContent = tr('dhcp_allowed.state_empty');
+                } else {
+                    el.textContent = tr('dhcp_allowed.state_on');
+                }
+                el.className = 'hint';
+            }
+            updateAllowedCount();
+        }
+
+        async function loadAllowed() {
+            const data = await fetchJSON('/api/dhcp/allowed');
+            allowedState = data;
+            renderAllowed(data.list || []);
+            updateAllowedState(data);
+        }
+
+        async function addAllowed() {
+            const tbody = document.getElementById('allowed-body');
+            // Keep the empty starter row from being filled twice: a new row
+            // appears only after the last one has something in it.
+            const rows = Array.from(tbody.children);
+            const last = rows[rows.length - 1];
+            if (last) {
+                const mac = last.querySelector('.allowed-mac')?.value?.trim();
+                const name = last.querySelector('.allowed-name')?.value?.trim();
+                if (!mac && !name) return;
+            }
+            if (rows.length >= (allowedState.max_entries || 12)) {
+                // A message, not a question: the page asks with its own dialog
+                // (js/app.js `showDialog`), because the browser's alert cannot
+                // be translated, styled or captured in a screenshot. `hideCancel`
+                // leaves the one answer this message has.
+                await showDialog({ title: tr('dhcp_allowed.full'),
+                                   hideCancel: true });
+                return;
+            }
+            allowedRow('', '', true);
+            applyRowTitles();
+            updateAllowedCount();
+        }
+
+        // Empty the Name field of this row. It changes the field only — saving is
+        // the operator's click on Save, so a wrong press costs a reload.
+        function clearAllowedName(btn) {
+            const row = btn.closest('tr');
+            const input = row.querySelector('.allowed-name');
+            if (!input) return;
+            if (input.value !== '') {
+                input.value = '';
+                setAllowedNote('dhcp_allowed.note_cleared');
+            }
+            input.focus();
+        }
+
+        async function saveAllowed() {
+            const list = currentRows();
+            // A row with a name but no address is not an entry, and sending it
+            // would make the device refuse the whole list ("invalid MAC"): stop
+            // here and say which row to fix, so nothing typed disappears quietly.
+            const withoutMac = rowsWithoutMac();
+            if (withoutMac > 0) {
+                // The dialog says what to fix; the note keeps saying it after the
+                // dialog has been closed, so the reason stays on screen.
+                await showDialog({ title: tr('common.warning'),
+                                   hint: tr('dhcp_allowed.save_needs_mac'),
+                                   hideCancel: true });
+                setAllowedNote('dhcp_allowed.save_needs_mac');
+                return;
+            }
+            const result = await postJSON('/api/dhcp/allowed', {
+                allow_only: !!allowedState.allow_only,
+                list,
+            });
+            if (result.status === 'error') {
+                // The device's own words become the hint: "could not save the
+                // list" alone would hide the reason the device gave.
+                await showDialog({ title: tr('dhcp_allowed.err_save'),
+                                   hint: result.message || '',
+                                   hideCancel: true });
+                return;
+            }
+            await showDialog({ title: tr('dhcp_allowed.saved'), hideCancel: true });
+            setAllowedNote('');
+            await loadAllowed();
+        }
+
+        loadAllowed();
+
+        // The state line is built with tr(), which returns the key until the
+        // dictionary is loaded, so it is re-rendered on every language switch.
+        document.addEventListener('i18n-applied', () => {
+            updateAllowedState(allowedState);
+            applyRowTitles();
+            renderAllowedNote();
+        });
+    </script>
+</body>
+</html>

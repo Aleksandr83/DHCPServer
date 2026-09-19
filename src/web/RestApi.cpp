@@ -10,6 +10,7 @@
 #include "../wifi/IWiFiManager.h"
 #include "../dhcp/IDhcpServer.h"
 #include "../dhcp/DhcpServer.h"
+#include "../dhcp/DhcpAllowedList.h"
 #include "../dns/DnsServer.h"
 #include "../files/IFileManager.h"
 #include "../storage/PathUtil.h"
@@ -286,9 +287,32 @@ static std::vector<std::string> jsonGetStrArray(const std::string& json,
     return out;
 }
 
-// ─────────────────────────────────────────────────────
-// GET /api/status
-// ─────────────────────────────────────────────────────
+/**
+ * @brief Index of the ']' that closes the array opened at `open`.
+ *
+ * Used where an imported array has to be scanned without running past its end:
+ * the settings file also carries other objects with "mac"/"name" keys
+ * (static_bindings, local_hosts), so a scan that just looks for them would read
+ * somebody else's entries. Quoted text is skipped so a name containing ']'
+ * cannot unbalance the count.
+ */
+static size_t jsonFindArrayEnd(const std::string& json, size_t open)
+{
+    int depth = 0;
+    bool inStr = false;
+    for (size_t i = open; i < json.size(); i++) {
+        const char c = json[i];
+        if (inStr) {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') { inStr = true; continue; }
+        if (c == '[') depth++;
+        else if (c == ']' && --depth == 0) return i;
+    }
+    return json.size();
+}
 
 esp_err_t RestApi::handleGetStatus(httpd_req* req)
 {
@@ -481,6 +505,13 @@ esp_err_t RestApi::handleGetDhcpSettings(httpd_req* req)
     addJsonInt(json, "lease_limit_rejects",
                s_dhcp ? static_cast<int64_t>(s_dhcp->leaseLimitRejects()) : 0,
                true);
+    // Allowed computers: the policy switch plus the state of the MAC table, so
+    // the General page can explain what the switch does right now.
+    addJsonBool(json, "allow_only", cfg.allowOnly, true);
+    addJsonBool(json, "allowed_list_available",
+                s_dhcp ? s_dhcp->allowedListAvailable() : false, true);
+    addJsonInt(json, "allowed_list_count",
+               s_dhcp ? static_cast<int64_t>(s_dhcp->allowedListCount()) : 0, true);
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -532,6 +563,9 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     cfg.dnsMode = jsonGetStr(body, "dns_mode");
     if (cfg.dnsMode != "manual") cfg.dnsMode = "auto";
     cfg.dnsAddress = jsonGetStr(body, "dns_address");
+    // "Assign addresses only to allowed computers" — the list itself is owned
+    // by the Allowed computers page (POST /api/dhcp/allowed).
+    cfg.allowOnly = jsonGetBool(body, "allow_only", false);
 
     // body_read < content_len means the POST body was truncated; the last
     // fields (log_auth_user/password) would be lost.
@@ -550,6 +584,8 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
                                cfg.logAuthPassword);
         // Re-apply the lease/offer table cap (config was just stored).
         s_dhcp->applyLeaseLimit();
+        // Re-apply the allow-only policy (the switch just changed).
+        s_dhcp->reloadAllowedComputers();
 
         if (cfg.enabled && !s_dhcp->isRunning()) {
             // Check WiFi before starting
@@ -662,6 +698,191 @@ esp_err_t RestApi::handlePostStaticBindings(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// GET /api/dhcp/allowed — allowed computers (allow-list)
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetAllowedComputers(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    auto cfg = ::dhcp::core::Config::instance().getDhcp();
+    const std::string text = ::dhcp::core::Config::instance().getAllowedComputers();
+    auto list = ::dhcp::dhcp::DhcpAllowedList::parse(text);
+
+    std::string json = "{";
+    addJsonBool(json, "allow_only", cfg.allowOnly, false);
+    addJsonBool(json, "available",
+                s_dhcp ? s_dhcp->allowedListAvailable() : false, true);
+    addJsonInt(json, "count", static_cast<int64_t>(list.size()), true);
+    addJsonInt(json, "max_entries",
+               static_cast<int64_t>(::dhcp::dhcp::DhcpAllowedList::kMaxEntries), true);
+    addJsonInt(json, "used_bytes", static_cast<int64_t>(text.size()), true);
+    addJsonInt(json, "max_bytes",
+               static_cast<int64_t>(::dhcp::core::Config::kMaxAllowedBytes), true);
+    json += ",\"list\":[";
+    for (size_t i = 0; i < list.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{\"mac\":\"" + list[i].mac + "\",";
+        json += "\"name\":\"" + list[i].name + "\",";
+        json += std::string("\"enabled\":") +
+                (list[i].enabled ? "true" : "false") + "}";
+    }
+    json += "]}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dhcp/allowed — save the allowed computers list
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string body = readBody(req, 8192);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    // The list is stored (and reported) in one codec, so validate by building
+    // the very text that will be written to NVS: an entry the codec would drop
+    // is an entry the operator asked for and would not get — say so instead of
+    // saving a list that quietly differs from what the page shows.
+    std::vector<::dhcp::dhcp::AllowedComputer> list;
+    const size_t kParseCap = 64;   // readBody() is already bounded; this keeps
+                                   // the vector bounded with it
+    size_t pos = 0;
+    while ((pos = body.find("\"mac\"", pos)) != std::string::npos &&
+           list.size() < kParseCap) {
+        ::dhcp::dhcp::AllowedComputer entry;
+        std::string seg = body.substr(pos);
+        entry.mac = jsonGetStr(seg, "mac");
+        entry.name = jsonGetStr(seg, "name");
+        // The Enable checkbox of the row; absent means enabled.
+        entry.enabled = jsonGetBool(seg, "enabled", true);
+        pos++;
+        if (entry.mac.empty() && entry.name.empty()) continue;
+        if (::dhcp::dhcp::DhcpAllowedList::normalizeMac(entry.mac).empty()) {
+            std::string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
+                              entry.mac + "\"}";
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, msg.c_str());
+            return ESP_OK;
+        }
+        list.push_back(entry);
+    }
+
+    if (list.size() > ::dhcp::dhcp::DhcpAllowedList::kMaxEntries) {
+        // The number in the message is read from the constant, so it cannot
+        // drift away from the limit the code actually enforces.
+        char msg[96];
+        std::snprintf(msg, sizeof(msg),
+                      "{\"status\":\"error\",\"message\":\"too many "
+                      "entries (max %u)\"}",
+                      static_cast<unsigned>(::dhcp::dhcp::DhcpAllowedList::kMaxEntries));
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, msg);
+        return ESP_OK;
+    }
+
+    const std::string text = ::dhcp::dhcp::DhcpAllowedList::serialize(list);
+    if (text.size() > ::dhcp::core::Config::kMaxAllowedBytes) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg),
+                      "{\"status\":\"error\",\"message\":\"list too "
+                      "large for NVS (max %u bytes)\"}",
+                      static_cast<unsigned>(::dhcp::core::Config::kMaxAllowedBytes));
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, msg);
+        return ESP_OK;
+    }
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    if (!cfgMgr.setAllowedComputers(text)) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"could not "
+                                "store the list\"}");
+        return ESP_OK;
+    }
+
+    // The switch belongs to the DHCP settings object; keep it as it is unless
+    // the page sent a value (the list page shows and preserves it).
+    auto dhcpCfg = cfgMgr.getDhcp();
+    const bool allowOnly = jsonGetBool(body, "allow_only", dhcpCfg.allowOnly);
+    if (allowOnly != dhcpCfg.allowOnly) {
+        dhcpCfg.allowOnly = allowOnly;
+        cfgMgr.setDhcp(dhcpCfg);
+    }
+
+    if (s_dhcp) s_dhcp->reloadAllowedComputers();
+    ESP_LOGI(TAG, "Allowed computers updated (%zu entries, %zu bytes, allow-only=%d)",
+             list.size(), text.size(), allowOnly ? 1 : 0);
+
+    std::string json = "{\"status\":\"ok\",\"count\":" +
+                       std::to_string(list.size()) + ",\"allow_only\":" +
+                       (allowOnly ? "true" : "false") + "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dhcp/lookup-name — what is this MAC called?
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostLookupClientName(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    std::string body = readBody(req, 512);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    const std::string macText = jsonGetStr(body, "mac");
+    uint8_t mac[6];
+    if (!::dhcp::dhcp::DhcpAllowedList::parseMac(macText, mac)) {
+        std::string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
+                          macText + "\"}";
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, msg.c_str());
+        return ESP_OK;
+    }
+
+    // Sources, cheapest first: the name the client wrote into its own DHCP
+    // request, then a reverse DNS (PTR) query to the router (see
+    // DhcpServer::lookupClientName). "none" is a real answer, not an error, and
+    // `ip` says which address the probe used ("" when none was known).
+    ::dhcp::dhcp::IDhcpServer::ClientNameResult found;
+    if (s_dhcp) found = s_dhcp->lookupClientName(mac);
+
+    char foundIp[16] = "";
+    if (found.ipNet != 0) inet_ntop(AF_INET, &found.ipNet, foundIp, sizeof(foundIp));
+
+    std::string json = "{";
+    addJsonString(json, "status", "ok", false);
+    addJsonString(json, "mac",
+                  ::dhcp::dhcp::DhcpAllowedList::formatMac(mac), true);
+    addJsonString(json, "ip", foundIp, true);
+    addJsonString(json, "name", found.name, true);
+    addJsonString(json, "source", found.source.empty() ? "none" : found.source, true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "Client name lookup for %s: %s (%s)",
+             ::dhcp::dhcp::DhcpAllowedList::formatMac(mac).c_str(),
+             found.name.empty() ? "-" : found.name.c_str(),
+             found.source.empty() ? "none" : found.source.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/dhcp/leases
 // ─────────────────────────────────────────────────────
 
@@ -684,9 +905,15 @@ esp_err_t RestApi::handleGetLeases(httpd_req* req)
                           leases[i].mac[4], leases[i].mac[5]);
             char ipStr[16];
             inet_ntop(AF_INET, &leases[i].ip, ipStr, sizeof(ipStr));
-            json += "{\"mac\":\"" + std::string(macStr) + "\",";
-            json += "\"ip\":\"" + std::string(ipStr) + "\",";
-            json += "\"expiry\":" + std::to_string(leases[i].expiry) + "}";
+            // hostname is what the client reported about itself in its request
+            // (option 12/81); it is untrusted text, so it goes through the same
+            // escaping as every other string here.
+            json += "{";
+            addJsonString(json, "mac", macStr, false);
+            addJsonString(json, "ip", ipStr, true);
+            addJsonString(json, "hostname", leases[i].hostname, true);
+            addJsonInt(json, "expiry", static_cast<int64_t>(leases[i].expiry), true);
+            json += "}";
         }
     }
     json += "]}";
@@ -1008,6 +1235,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     auto sec  = cfgMgr.getSecurity();
     auto bindings = cfgMgr.getStaticBindings();
     auto hosts    = cfgMgr.getLocalHosts();
+    auto allowed  = ::dhcp::dhcp::DhcpAllowedList::parse(cfgMgr.getAllowedComputers());
 
     std::string json = "{";
     addJsonString(json, "format", "dhcpserver-settings", false);
@@ -1033,6 +1261,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "log_auth_user", dhcp.logAuthUser, true);
     addJsonString(json, "dns_mode", dhcp.dnsMode, true);
     addJsonString(json, "dns_address", dhcp.dnsAddress, true);
+    addJsonBool(json, "allow_only", dhcp.allowOnly, true);
     json += "}";
 
     // ── static_bindings section ──
@@ -1049,6 +1278,17 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
                 (bindings[i].enabled ? "true" : "false") + ",";
         json += std::string("\"use_dns\":") +
                 (bindings[i].useDns ? "true" : "false") + "}";
+    }
+    json += "]";
+
+    // ── allowed_computers section (DHCP allow-list) ──
+    json += ",\"allowed_computers\":[";
+    for (size_t i = 0; i < allowed.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{\"mac\":\"" + allowed[i].mac + "\",";
+        json += "\"name\":\"" + allowed[i].name + "\",";
+        json += std::string("\"enabled\":") +
+                (allowed[i].enabled ? "true" : "false") + "}";
     }
     json += "]";
 
@@ -1177,7 +1417,8 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // We only know these section keys; anything else is reported as skipped.
     std::string skipped;
     const char* known[] = { "format", "schema", "firmware_version",
-                            "dhcp", "static_bindings", "dns", "time",
+                            "dhcp", "static_bindings", "allowed_computers",
+                            "dns", "time",
                             "local_hosts", "security", "files" };
     size_t pos = 0;
     while ((pos = body.find('"', pos)) != std::string::npos) {
@@ -1199,6 +1440,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 key != "start_ip" && key != "end_ip" && key != "subnet" &&
                 key != "gateway" && key != "lease_time" &&
                 key != "max_lease_entries" &&
+                key != "allow_only" &&
                 key != "log_terminal" && key != "log_rest" &&
                 key != "log_url" && key != "log_auth" &&
                 key != "log_auth_user" && key != "dns_mode" &&
@@ -1234,6 +1476,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // ─── 4. Import sections (recognized fields only; passwords never) ───
     bool importedDhcp = false, importedBind = false, importedDns = false;
     bool importedHosts = false, importedSec = false, importedTime = false;
+    bool importedAllowed = false;
 
     auto& cfgMgr = ::dhcp::core::Config::instance();
     const auto oldDhcp = cfgMgr.getDhcp();  // to detect network-level changes
@@ -1256,6 +1499,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 v = jsonGetStr(seg, "dns_address"); cur.dnsAddress = v;
                 std::string m = jsonGetStr(seg, "dns_mode"); if (m == "manual" || m == "auto") cur.dnsMode = m;
+                cur.allowOnly = jsonGetBool(seg, "allow_only", cur.allowOnly);
                 cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
@@ -1301,6 +1545,47 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cfgMgr.setStaticBindings(out);
                 if (s_dhcp) s_dhcp->reloadStaticBindings();
                 importedBind = true;
+            }
+        }
+    }
+
+    // Allowed computers (array; the "only allowed" switch rides in the dhcp
+    // section above). Only the array's own entries are read: brackets bound the
+    // scan, so the static_bindings / local_hosts entries in the same file are
+    // not picked up by their identical "mac"/"name" keys.
+    {
+        size_t s = body.find("\"allowed_computers\"");
+        if (s != std::string::npos) {
+            size_t open = body.find('[', s);
+            if (open != std::string::npos) {
+                const size_t end = jsonFindArrayEnd(body, open);
+                std::vector<::dhcp::dhcp::AllowedComputer> out;
+                size_t p = open;
+                while (p < end) {
+                    p = body.find("\"mac\"", p);
+                    if (p == std::string::npos || p >= end) break;
+                    std::string seg = body.substr(p, end - p);
+                    ::dhcp::dhcp::AllowedComputer e;
+                    e.mac = jsonGetStr(seg, "mac");
+                    e.name = jsonGetStr(seg, "name");
+                    e.enabled = jsonGetBool(seg, "enabled", true);
+                    p++;
+                    if (::dhcp::dhcp::DhcpAllowedList::normalizeMac(e.mac).empty()) {
+                        ESP_LOGW(TAG, "Import: skipping invalid allowed MAC '%s'",
+                                 e.mac.c_str());
+                        continue;
+                    }
+                    out.push_back(e);
+                }
+                const std::string text =
+                    ::dhcp::dhcp::DhcpAllowedList::serialize(out);
+                if (text.size() > ::dhcp::core::Config::kMaxAllowedBytes) {
+                    ESP_LOGW(TAG, "Import: allowed computers too large (%zu > %zu)",
+                             text.size(), ::dhcp::core::Config::kMaxAllowedBytes);
+                } else {
+                    cfgMgr.setAllowedComputers(text);
+                    importedAllowed = true;
+                }
             }
         }
     }
@@ -1486,6 +1771,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
             s_dhcp->setRestLogging(c.logRest, c.logUrl,
                                    c.logAuthEnabled, c.logAuthUser, c.logAuthPassword);
             s_dhcp->reloadStaticBindings();
+            s_dhcp->reloadAllowedComputers();
         } else if (s_dhcp->isRunning()) {
             s_dhcp->stop();
         }
@@ -1534,6 +1820,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     json += ",\"imported\":{";
     addJsonBool(json, "dhcp", importedDhcp, false);
     addJsonBool(json, "static_bindings", importedBind, true);
+    addJsonBool(json, "allowed_computers", importedAllowed, true);
     addJsonBool(json, "dns", importedDns, true);
     addJsonBool(json, "time", importedTime, true);
     addJsonBool(json, "local_hosts", importedHosts, true);
@@ -1544,11 +1831,12 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
-    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d",
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d",
              curVer.toString().c_str(), fileVerStr.c_str(),
              versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
              importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
-             importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0);
+             importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0,
+             importedAllowed ? 1 : 0);
     return ESP_OK;
 }
 

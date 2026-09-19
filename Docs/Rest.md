@@ -147,6 +147,78 @@ Get current DHCP server configuration.
 > (2× the configured pool size, clamped to 8..512) or an explicit 8..512.
 > `max_lease_entries_effective` (read-only) is the cap currently enforced and
 > `lease_limit_rejects` counts the requests refused because the table was full.
+> `allow_only` — "assign addresses only to allowed computers" (see
+> `GET /api/dhcp/allowed`); `allowed_list_available` / `allowed_list_count`
+> (read-only) report whether the PSRAM MAC table is usable and how many MACs are
+> in it.
+
+---
+
+## GET /api/dhcp/allowed
+
+Get the allowed-computers list (the DHCP allow-list) and the state of the table
+the DHCP server built from it.
+
+**Response `200 OK`:**
+```json
+{
+  "allow_only": true,
+  "available": true,
+  "count": 2,
+  "max_entries": 25,
+  "used_bytes": 63,
+  "max_bytes": 1024,
+  "list": [
+    { "mac": "24:0a:c4:01:23:45", "name": "office-pc", "enabled": true },
+    { "mac": "00:11:22:33:44:55", "name": "printer",   "enabled": false }
+  ]
+}
+```
+
+> `allow_only` is the switch from `GET /api/dhcp/settings`; while it is `false`
+> the list is ignored completely and addresses are handed out as before.
+> `enabled` is the per-entry Enable checkbox: a switched-off entry stays in the
+> list but does not allow anything. `available` is `false` when the PSRAM MAC
+> table could not be built — the policy then fails open (every client is served)
+> rather than cutting the LAN off. MAC addresses are reported normalized to
+> lower-case dotted-hex (`24:0a:c4:01:23:45`). `max_entries` and `max_bytes` are
+> the limits the device enforces (25 entries and 1024 bytes of stored text); the
+> page reads them from here instead of keeping its own copy of the numbers.
+
+---
+
+## POST /api/dhcp/allowed
+
+Replace the allowed-computers list (the whole list is written, like the static
+bindings).
+
+**Request body:**
+```json
+{
+  "allow_only": true,
+  "list": [
+    { "mac": "24:0A:C4:01:23:45", "name": "office-pc", "enabled": true }
+  ]
+}
+```
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "count": 1, "allow_only": true }
+```
+
+> `allow_only` is optional: without it the current switch value is kept (the
+> list page sends it back unchanged, so a list save never flips a setting that
+> belongs to the DHCP General page).
+>
+> **Errors:** an unparsable MAC is refused with `{"status":"error","message":
+> "invalid MAC: <text>"}` and nothing is stored; more than 25 entries
+> (`"too many entries (max 25)"`) or more than 1024 bytes of serialized list
+> (`"list too large for NVS (max 1024 bytes)"`) are refused the same way — both
+> messages carry the number the device actually enforces, taken from the same
+> constant the check uses. The stored text is `mac|name|enabled` per line —
+> entries written by a firmware without the Enable column (two fields) load as
+> enabled.
 
 ---
 
@@ -244,6 +316,7 @@ Get active DHCP leases.
     {
       "mac": "24:0a:c4:01:23:45",
       "ip": "192.168.1.100",
+      "hostname": "office-pc",
       "expiry": 12345678
     }
   ]
@@ -251,6 +324,54 @@ Get active DHCP leases.
 ```
 
 > `expiry` is the absolute timestamp (seconds since boot) when the lease expires.
+> `hostname` is the name **the client reported about itself** in its DHCP request
+> (option 12, or the option 81 FQDN as a fallback) and is empty when it sent
+> none. It is untrusted input, so it is filtered before it is stored: printable
+> ASCII and valid UTF-8 only, no control characters, no `|`, at most 32 bytes.
+
+---
+
+## POST /api/dhcp/lookup-name
+
+What is this MAC called? Used by the refresh button next to the Name field of the
+allowed-computers list.
+
+**Request body:**
+```json
+{ "mac": "24:0A:C4:01:23:45" }
+```
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "mac": "24:0a:c4:01:23:45",
+  "ip": "192.168.1.100",
+  "name": "office-pc",
+  "source": "lease"
+}
+```
+
+> `source` says where the name came from: `lease` — the name the client wrote
+> into its own DHCP request (seen since the device started); `ptr` — found by a
+> reverse DNS query (`<addr>.in-addr.arpa`, QTYPE=PTR, UDP 53) to the router, when
+> the client reported no name itself; `netbios` — found by a NetBIOS node-status
+> query (NBSTAT, UDP 137) to the computer itself, which is how a Windows or Samba
+> machine that announces no host name at all is asked; `none` — nothing is known,
+> either because the computer has no address from this device (nothing to ask
+> about) or because nobody answered for the address it has. An empty `name` with
+> `source: none` is a valid answer, not an error: the page says "unknown" in words
+> instead of showing an empty field.
+>
+> `ip` is the address the lookup used — the lease/offer entry, or the ARP cache
+> for a computer that took its address elsewhere — and is empty when there is
+> none. The probes run in order (lease → PTR → NBSTAT), each waits at most 400 ms
+> and accepts an answer only from the host it asked, so this call can take up to
+> about a second and a half. A NetBIOS name arrives in upper case by protocol and
+> is reported exactly as the computer sent it.
+>
+> **Errors:** an unparsable MAC gives
+> `{"status":"error","message":"invalid MAC: <text>"}`.
 
 ---
 
@@ -884,11 +1005,14 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "subnet": "255.255.255.0", "gateway": "192.168.1.1",
     "lease_time": 86400, "log_terminal": false, "log_rest": false,
     "log_url": "", "log_auth": false, "log_auth_user": "",
-    "dns_mode": "auto", "dns_address": ""
+    "dns_mode": "auto", "dns_address": "", "allow_only": false
   },
   "static_bindings": [
     { "mac": "24:0A:C4:01:23:45", "ip": "192.168.1.50", "name": "",
       "gateway": "", "use_gateway": true, "enabled": true, "use_dns": true }
+  ],
+  "allowed_computers": [
+    { "mac": "24:0a:c4:01:23:45", "name": "office-pc", "enabled": true }
   ],
   "dns": {
     "enabled": true, "external_dns": "192.168.1.1",
@@ -928,6 +1052,10 @@ Import logic:
    stopped to match the imported `enabled` flags. A change of the network
    parameters (`server_ip` / `subnet` / `gateway`) is **not** applied on the fly —
    the response flags `reboot_required`, so a reboot picks up the new static IP.
+   The allowed-computers list is written from `allowed_computers` and the PSRAM
+   MAC table is rebuilt immediately (the entries are read only between the
+   brackets of that array, so the `static_bindings` / `local_hosts` entries in
+   the same file cannot be picked up by their identical `mac`/`name` keys).
 
 **Response `200 OK`:**
 ```json
@@ -939,8 +1067,8 @@ Import logic:
   "file_newer": false,
   "reboot_required": false,
   "imported": {
-    "dhcp": true, "static_bindings": true, "dns": true,
-    "local_hosts": true, "security": true
+    "dhcp": true, "static_bindings": true, "allowed_computers": true,
+    "dns": true, "local_hosts": true, "security": true
   },
   "skipped_fields": ["some_future_field"]
 }

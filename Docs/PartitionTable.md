@@ -74,6 +74,7 @@ SPIFFS partition for web content.
   - WiFi SSID/password
   - DHCP server settings (IP range, lease time)
   - Static MAC→IP bindings (max 512 bytes)
+  - Allowed computers — the DHCP allow-list (max 1024 bytes, 25 entries)
   - DNS server settings
   - Security/authentication config
   - DNS cache data (max 512 bytes)

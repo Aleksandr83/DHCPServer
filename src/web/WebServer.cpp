@@ -1,5 +1,6 @@
 #include "WebServer.h"
 #include "RestApi.h"
+#include "../core/ErrorLog.h"
 
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,16 @@
 #include "esp_http_server.h"
 
 static const char* TAG = "WebServer";
+
+namespace {
+
+/** @brief The name of a route's method, for the log. */
+const char* methodName(::dhcp::web::RouteMethod method)
+{
+    return (method == ::dhcp::web::RouteMethod::Post) ? "POST" : "GET";
+}
+
+} // namespace
 
 namespace dhcp {
 namespace web {
@@ -46,7 +57,12 @@ bool WebServer::start()
     // Configure HTTP server
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 81;
+    // Handler slots for the routes this build actually has, taken from the table
+    // itself — never a number written by hand (stage 137: the hand-written 81
+    // next to 82 routes is how the Version page lost its route).
+    size_t routeCount = 0;
+    routes(routeCount);
+    config.max_uri_handlers = static_cast<int>(RouteTable::slotsFor(routeCount));
     // The settings export/import handlers build large JSON and read big POST
     // bodies on the httpd task — the default 4096-byte stack overflows (panic:
     // LoadProhibited in the FreeRTOS scheduler, stack filled with 0xa5). Raise
@@ -102,121 +118,168 @@ bool WebServer::isRunning() const
 // Route registration
 // ─────────────────────────────────────────────────────
 
-void WebServer::registerRoutes()
-{
-    // Helper lambda to register a route
-    auto reg = [this](const char* uri, httpd_method_t method,
-                      esp_err_t (*handler)(httpd_req*)) {
-        httpd_uri_t uriDesc;
-        memset(&uriDesc, 0, sizeof(uriDesc));
-        uriDesc.uri     = uri;
-        uriDesc.method  = method;
-        uriDesc.handler = handler;
-        uriDesc.user_ctx = nullptr;
-        esp_err_t err = httpd_register_uri_handler(server_, &uriDesc);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register %s %s: %s",
-                     (method == HTTP_GET ? "GET" : "POST"),
-                     uri, esp_err_to_name(err));
-        } else {
-            ESP_LOGI(TAG, "Registered %s %s",
-                     (method == HTTP_GET ? "GET" : "POST"), uri);
-        }
-    };
-
+// The routes this server serves: one row per reachable path, and the httpd's
+// handler limit is taken from this array's own size (routes() below). The limit
+// used to be written by hand, and a hand-written limit drifts: 82 routes next to
+// 81 slots cost the route registered last — /pages/version.html — its slot, and
+// that page answered 404 while every other page worked (see RouteTable.h).
+const WebRoute WebServer::kRoutes[] = {
     // REST API routes
-    reg("/api/status",               HTTP_GET,   getStatusHandler);
-    reg("/api/version",              HTTP_GET,   getVersionHandler);
-    reg("/api/dhcp/settings",        HTTP_GET,   getDhcpSettingsHandler);
-    reg("/api/dhcp/settings",        HTTP_POST,  postDhcpSettingsHandler);
-    reg("/api/dhcp/static-bindings", HTTP_GET,   getStaticBindingsHandler);
-    reg("/api/dhcp/static-bindings", HTTP_POST,  postStaticBindingsHandler);
-    reg("/api/dhcp/leases",          HTTP_GET,   getLeasesHandler);
-    reg("/api/dns/settings",         HTTP_GET,   getDnsSettingsHandler);
-    reg("/api/dns/settings",         HTTP_POST,  postDnsSettingsHandler);
-    reg("/api/dns/local-hosts",      HTTP_GET,   getLocalHostsHandler);
-    reg("/api/dns/local-hosts",      HTTP_POST,  postLocalHostsHandler);
-    reg("/api/security/settings",    HTTP_GET,   getSecuritySettingsHandler);
-    reg("/api/security/settings",    HTTP_POST,  postSecuritySettingsHandler);
-    reg("/api/ota/upload",           HTTP_POST,  postOtaUploadHandler);
-    reg("/api/web/file",             HTTP_POST,  postWebFileHandler);
-    reg("/api/test-connection",      HTTP_POST,  postTestConnectionHandler);
-    reg("/api/settings/export",      HTTP_GET,   getSettingsExportHandler);
-    reg("/api/settings/import",      HTTP_POST,  postSettingsImportHandler);
-    reg("/api/settings/reset",       HTTP_POST,  postSettingsResetHandler);
-    reg("/api/device/reboot",        HTTP_POST,  postRebootHandler);
-    reg("/api/device/reboot/prepare", HTTP_POST, postRebootPrepareHandler);
+    { "/api/status",                      RouteMethod::Get,   &WebServer::getStatusHandler },
+    { "/api/version",                     RouteMethod::Get,   &WebServer::getVersionHandler },
+    { "/api/dhcp/settings",               RouteMethod::Get,   &WebServer::getDhcpSettingsHandler },
+    { "/api/dhcp/settings",               RouteMethod::Post,  &WebServer::postDhcpSettingsHandler },
+    { "/api/dhcp/static-bindings",        RouteMethod::Get,   &WebServer::getStaticBindingsHandler },
+    { "/api/dhcp/static-bindings",        RouteMethod::Post,  &WebServer::postStaticBindingsHandler },
+    { "/api/dhcp/allowed",                RouteMethod::Get,   &WebServer::getAllowedComputersHandler },
+    { "/api/dhcp/allowed",                RouteMethod::Post,  &WebServer::postAllowedComputersHandler },
+    { "/api/dhcp/lookup-name",            RouteMethod::Post,  &WebServer::postLookupClientNameHandler },
+    { "/api/dhcp/leases",                 RouteMethod::Get,   &WebServer::getLeasesHandler },
+    { "/api/dns/settings",                RouteMethod::Get,   &WebServer::getDnsSettingsHandler },
+    { "/api/dns/settings",                RouteMethod::Post,  &WebServer::postDnsSettingsHandler },
+    { "/api/dns/local-hosts",             RouteMethod::Get,   &WebServer::getLocalHostsHandler },
+    { "/api/dns/local-hosts",             RouteMethod::Post,  &WebServer::postLocalHostsHandler },
+    { "/api/security/settings",           RouteMethod::Get,   &WebServer::getSecuritySettingsHandler },
+    { "/api/security/settings",           RouteMethod::Post,  &WebServer::postSecuritySettingsHandler },
+    { "/api/ota/upload",                  RouteMethod::Post,  &WebServer::postOtaUploadHandler },
+    { "/api/web/file",                    RouteMethod::Post,  &WebServer::postWebFileHandler },
+    { "/api/test-connection",             RouteMethod::Post,  &WebServer::postTestConnectionHandler },
+    { "/api/settings/export",             RouteMethod::Get,   &WebServer::getSettingsExportHandler },
+    { "/api/settings/import",             RouteMethod::Post,  &WebServer::postSettingsImportHandler },
+    { "/api/settings/reset",              RouteMethod::Post,  &WebServer::postSettingsResetHandler },
+    { "/api/device/reboot",               RouteMethod::Post,  &WebServer::postRebootHandler },
+    { "/api/device/reboot/prepare",       RouteMethod::Post,  &WebServer::postRebootPrepareHandler },
     // Statistics a planned restart asks for (Statistica.dat on FAT): the write
     // runs as a background job, this reports whether it finished or failed.
-    reg("/api/dns/stats/progress",   HTTP_GET,  getStatsProgressHandler);
+    { "/api/dns/stats/progress",          RouteMethod::Get,   &WebServer::getStatsProgressHandler },
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
-    reg("/api/dns/internal-cache/file", HTTP_GET,  getInternalCacheFileHandler);
-    reg("/api/dns/internal-cache/progress", HTTP_GET, getInternalCacheProgressHandler);
-    reg("/api/dns/internal-cache/save", HTTP_POST, postInternalCacheSaveHandler);
-    reg("/api/dns/internal-cache/load", HTTP_POST, postInternalCacheLoadHandler);
+    { "/api/dns/internal-cache/file",     RouteMethod::Get,   &WebServer::getInternalCacheFileHandler },
+    { "/api/dns/internal-cache/progress", RouteMethod::Get,   &WebServer::getInternalCacheProgressHandler },
+    { "/api/dns/internal-cache/save",     RouteMethod::Post,  &WebServer::postInternalCacheSaveHandler },
+    { "/api/dns/internal-cache/load",     RouteMethod::Post,  &WebServer::postInternalCacheLoadHandler },
     // Time (NTP) server
-    reg("/api/time/settings",        HTTP_GET,   getTimeSettingsHandler);
-    reg("/api/time/settings",        HTTP_POST,  postTimeSettingsHandler);
-    reg("/api/time/now",             HTTP_GET,   getTimeNowHandler);
-    reg("/api/time/set",             HTTP_POST,  postTimeSetHandler);
+    { "/api/time/settings",               RouteMethod::Get,   &WebServer::getTimeSettingsHandler },
+    { "/api/time/settings",               RouteMethod::Post,  &WebServer::postTimeSettingsHandler },
+    { "/api/time/now",                    RouteMethod::Get,   &WebServer::getTimeNowHandler },
+    { "/api/time/set",                    RouteMethod::Post,  &WebServer::postTimeSetHandler },
     // File explorer (FAT volumes)
-    reg("/api/files/volumes",        HTTP_GET,   getFileVolumesHandler);
-    reg("/api/files/list",           HTTP_GET,   getFileListHandler);
-    reg("/api/files/mkdir",          HTTP_POST,  postFileMkdirHandler);
-    reg("/api/files/rename",         HTTP_POST,  postFileRenameHandler);
-    reg("/api/files/delete",         HTTP_POST,  postFileDeleteHandler);
-    reg("/api/files/format",         HTTP_POST,  postFileFormatHandler);
-    reg("/api/files/download",       HTTP_GET,   getFileDownloadHandler);
-    reg("/api/files/upload",         HTTP_POST,  postFileUploadHandler);
-    reg("/api/files/upload/offset",  HTTP_GET,   getFileUploadOffsetHandler);
-    reg("/api/files/upload/cancel",  HTTP_POST,  postFileUploadCancelHandler);
-    reg("/api/files/text",           HTTP_GET,   getFileTextHandler);
-    reg("/api/files/text",           HTTP_POST,  postFileTextHandler);
-    reg("/api/files/settings",       HTTP_GET,   getFileSettingsHandler);
-    reg("/api/files/settings",       HTTP_POST,  postFileSettingsHandler);
+    { "/api/files/volumes",               RouteMethod::Get,   &WebServer::getFileVolumesHandler },
+    { "/api/files/list",                  RouteMethod::Get,   &WebServer::getFileListHandler },
+    { "/api/files/mkdir",                 RouteMethod::Post,  &WebServer::postFileMkdirHandler },
+    { "/api/files/rename",                RouteMethod::Post,  &WebServer::postFileRenameHandler },
+    { "/api/files/delete",                RouteMethod::Post,  &WebServer::postFileDeleteHandler },
+    { "/api/files/format",                RouteMethod::Post,  &WebServer::postFileFormatHandler },
+    { "/api/files/download",              RouteMethod::Get,   &WebServer::getFileDownloadHandler },
+    { "/api/files/upload",                RouteMethod::Post,  &WebServer::postFileUploadHandler },
+    { "/api/files/upload/offset",         RouteMethod::Get,   &WebServer::getFileUploadOffsetHandler },
+    { "/api/files/upload/cancel",         RouteMethod::Post,  &WebServer::postFileUploadCancelHandler },
+    { "/api/files/text",                  RouteMethod::Get,   &WebServer::getFileTextHandler },
+    { "/api/files/text",                  RouteMethod::Post,  &WebServer::postFileTextHandler },
+    { "/api/files/settings",              RouteMethod::Get,   &WebServer::getFileSettingsHandler },
+    { "/api/files/settings",              RouteMethod::Post,  &WebServer::postFileSettingsHandler },
     // Read-only volume check (long-running: POST starts it, GET polls the report)
-    reg("/api/files/check",          HTTP_POST,  postFileCheckHandler);
-    reg("/api/files/check/cancel",   HTTP_POST,  postFileCheckCancelHandler);
-    reg("/api/files/check",          HTTP_GET,   getFileCheckHandler);
+    { "/api/files/check",                 RouteMethod::Post,  &WebServer::postFileCheckHandler },
+    { "/api/files/check/cancel",          RouteMethod::Post,  &WebServer::postFileCheckCancelHandler },
+    { "/api/files/check",                 RouteMethod::Get,   &WebServer::getFileCheckHandler },
     // Copy / move between volumes (long-running: POST starts it, GET polls)
-    reg("/api/files/transfer",        HTTP_POST,  postFileTransferHandler);
-    reg("/api/files/transfer/cancel", HTTP_POST,  postFileTransferCancelHandler);
-    reg("/api/files/transfer",        HTTP_GET,   getFileTransferHandler);
+    { "/api/files/transfer",              RouteMethod::Post,  &WebServer::postFileTransferHandler },
+    { "/api/files/transfer/cancel",       RouteMethod::Post,  &WebServer::postFileTransferCancelHandler },
+    { "/api/files/transfer",              RouteMethod::Get,   &WebServer::getFileTransferHandler },
     // Task scheduler: one list for every long-running operation.
-    reg("/api/jobs",                 HTTP_GET,   getJobsHandler);
-    reg("/api/jobs/cancel",          HTTP_POST,  postJobCancelHandler);
-
+    { "/api/jobs",                        RouteMethod::Get,   &WebServer::getJobsHandler },
+    { "/api/jobs/cancel",                 RouteMethod::Post,  &WebServer::postJobCancelHandler },
     // Static file handlers (explicit routes — wildcards unreliable in ESP-IDF)
-    reg("/", HTTP_GET, staticFileHandler);         // serves login.html
-    reg("/login.html", HTTP_GET, staticFileHandler);
-    reg("/index.html", HTTP_GET, staticFileHandler);
-    reg("/header.html", HTTP_GET, staticFileHandler);
-    reg("/footer.html", HTTP_GET, staticFileHandler);
-    reg("/css/style.css", HTTP_GET, staticFileHandler);
-    reg("/js/app.js", HTTP_GET, staticFileHandler);
-    reg("/i18n/ru.json", HTTP_GET, staticFileHandler);
-    reg("/i18n/en.json", HTTP_GET, staticFileHandler);
-    reg("/pages/dhcp_setup.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dhcp_logging.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dhcp_dns.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dhcp_static.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dns_setup.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dns_logging.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dns_cache.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dns_internal.html", HTTP_GET, staticFileHandler);
-    reg("/pages/dns_local_hosts.html", HTTP_GET, staticFileHandler);
-    reg("/pages/ntp_setup.html", HTTP_GET, staticFileHandler);
-    reg("/pages/ntp_logging.html", HTTP_GET, staticFileHandler);
-    reg("/pages/security.html", HTTP_GET, staticFileHandler);
-    reg("/pages/files.html", HTTP_GET, staticFileHandler);
-    reg("/pages/settings_export.html", HTTP_GET, staticFileHandler);
-    reg("/pages/settings_import.html", HTTP_GET, staticFileHandler);
-    reg("/pages/settings_device.html", HTTP_GET, staticFileHandler);
-    reg("/pages/jobs.html", HTTP_GET, staticFileHandler);
-    reg("/pages/version.html", HTTP_GET, staticFileHandler);
+    // serves login.html
+    { "/",                                RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/login.html",                      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/index.html",                      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/header.html",                     RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/footer.html",                     RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/css/style.css",                   RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/js/app.js",                       RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/i18n/ru.json",                    RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/i18n/en.json",                    RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dhcp_setup.html",           RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dhcp_logging.html",         RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dhcp_dns.html",             RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dhcp_static.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_setup.html",            RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_logging.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_cache.html",            RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_internal.html",         RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_local_hosts.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/ntp_setup.html",            RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/ntp_logging.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/security.html",             RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/security_allowed.html",     RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/files.html",                RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/settings_export.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/settings_import.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/settings_device.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/jobs.html",                 RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/version.html",              RouteMethod::Get,   &WebServer::staticFileHandler },
+};
+
+const WebRoute* WebServer::routes(size_t& count)
+{
+    count = sizeof(kRoutes) / sizeof(kRoutes[0]);
+    return kRoutes;
 }
 
-// ─────────────────────────────────────────────────────
+void WebServer::registerRoutes()
+{
+    size_t count = 0;
+    const WebRoute* table = routes(count);
+
+    // The table is data, so it is checked before anything is registered: a row
+    // with no URI (or no handler) could only ever answer 404, and a repeated pair
+    // of (URI, method) shadows the earlier route without saying anything.
+    for (size_t i = 0; i < count; i++) {
+        if (!RouteTable::isValid(table[i])) {
+            ESP_LOGE(TAG, "Route %zu is unusable (uri=%s, handler=%s)", i,
+                     table[i].uri ? table[i].uri : "(none)",
+                     table[i].handler ? "set" : "null");
+        } else if (RouteTable::repeatsEarlier(table, i)) {
+            ESP_LOGE(TAG, "Route %zu (%s) repeats an earlier route with the same method",
+                     i, table[i].uri);
+        }
+    }
+
+    size_t registered = 0;
+    size_t failed = 0;
+    for (size_t i = 0; i < count; i++) {
+        const WebRoute& route = table[i];
+        httpd_uri_t uriDesc;
+        memset(&uriDesc, 0, sizeof(uriDesc));
+        uriDesc.uri      = route.uri;
+        uriDesc.method   = (route.method == RouteMethod::Post) ? HTTP_POST : HTTP_GET;
+        uriDesc.handler  = route.handler;   // RouteHandler is the httpd signature
+        uriDesc.user_ctx = nullptr;
+
+        const esp_err_t err = httpd_register_uri_handler(server_, &uriDesc);
+        if (err == ESP_OK) {
+            registered++;
+            ESP_LOGD(TAG, "Registered %s %s", methodName(route.method), route.uri);
+        } else {
+            failed++;
+            ESP_LOGE(TAG, "Failed to register %s %s: %s", methodName(route.method),
+                     route.uri, esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "Registered %zu/%zu routes", registered, count);
+    if (failed > 0) {
+        // A route with no slot is a 404 the operator will meet later with no way
+        // to explain it: say it where it can be read without a serial console
+        // (Errors.log, stage 123).
+        ESP_LOGE(TAG, "%zu of %zu routes could not be registered — the handler "
+                      "limit and the table disagree", failed, count);
+        if (::dhcp::core::ErrorLog::instance().core()) {
+            ::dhcp::core::ErrorLog::instance().errorf("web",
+                "%zu of %zu HTTP routes could not be registered", failed, count);
+        }
+    }
+}
 // Static file handler
 // ─────────────────────────────────────────────────────
 
