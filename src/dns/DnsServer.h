@@ -179,7 +179,7 @@ public:
     /**
      * @brief Start the background write of Statistica.dat (single-flight).
      *
-     * The file is three numbers — 44 bytes — and it is still written on a task
+     * The file is nine numbers — 92 bytes — and it is still written on a task
      * of its own, for the same reason the cache is: the reboot paths run on the
      * single httpd task, and a file write there (a slow card, a filesystem
      * hiccup) answers nobody else for as long as it takes. The operator asked

@@ -26,6 +26,10 @@
     "ic_hits": "From cache:",
     "ic_forward": "Forward:",
     "ic_avg": "Avg hit:",
+    "ic_wait": "Wait:",
+    "ic_work": "Work:",
+    "ic_walk": "Walk:",
+    "ic_evict": "Evict:",
     "static_bindings": "Static Bindings DHCP:",
     "local_hosts": "Local DNS Hosts:",
     "footer": "ESP32 DHCP & DNS Server"

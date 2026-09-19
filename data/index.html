@@ -11,10 +11,12 @@
     <div id="header-placeholder"></div>
 
     <main class="container">
-        <h1 data-i18n="app.title">DHCPServer</h1>
-        <!-- The description and the device uptime share one line: the uptime is
-             a secondary reading next to the title, not a status row of its own
-             (the rows below are the live services). -->
+        <!-- The page opens with the description and the device uptime on one
+             line: the uptime is a secondary reading next to it, not a status row
+             of its own (the rows below are the live services). The "DHCPServer"
+             heading that used to sit above this line was removed on the
+             operator's request — the name is already in the browser tab and in
+             the top bar. -->
         <div class="subtitle-row">
             <p data-i18n="app.subtitle">DHCP &amp; Caching DNS Server</p>
             <span class="uptime" id="uptime"></span>
@@ -109,6 +111,7 @@
                         </div>
                     </div>
                     <div class="cache-sub" id="internal-cache-stats"></div>
+                    <div class="cache-sub cache-sub-diag" id="internal-cache-diag" style="display:none;"></div>
                 </div>
             </div>            <div class="status-row">
                 <span class="status-label" data-i18n="app.static_bindings">Static Bindings:</span>

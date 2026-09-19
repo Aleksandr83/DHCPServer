@@ -14,7 +14,7 @@ namespace dhcp {
 namespace dns {
 
 /**
- * @brief The three numbers the main page shows, and what they need to survive a
+ * @brief The numbers the main page shows, and what they need to survive a
  *        reboot.
  *
  * `hits` and `forwards` are what the page prints as "From cache" and "Forward";
@@ -23,16 +23,39 @@ namespace dns {
  * new queries would be averaged against an average, which is no longer an
  * average of anything. Keeping the sum makes the number honest across restarts
  * — (sum + new) / (hits + new) — and the mechanism is meant to grow from here.
+ *
+ * It grew in stage 128: the six sums behind the split of that average (waiting
+ * for the arena mutex, chain nodes walked, records written, and what the
+ * full-arena eviction scan costs) travel with it, for exactly the same reason.
  */
 struct DnsStatTotals {
     uint64_t hits = 0;       ///< Queries answered from the internal cache
     uint64_t forwards = 0;   ///< Queries forwarded upstream
     uint64_t hitUsSum = 0;   ///< Sum of the hit durations in microseconds
+    // Stage 128 — the split, summed rather than averaged (see above).
+    uint64_t waitUs = 0;          ///< Sum of the time those hits waited for the lock
+    uint64_t walkedNodes = 0;     ///< Sum of the chain nodes those hits walked
+    uint64_t stores = 0;          ///< Records written (insert, refresh, restore)
+    uint64_t evictScans = 0;      ///< Full-arena eviction scans (a full pool)
+    uint64_t evictScanUs = 0;     ///< Sum of the time spent inside those scans
+    uint64_t evictScanNodes = 0;  ///< Nodes those scans visited
 
     /** @brief Average hit time in microseconds (`0` while nothing was counted). */
     uint32_t avgHitUs() const
     {
         return (hits == 0) ? 0u : static_cast<uint32_t>(hitUsSum / hits);
+    }
+
+    /** @brief Average wait of a hit for the arena mutex, in microseconds. */
+    uint32_t avgWaitUs() const
+    {
+        return (hits == 0) ? 0u : static_cast<uint32_t>(waitUs / hits);
+    }
+
+    /** @brief Average chain length of a hit, in hundredths of a node (110 = 1.1). */
+    uint32_t walkX100() const
+    {
+        return (hits == 0) ? 0u : static_cast<uint32_t>((walkedNodes * 100u) / hits);
     }
 };
 
@@ -44,14 +67,26 @@ struct DnsStatTotals {
  * ```
  *   offset  size  field
  *   0       4     magic "DST1"
- *   4       4     version (little-endian)
- *   8       4     payload size in bytes (24 — a size mismatch is a corrupt file)
+ *   4       4     version (little-endian; 1 = three counters, 2 = all nine)
+ *   8       4     payload size in bytes (24 for version 1, 72 for version 2 —
+ *                 a size that does not match its version is a corrupt file)
  *   12      4     reserved (0; the next growth of the format uses it)
  *   16      8     hits
  *   24      8     forwards
  *   32      8     sum of the hit durations in microseconds
- *   40      4     checksum (sum of the bytes before it, mod 2^32)
+ *   40      8     sum of the time those hits waited for the arena mutex
+ *   48      8     sum of the chain nodes those hits walked
+ *   56      8     records written (insert, refresh, restore)
+ *   64      8     full-arena eviction scans
+ *   72      8     time spent inside those scans, microseconds
+ *   80      8     nodes those scans visited
+ *   88      4     checksum (sum of the bytes before it, mod 2^32)
  * ```
+ *
+ * Version 1 records (44 bytes) are still read: their three counters come back
+ * and the six newer sums stay zero. That is what lets the operator's existing
+ * `Statistica.dat` survive this build — dropping it would throw away the only
+ * history the average has.
  *
  * Why not just dump a struct: the record has to be readable after a partial
  * write (power cut in the middle of a save), after a version change, and on a
@@ -74,10 +109,14 @@ public:
     static constexpr const char* kPath = "/fat/Statistica.dat";
 
     /** @brief Format version this build writes. */
-    static constexpr uint32_t kVersion = 1;
+    static constexpr uint32_t kVersion = 2;
 
-    /** @brief Size of one record, in bytes. */
-    static constexpr uint32_t kRecordSize = 44;
+    /** @brief Size of one record this build writes, in bytes. */
+    static constexpr uint32_t kRecordSize = 92;
+
+    /** @brief Version 1 records: still read, never written (44 bytes). */
+    static constexpr uint32_t kVersionLegacy = 1;
+    static constexpr uint32_t kRecordSizeLegacy = 44;
 
     /** @brief Serialise @p totals into exactly @ref kRecordSize bytes. */
     static std::string encode(const DnsStatTotals& totals);

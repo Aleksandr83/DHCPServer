@@ -176,9 +176,13 @@ async function apiFetch(url, options = {}) {
     const headers = { ...getAuthHeaders(), ...options.headers };
     const resp = await fetch(url, { ...options, headers });
     if (resp.status === 401) {
-        // Session expired or not logged in — redirect to login
+        // Session expired or not logged in — redirect to login. Absolute path:
+        // the pages under /pages/ would otherwise resolve 'login.html' into
+        // /pages/login.html, which does not exist — the operator sees a 404
+        // instead of the login form (the same trap the auth gate below
+        // already documents).
         sessionStorage.removeItem('dhcp_auth');
-        window.location.href = 'login.html';
+        window.location.href = '/login.html';
     }
     return resp;
 }
@@ -376,7 +380,7 @@ async function prepareRestartFlow(onStep, action) {
     }
 
     // Wait for the background statistics write the device started (stage 122:
-    // it runs as a job of its own, like the cache). No percentage — 44 bytes
+    // it runs as a job of its own, like the cache). No percentage — 92 bytes
     // have none, and inventing one would be worse than the plain word. Returns
     // `{result, detail}` ('ok' | 'skipped' | 'failed' | '' when none arrived,
     // plus the device's own words about a failure), or null when the job stopped
@@ -462,7 +466,7 @@ async function prepareRestartFlow(onStep, action) {
         await lingerStep();
         return 'doubt';
     }
-    // The statistics file is 44 bytes, so this step is over before it can be
+    // The statistics file is 92 bytes, so this step is over before it can be
     // read — hold its announcement for a moment anyway.
     await lingerStep(kProgressMinMs);
 
@@ -891,15 +895,46 @@ async function updateStatus() {
                 const pct = (used + free) > 0 ? (used / (used + free)) * 100 : 0;
                 setMeter('internal-cache-bar', pct);
                 const statsEl = document.getElementById('internal-cache-stats');
+                const diagEl = document.getElementById('internal-cache-diag');
+                // Stage 127: the average is the whole lookup, and a lookup takes
+                // the arena mutex first — so the average and its parts (waiting
+                // for somebody else, our own work, the chain a hit walked, what
+                // a full-pool eviction costs) go on a line of their own, under
+                // the counters. A device that does not send them keeps the
+                // average where it always was.
+                const avgWait = data.internal_cache_avg_wait_us != null ? data.internal_cache_avg_wait_us : null;
+                const avgWork = data.internal_cache_avg_work_us != null ? data.internal_cache_avg_work_us : null;
+                const walkX100 = data.internal_cache_walk_x100 != null ? data.internal_cache_walk_x100 : null;
+                const scans = data.internal_cache_evict_scans != null ? data.internal_cache_evict_scans : 0;
+                const scanMs = data.internal_cache_evict_scan_ms != null ? data.internal_cache_evict_scan_ms : 0;
+                const hasDiag = avgWait != null && avgWork != null;
                 if (statsEl) {
                     let s =
                         tr('app.ic_entries') + ' ' + entries + ' / ' + capacity +
                         '   ·   ' + tr('app.ic_hits') + ' ' + hits +
                         '   ·   ' + tr('app.ic_forward') + ' ' + fwd;
-                    if (avgUs > 0) {
+                    if (avgUs > 0 && !hasDiag) {
                         s += '   ·   ' + tr('app.ic_avg') + ' ' + usFmt(avgUs);
                     }
                     statsEl.textContent = s;
+                }
+                if (diagEl) {
+                    if (!hasDiag) {
+                        diagEl.textContent = '';
+                        diagEl.style.display = 'none';
+                    } else {
+                        let d = tr('app.ic_avg') + ' ' + usFmt(avgUs) +
+                                '   ·   ' + tr('app.ic_wait') + ' ' + usFmt(avgWait) +
+                                '   ·   ' + tr('app.ic_work') + ' ' + usFmt(avgWork);
+                        if (walkX100 != null) {
+                            d += '   ·   ' + tr('app.ic_walk') + ' ' + (walkX100 / 100).toFixed(1);
+                        }
+                        if (scans > 0) {
+                            d += '   ·   ' + tr('app.ic_evict') + ' ' + scans + ' × ' + usFmt(scanMs * 1000);
+                        }
+                        diagEl.textContent = d;
+                        diagEl.style.display = '';
+                    }
                 }
             }
         }

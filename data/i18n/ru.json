@@ -26,6 +26,10 @@
     "ic_hits": "Из кэша:",
     "ic_forward": "Forward:",
     "ic_avg": "Средн. hit:",
+    "ic_wait": "Ожид.:",
+    "ic_work": "Работа:",
+    "ic_walk": "Обход:",
+    "ic_evict": "Вытесн.:",
     "static_bindings": "Статические привязки DHCP:",
     "local_hosts": "Локальные хосты DNS:",
     "footer": "ESP32 DHCP и DNS Сервер"

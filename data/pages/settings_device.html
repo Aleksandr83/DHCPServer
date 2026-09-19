@@ -159,10 +159,12 @@
 
             // After the reset credentials are back to admin/admin, so the
             // current session is no longer valid — once the device is back,
-            // send the user to login.
+            // send the user to login. Absolute path: this page lives under
+            // /pages/, so a relative 'login.html' would resolve to
+            // /pages/login.html and 404.
             sessionStorage.removeItem('dhcp_auth');
             if (await waitForDeviceBack()) {
-                window.location.href = 'login.html';
+                window.location.href = '/login.html';
             }
         }
     </script>

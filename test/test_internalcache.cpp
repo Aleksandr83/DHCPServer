@@ -284,8 +284,11 @@ static int test_save_load_keeps_counters()
         TEST_ASSERT_EQ(written, 1u);
         const auto info = c.fileInfo(path);
         TEST_ASSERT_TRUE(info.exists);
-        TEST_ASSERT_EQ(info.version, 2u);
+        TEST_ASSERT_EQ(info.version, 3u);
         TEST_ASSERT_EQ(info.entries, 1u);
+        // 16 B header + 1 + 9 ("keep.test") + 2 + 1 + 1 + 4 (ttl) + 4 (uses)
+        // + 4 (one IPv4). Version 2 wrote 8 bytes for the counter: 46.
+        TEST_ASSERT_EQ(info.size, 42u);
         c.disable();
     }
     {
@@ -305,6 +308,60 @@ static int test_save_load_keeps_counters()
         TEST_ASSERT_EQ(c.stats().usesMax, saved + 1);
         c.disable();
     }
+    std::remove(path);
+    return 0;
+}
+
+/** A version 2 file — the one an older build wrote, with an 8-byte usage
+ *  counter — must still load: this is the file sitting on the device when the
+ *  format changed, and refusing it would cost the working set for nothing. */
+static int test_load_reads_version2_file()
+{
+    resetClock();
+    const char* path = "test_cache_v2_old.dat";
+
+    // header: magic "DCC1" | version 2 | entryCount 1 | reserved 0
+    // entry:  nameLen 9, "v2.testxx", qtype 1, nA 1, nAAAA 0, ttl 600,
+    //         u64 uses = 4242, IPv4 5.6.7.8
+    FILE* f = fopen(path, "wb");
+    TEST_ASSERT_TRUE(f != nullptr);
+    const uint8_t hdr[16] = {'D', 'C', 'C', '1', 2, 0, 0, 0,
+                             1, 0, 0, 0, 0, 0, 0, 0};
+    TEST_ASSERT_EQ(fwrite(hdr, 1, sizeof(hdr), f), sizeof(hdr));
+    const uint8_t nameLen = 9;
+    TEST_ASSERT_EQ(fwrite(&nameLen, 1, 1, f), 1u);
+    TEST_ASSERT_EQ(fwrite("v2.testxx", 1, nameLen, f), (size_t)nameLen);
+    const uint8_t tail[8] = {1, 0, 1, 0, 88, 2, 0, 0};   // A, 1 address, ttl 600
+    TEST_ASSERT_EQ(fwrite(tail, 1, sizeof(tail), f), sizeof(tail));
+    const uint8_t uses64[8] = {0x92, 0x10, 0, 0, 0, 0, 0, 0};   // 4242
+    TEST_ASSERT_EQ(fwrite(uses64, 1, sizeof(uses64), f), sizeof(uses64));
+    const uint8_t ip[4] = {5, 6, 7, 8};
+    TEST_ASSERT_EQ(fwrite(ip, 1, sizeof(ip), f), sizeof(ip));
+    fclose(f);
+
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+    size_t loaded = 0;
+    TEST_ASSERT_TRUE(c.loadFromFile(path, &loaded));
+    TEST_ASSERT_EQ(loaded, 1u);
+    TEST_ASSERT_EQ(c.stats().usesMax, 4242u);   // the 8 bytes were read as 8 bytes
+
+    std::vector<std::string> out;
+    uint32_t ttl = 0;
+    TEST_ASSERT_TRUE(c.lookup("v2.testxx", 1, out, ttl));
+    TEST_ASSERT_EQ(out.size(), 1u);
+    TEST_ASSERT_STR_EQ(out[0], "5.6.7.8");
+
+    // And what this build writes is four bytes shorter per record.
+    const std::string again = std::string(path) + ".saved";
+    size_t written = 0;
+    TEST_ASSERT_TRUE(c.saveToFile(again.c_str(), &written));
+    TEST_ASSERT_EQ(written, 1u);
+    TEST_ASSERT_EQ(c.fileInfo(again.c_str()).version, 3u);
+    // 16 B header + 1 + 9 (name) + 2 + 1 + 1 + 4 (ttl) + 4 (uses) + 4 (IPv4).
+    TEST_ASSERT_EQ(c.fileInfo(again.c_str()).size, 42u);
+    std::remove(again.c_str());
+
     std::remove(path);
     return 0;
 }
@@ -357,14 +414,18 @@ static int test_load_reads_version1_file()
 }
 
 /** The usage counter never wraps through zero: a record whose counter already
- *  sits at the maximum stays there. One step from the maximum is reachable —
- *  and testable — through the cache file; 2^64 increments are not. */
+ *  sits at the maximum stays there. The file read here is a **version 2** one —
+ *  written by the build where the field was 64-bit — so this case also proves
+ *  that an older file still loads, with its larger value clamped to the width
+ *  the field has in memory. One step from the maximum is reachable — and
+ *  testable — through the cache file; 2^32 increments are not. */
 static int test_usage_counter_saturates_at_max()
 {
     resetClock();
     const char* path = "test_cache_max.dat";
 
-    // A version 2 file with one record whose counter is UINT64_MAX.
+    // A version 2 file with one record whose 8-byte counter is UINT64_MAX. The
+    // in-memory counter is 32-bit, so it comes back clamped to UINT32_MAX.
     FILE* f = fopen(path, "wb");
     TEST_ASSERT_TRUE(f != nullptr);
     const uint8_t hdr[16] = {'D', 'C', 'C', '1', 2, 0, 0, 0,
@@ -387,12 +448,12 @@ static int test_usage_counter_saturates_at_max()
     size_t loaded = 0;
     TEST_ASSERT_TRUE(c.loadFromFile(path, &loaded));
     TEST_ASSERT_EQ(loaded, 1u);
-    TEST_ASSERT_EQ(c.stats().usesMax, UINT64_MAX);
+    TEST_ASSERT_EQ(c.stats().usesMax, UINT32_MAX);          // clamped on load
 
     std::vector<std::string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("max.test", 1, out, ttl));   // one step from Max
-    TEST_ASSERT_EQ(c.stats().usesMax, UINT64_MAX);          // … and it stays Max
+    TEST_ASSERT_EQ(c.stats().usesMax, UINT32_MAX);          // … and it stays Max
 
     // Fill the pool and force one eviction. A counter that had wrapped to zero
     // would make this record look like the least used one and evict it.
@@ -527,6 +588,68 @@ static int test_ignore_ttl()
     return 0;
 }
 
+/** The reported average is the whole lookup, and a lookup takes the arena mutex
+ *  first — so the cache has to say how much of it was waiting and how many
+ *  records it walked. On the host both numbers are exact: the stub mutex never
+ *  contends (the wait is 0) and the clock is only what the test moves. */
+static int test_hit_reports_its_time_split()
+{
+    resetClock();
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+    c.store("split.test", 1, ipA("10.1.1.1"), 60);
+    TEST_ASSERT_EQ(c.stats().stores, 1);            // the store that created it
+
+    std::vector<std::string> out;
+    uint32_t ttl = 0;
+    TEST_ASSERT_TRUE(c.lookup("split.test", 1, out, ttl));
+    auto s = c.stats();
+    TEST_ASSERT_EQ(s.hits, 1);
+    TEST_ASSERT_EQ(s.waitUs, 0);                    // nothing else holds the lock
+    TEST_ASSERT_EQ(s.walkedNodes, 1);               // one record in its bucket
+
+    TEST_ASSERT_TRUE(c.lookup("split.test", 1, out, ttl));
+    s = c.stats();
+    TEST_ASSERT_EQ(s.hits, 2);
+    TEST_ASSERT_EQ(s.walkedNodes, 2);               // counted per hit
+
+    // A miss walks a chain as well, but it is not a hit: its walk must not end
+    // up in a number the page divides by hits.
+    TEST_ASSERT_FALSE(c.lookup("absent.test", 1, out, ttl));
+    TEST_ASSERT_EQ(c.stats().walkedNodes, 2);
+    TEST_ASSERT_EQ(c.stats().misses, 1);
+
+    // A refresh is a store, not a hit.
+    c.store("split.test", 1, ipA("10.1.1.2"), 60);
+    TEST_ASSERT_EQ(c.stats().stores, 2);
+    return 0;
+}
+
+/** The full-arena eviction scan holds the mutex while it walks everything, so it
+ *  is the one event that can make somebody else's hit wait for milliseconds.
+ *  Counted and timed, and its size is the pool — not a guess. */
+static int test_eviction_scan_is_measured()
+{
+    resetClock();
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+    const size_t cap = c.stats().capacity;
+
+    for (size_t i = 0; i < cap; i++) {
+        c.store("s" + std::to_string(i) + ".test", 1, ipA("10.2.2.2"), 3600);
+    }
+    TEST_ASSERT_EQ(c.stats().entries, cap);
+    TEST_ASSERT_EQ(c.stats().evictScans, 0);        // the pool filled without one
+
+    c.store("overflow.test", 1, ipA("10.3.3.3"), 3600);   // the pool is full
+    const auto s = c.stats();
+    TEST_ASSERT_EQ(s.evictScans, 1);
+    TEST_ASSERT_EQ(s.evictScanNodes, cap);          // the scan is the whole pool
+    TEST_ASSERT_EQ(s.evictScanUs, 0);               // the host clock does not move
+    TEST_ASSERT_EQ(s.evicted, 1u);
+    return 0;
+}
+
 void app_main()
 {
     printf("Running InternalDnsCache tests...\n");
@@ -538,12 +661,15 @@ void app_main()
     failures += test_least_used_is_evicted();
     failures += test_recycled_node_starts_from_zero();
     failures += test_save_load_keeps_counters();
+    failures += test_load_reads_version2_file();
     failures += test_load_reads_version1_file();
     failures += test_usage_counter_saturates_at_max();
     failures += test_age_across_the_32_bit_millisecond_mark();
     failures += test_save_and_load_across_the_mark();
     failures += test_save_reports_nothing_to_save();
     failures += test_ignore_ttl();
+    failures += test_hit_reports_its_time_split();
+    failures += test_eviction_scan_is_measured();
 
     if (failures == 0) {
         printf("All InternalDnsCache tests PASSED!\n");

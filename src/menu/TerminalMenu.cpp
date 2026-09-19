@@ -112,7 +112,7 @@ void TerminalMenu::processLine(const std::string& line)
         println("Rebooting...");
         // Same policy as the web paths: a planned restart keeps the counters of the
         // main page (Statistica.dat on the internal volume). The pause is there
-        // because this path had none — the file is 44 bytes, but it goes to flash.
+        // because this path had none — the file is 92 bytes, but it goes to flash.
         if (beforeReboot_) beforeReboot_();
         vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();

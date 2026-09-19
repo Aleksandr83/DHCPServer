@@ -51,6 +51,17 @@ Get overall system status.
 > `internal_cache_hits`, `internal_cache_avg_hit_us` — average µs of a
 > successful PSRAM-cache lookup, `internal_forward_count`).
 >
+> Since stage 127 the same block also answers **where the time of a hit goes**,
+> because that average times the whole `lookup()` call and a lookup starts by
+> taking the arena mutex: `internal_cache_avg_wait_us` (the part spent waiting for
+> that lock — somebody else's work, not the cache's),
+> `internal_cache_avg_work_us` (`avg_hit_us − avg_wait_us`, what is left),
+> `internal_cache_walk_x100` (records a hit walked ×100, so `110` reads as 1.1),
+> `internal_cache_stores`, and the full-arena eviction scan, which runs only when
+> the pool is full: `internal_cache_evict_scans`, `internal_cache_evict_scan_ms`,
+> `internal_cache_evict_scan_nodes`. A device older than that stage does not send
+> them at all, and the page then keeps the average on the line it always had.
+>
 > The cache block also answers **how often names are needed**:
 > `internal_cache_uses_total` (every counted use since the cache was enabled —
 > one per query that involved the cache, see below),
@@ -438,7 +449,7 @@ itself: before a planned restart the device writes the whole table to
 reboot no longer costs the working set.
 
 The size is what shapes the mechanism: a full table is a few megabytes against
-the statistics file's 44 bytes. The save therefore runs as the usual background
+the statistics file's 92 bytes. The save therefore runs as the usual background
 job (`POST /api/dns/internal-cache/save`) and whoever asked for it waits for it,
 in one of two ways:
 

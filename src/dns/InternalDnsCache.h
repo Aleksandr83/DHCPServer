@@ -22,35 +22,45 @@ namespace dns {
  * the original TTL, the store timestamp and a usage counter.
  *
  * Store timestamp (`Node::storedMs`) — "when the record was put in":
- * milliseconds since boot over 64 bits, refreshed on every store() (a fresh
- * upstream answer makes the record young again). 64 bits because the age is
- * obtained by **subtracting this value from the clock**: with 32 bits the
- * counter turns over every 49.7 days, and after that turnover every record
- * stored since it is reported as ~49.7 days old — an expiry on the very first
- * read, which left the cache unable to hold anything until a reboot. At 64 bits
- * the value reaches its maximum in ~584 million years, so it never turns over
- * and the age is a plain difference. The width costs ~2 % of the record pool
- * (352 → 360 bytes per record, 20 MB: 59 520 → 58 197 entries) — a deliberate
- * trade against a wrap that no arithmetic could repair. The field answers four
+ * milliseconds since boot over **32 bits**, refreshed on every store() (a fresh
+ * upstream answer makes the record young again). The value is never read as an
+ * absolute time: the age is a **modular subtraction** from the clock, written
+ * in exactly one place (`elapsedMs()`), so the 49.7-day turnover of a 32-bit
+ * millisecond counter cancels out — `now - stored` is the true age of every
+ * record whose age is below 49.7 days, which is every record whose TTL is below
+ * that limit (a TTL above it, or an age that has to stay exact past it, would
+ * need a wider field). The ceiling is accepted for now: the operator decided to
+ * lift it by a different mechanism, later, once the pieces that mechanism needs
+ * are in place — not by widening this field again. The field answers four
  * questions: is the record expired (aging in `lookup()` and when writing the
  * file), how much of its TTL is left for the client, which record is the oldest
  * when a full pool has to drop one, and how much lifetime to write into the
  * file. It is not the DNS TTL of the answer (that is `ttl`), not a "last used"
  * mark (the record has none — `uses` only counts), and it is not persisted (the
- * file carries the remaining TTL instead).
+ * file carries the remaining TTL instead). Width: 4 bytes; with the 32-bit
+ * usage counter below the record is back to 352 bytes (20 MB: 59 520 entries
+ * instead of 58 197).
  *
- * Usage counter (`Node::uses`, 64-bit): how often the name was needed — one
+ * Usage counter (`Node::uses`, 32-bit): how often the name was needed — one
  * per hit in lookup() and one per store(), so every query that involves the
  * cache adds exactly one (a hit is answered from the cache and is not stored,
  * a miss is stored and does not hit). A restored record keeps its saved
  * counter, and the counter survives a refresh of the same name/type; it is
  * zeroed only when the node is handed out of the free pool, so a recycled
  * node can never inherit the count of the record it replaced. The counter
- * **saturates** at UINT64_MAX instead of wrapping through zero (the same rule
+ * **saturates** at UINT32_MAX instead of wrapping through zero (the same rule
  * as the running total of the status): a record that rolled over to 0 would
  * look like the least used one and be evicted first. Two uses of
  * the number: the eviction policy (the least used record goes first, ties
  * broken by the oldest store time) and the “hottest name” the status reports.
+ * The status widens the two 32-bit counters to 64-bit fields, and a value
+ * restored from the file above UINT32_MAX is clamped.
+ *
+ * Lookup-path cost: a hit does two saturating increments and, when the record
+ * leads the field, records **which** record that is (an index) — the 128-byte
+ * name copy happens only in `noteTop()`, which runs when the status is read and
+ * never from `lookup()`. The two are separated on purpose: `bumpUse()` is the
+ * hot path, `noteTop()` is not.
  *
  * TTL semantics:
  *   - ignoreTtl() == false (default): an entry older than its TTL is a miss
@@ -125,6 +135,19 @@ public:
      */
     void clear();
 
+    /**
+     * @brief Put back the measured totals read from the statistics file.
+     *
+     * The counters behind the split of the average (stages 127/128) live here
+     * and are zeroed when the arena is created, so the restore has to happen
+     * after enable() — the same rule the usage counters follow, which come back
+     * through store(..., countUse = false). Without this the page would show an
+     * average that survived the reboot next to a split that starts from zero.
+     */
+    void restoreMeasurement(uint64_t waitUs, uint64_t walkedNodes, uint64_t stores,
+                            uint64_t evictScans, uint64_t evictScanUs,
+                            uint64_t evictScanNodes);
+
     // Progress callback: called periodically with the number of records
     // processed and the estimated total (0 until known). Used to render a
     // progress bar while the background persist task runs. Never called with
@@ -190,6 +213,17 @@ public:
         uint64_t hits = 0;
         uint64_t misses = 0;
         uint64_t evicted = 0;  // purged/evicted entries (overflow + TTL purge)
+        // ─── Where the lookup time goes (stage 127, diagnosis) ───
+        // The meter in DnsServer times the whole lookup() call, and a lookup
+        // starts by taking the arena mutex — so "how slow is a hit" mixes our
+        // own work with however long somebody else was holding the lock. These
+        // split it. All of them are totals; the page divides by `hits`.
+        uint64_t waitUs = 0;       // time spent waiting for the arena mutex
+        uint64_t walkedNodes = 0;  // chain nodes examined to find the record
+        uint64_t stores = 0;       // records written (insert, refresh, restore)
+        uint64_t evictScans = 0;   // full-arena victim scans (the pool was full)
+        uint64_t evictScanUs = 0;  // total time spent inside those scans
+        uint64_t evictScanNodes = 0;  // nodes those scans visited
         // Usage counters.
         uint64_t usesTotal = 0;  // counted uses since the cache was enabled
         uint64_t usesMax = 0;    // high-water mark of one record's counter
@@ -215,12 +249,15 @@ private:
         uint16_t nA;        // number of IPv4 addresses
         uint16_t nAAAA;     // number of IPv6 addresses
         uint16_t _pad;
-        // Store timestamp: milliseconds since boot, 64-bit on purpose — the age
-        // is this value subtracted from the clock, and a 32-bit millisecond
-        // counter turns over every 49.7 days (see the class comment).
-        uint64_t storedMs;
+        // Store timestamp: milliseconds since boot, 32-bit — the age is a
+        // modular subtraction from the clock, so the 49.7-day turnover of this
+        // counter cancels out (see the class comment and elapsedMs()).
+        uint32_t storedMs;
         uint32_t ttl;       // original TTL (seconds)
-        uint64_t uses;      // usage counter (0 on a node handed out of the pool)
+        // Usage counter, 0 on a node handed out of the pool. Saturates at
+        // UINT32_MAX. The cache file writes it as 4 bytes (format version 3),
+        // matching the field; a version 2 file, which carries 8, still loads.
+        uint32_t uses;
         char     name[128]; // lowercased domain, NUL-terminated
         uint32_t a4[16];    // up to 16 IPv4 (network byte order)
         uint8_t  a6[8][16]; // up to 8 IPv6
@@ -228,7 +265,16 @@ private:
 
     static uint32_t hashName(const char* s);
     static std::string lower(const std::string& s);
-    static uint64_t nowMs();
+    // Milliseconds since boot, truncated to 32 bits. Never compare two of these
+    // as absolute times — take the difference with elapsedMs().
+    static uint32_t nowMs();
+    // The age of a record in milliseconds. This is the ONE place where the
+    // modulo of the 32-bit millisecond clock lives: unsigned subtraction already
+    // yields the correct difference across the turnover, as long as the real age
+    // is below 49.7 days (which every TTL below that limit guarantees).
+    static uint32_t elapsedMs(uint32_t now, uint32_t stored) {
+        return now - stored;
+    }
 
     // store() and loadFromFile() share this body; they differ only in what
     // happens to the usage counter:
@@ -237,20 +283,37 @@ private:
     void storeInternal(const std::string& domain, uint16_t qtype,
                        const std::vector<std::string>& ips, uint32_t ttl,
                        bool countUse, uint64_t usesExact);
-    // Saturating +1 plus the running total and the high-water "hottest" mark.
-    void bumpUse(Node& n);
-    // High-water mark only (a restored counter is what it is — not a use now).
-    void noteTop(const Node& n);
+    // Hot path: saturating +1 on the record, +1 on the running total, and (when
+    // the record leads the field) remember WHICH record leads — an index and a
+    // qtype, no name copy.
+    void bumpUse(Node& n, int idx);
+    // The mark itself, from a record whose counter was just written: which
+    // record leads and by how much. O(1), no copy. Used by the restore path
+    // (a restored counter is what it is — not a use now).
+    void noteMark(const Node& n, int idx);
+    // The mark's name. This is where the 128 bytes are copied, and it is called
+    // when the status is read — never from the lookup path. Const because it
+    // writes the cache's own mark (mutable), not the pool.
+    void noteTop() const;
     void resetTop();
 
     uint32_t bucketOf(uint32_t hash) const { return hash % numBuckets_; }
+    // @param walked  Optional: how many chain nodes the walk examined (the
+    //                lookup path reports it, so the load factor stops being a
+    //                guess — stage 127).
     int  findNode(uint32_t bucket, uint32_t hash,
-                  const char* name, uint16_t qtype) const;
+                  const char* name, uint16_t qtype,
+                  uint32_t* walked = nullptr) const;
     int  allocNode();
     void freeNode(int idx);
     // Eviction victim: the least used record, ties broken by the oldest store
     // time (a record never hit has uses == 1 and the oldest one goes first).
-    int  findEvictVictim(int* bucketOut) const;
+    // `now` is the caller's clock reading: "oldest" is compared as an age
+    // (modular), never as two absolute timestamps.
+    // @param walked  Optional: how many records the scan visited (it walks the
+    //                whole arena, so this is the pool size — stage 127).
+    int  findEvictVictim(uint32_t now, int* bucketOut,
+                         uint32_t* walked = nullptr) const;
     void unlinkNode(uint32_t bucket, int idx);
     void lock() const;
     void unlock() const;
@@ -267,13 +330,23 @@ private:
     mutable uint64_t hits_ = 0;
     mutable uint64_t misses_ = 0;
     uint64_t evicted_ = 0;
+    // Where the lookup time went (stage 127). The wait and the walk are counted
+    // for hits only, so they divide by hits_ and stay comparable with the
+    // average DnsServer reports; the store/scan counters are their own story.
+    mutable uint64_t lookupWaitUs_ = 0;
+    mutable uint64_t walkedNodes_ = 0;
+    uint64_t stores_ = 0;
+    uint64_t evictScans_ = 0;
+    uint64_t evictScanUs_ = 0;
+    uint64_t evictScanNodes_ = 0;
     // Usage bookkeeping (see the class comment): a monotonic total and the
     // high-water "hottest name" mark, both maintained in O(1) per use so that
-    // stats() never walks the pool.
-    uint64_t usesTotal_ = 0;
-    uint64_t topUses_ = 0;
+    // stats() never walks the pool. The mark's name is materialised separately.
+    uint32_t usesTotal_ = 0;
+    uint32_t topUses_ = 0;
+    int32_t  topIdx_ = -1;              // record behind the mark (-1 = none)
     uint16_t topQtype_ = 0;
-    char     topName_[128] = {0};
+    mutable char topName_[128] = {0};   // written by noteTop(), from stats()
     bool     topValid_ = false;
     bool     ignoreTtl_ = false;
     void*    mutex_ = nullptr;    // SemaphoreHandle_t

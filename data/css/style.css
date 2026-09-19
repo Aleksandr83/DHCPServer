@@ -258,9 +258,9 @@ h1 {
 }
 
 /* Title block: the page description on the left, the device uptime on the right.
-   The margins reproduce what the plain <p> had before (its 1 em top/bottom
-   collapse with the h1 above and the status block below), so the rows under it
-   stay exactly where they were. */
+   The margins reproduce what the plain <p> had before it (1 em top and bottom),
+   so the rows under it stay exactly where they were; the `h1` that used to sit
+   above the block was removed on the operator's request. */
 .subtitle-row {
     display: flex;
     align-items: baseline;
@@ -724,6 +724,15 @@ input:focus, select:focus, textarea:focus {
     text-align: right;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+}
+
+/* Second line of that block (stage 127): the average hit time next to the
+   parts it is made of — waiting for the arena mutex, our own work, the chain
+   a hit walked. A little breathing room, and dimmer still: it is a
+   diagnostic, not something an operator has to read every day. */
+.cache-sub-diag {
+    margin-top: 2px;
+    opacity: 0.85;
 }
 
 @keyframes meterShimmer {

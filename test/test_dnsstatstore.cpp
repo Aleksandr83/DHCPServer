@@ -77,8 +77,126 @@ static void test_encode_has_a_fixed_size_and_a_magic()
     totals.hitUsSum = 132 * 199;
 
     const std::string record = DnsStatStore::encode(totals);
-    check(record.size() == DnsStatStore::kRecordSize, "the record is 44 bytes");
+    check(record.size() == DnsStatStore::kRecordSize, "the record is 92 bytes");
     check(record.compare(0, 4, "DST1") == 0, "it starts with the magic");
+    check(DnsStatStore::kVersion == 2, "this build writes version 2");
+    check(DnsStatStore::kRecordSizeLegacy == 44, "version 1 records are 44 bytes");
+}
+
+/** Stage 128: the sums behind the split of the average travel with it, exactly
+ *  as the average's own sum does — a stored average cannot be continued, and
+ *  neither can a stored "wait" or "walk". */
+static void test_the_split_survives_the_round_trip()
+{
+    std::printf("test_the_split_survives_the_round_trip\n");
+    DnsStatTotals in;
+    in.hits = 1000;
+    in.forwards = 10;
+    in.hitUsSum = 1000 * 120;
+    in.waitUs = 1000 * 7;
+    in.walkedNodes = 1130;                 // 1.13 nodes per hit
+    in.stores = 10;
+    in.evictScans = 3;
+    in.evictScanUs = 3 * 4000;
+    in.evictScanNodes = 3 * 59520;
+
+    DnsStatTotals out;
+    std::string why;
+    check(DnsStatStore::decode(DnsStatStore::encode(in), out, &why), "the record decodes");
+    check(out.hits == in.hits && out.hitUsSum == in.hitUsSum,
+          "the numbers the average is made of are exact");
+    check(out.waitUs == in.waitUs && out.walkedNodes == in.walkedNodes &&
+          out.stores == in.stores && out.evictScans == in.evictScans &&
+          out.evictScanUs == in.evictScanUs && out.evictScanNodes == in.evictScanNodes,
+          "all six sums of the split come back exactly");
+    check(out.avgHitUs() == 120 && out.avgWaitUs() == 7, "so both averages derive as before");
+    check(out.walkX100() == 113, "and the walk reads as 1.13 nodes per hit");
+
+    // Every counter at its maximum: nine 64-bit fields must not have brought an
+    // alignment or a sign problem with them.
+    DnsStatTotals max;
+    max.hits = 18446744073709551615ull;
+    max.hitUsSum = 18446744073709551615ull;
+    max.waitUs = 18446744073709551615ull;
+    max.walkedNodes = 18446744073709551615ull;
+    max.stores = 18446744073709551615ull;
+    max.evictScans = 18446744073709551615ull;
+    max.evictScanUs = 18446744073709551615ull;
+    max.evictScanNodes = 18446744073709551615ull;
+    DnsStatTotals mOut;
+    check(DnsStatStore::decode(DnsStatStore::encode(max), mOut, &why), "a maximal record decodes");
+    check(mOut.waitUs == max.waitUs && mOut.evictScanNodes == max.evictScanNodes,
+          "the full 64-bit range survives");
+}
+
+/** The version and the payload size have to agree with the length of the record.
+ *  Without that check a torn file could pass itself off as a shorter, valid one
+ *  — the version 1 shape is exactly such a shorter file. */
+static void test_the_version_and_the_payload_size_must_agree()
+{
+    std::printf("test_the_version_and_the_payload_size_must_agree\n");
+    DnsStatTotals totals;
+    totals.hits = 5;
+    const std::string good = DnsStatStore::encode(totals);
+    DnsStatTotals out;
+    std::string why;
+
+    std::string asV1 = good;
+    asV1[4] = 1;                 // claim version 1, keep the 72-byte payload
+    check(!DnsStatStore::decode(asV1, out, &why) && why == "payload size mismatch",
+          "a version 1 header on a version 2 payload is refused");
+
+    const std::string shortV2 = good.substr(0, DnsStatStore::kRecordSizeLegacy);
+    check(!DnsStatStore::decode(shortV2, out, &why),
+          "a 44-byte record claiming version 2 is refused");
+
+    std::string split = good;
+    split[40] = static_cast<char>(split[40] ^ 0x01);   // flip a bit in `waitUs`
+    check(!DnsStatStore::decode(split, out, &why) && why == "checksum mismatch",
+          "the checksum covers the new counters too");
+}
+
+/** A version 1 file — three counters, 44 bytes — is what the operator's device
+ *  has on it right now. It must load, with the newer sums at zero: refusing it
+ *  would throw away the only history the average has. */
+static void test_a_version1_file_still_loads()
+{
+    std::printf("test_a_version1_file_still_loads\n");
+    const std::string path = g_dir + "/legacy.dat";
+
+    std::string r;
+    r.append("DST1", 4);
+    auto u32 = [&r](uint32_t v) {
+        for (int i = 0; i < 4; i++) r.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+    };
+    auto u64 = [&r](uint64_t v) {
+        for (int i = 0; i < 8; i++) r.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+    };
+    u32(1);              // version 1
+    u32(24);             // payload: three counters
+    u32(0);              // reserved
+    u64(500);            // hits
+    u64(7);              // forwards
+    u64(500 * 42);       // hitUsSum -> an average of 42 us
+    uint32_t sum = 0;
+    for (char c : r) sum += static_cast<unsigned char>(c);
+    u32(sum);            // checksum
+    check(r.size() == DnsStatStore::kRecordSizeLegacy, "the legacy record is 44 bytes");
+
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    check(f != nullptr, "the legacy file is written");
+    if (f != nullptr) {
+        std::fwrite(r.data(), 1, r.size(), f);
+        std::fclose(f);
+    }
+
+    DnsStatTotals back;
+    std::string why;
+    check(DnsStatStore::load(path, back, &why), "a version 1 file loads (" + why + ")");
+    check(back.hits == 500 && back.forwards == 7, "its counters come back");
+    check(back.avgHitUs() == 42, "and so does the average they make");
+    check(back.waitUs == 0 && back.walkedNodes == 0 && back.evictScans == 0 &&
+          back.evictScanNodes == 0, "the counters version 1 never had stay zero");
 }
 
 static void test_round_trip_keeps_every_number()
@@ -196,7 +314,7 @@ static void test_a_torn_write_is_refused_by_the_format()
     std::string why;
     check(DnsStatStore::save(path, totals, &why), "a good record is written");
 
-    // Cut it in the middle: the first 20 bytes of the 44 are what a power cut
+    // Cut it in the middle: the first 20 bytes of the 92 are what a power cut
     // leaves behind.
     const std::string record = DnsStatStore::encode(totals);
     std::FILE* f = std::fopen(path.c_str(), "wb");
@@ -418,6 +536,9 @@ int main()
 
     test_encode_has_a_fixed_size_and_a_magic();
     test_round_trip_keeps_every_number();
+    test_the_split_survives_the_round_trip();
+    test_the_version_and_the_payload_size_must_agree();
+    test_a_version1_file_still_loads();
     test_the_average_is_an_average_across_a_reboot();
     test_damaged_records_are_refused_with_a_reason();
     test_save_load_and_no_temporary_file_is_left();

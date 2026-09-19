@@ -548,7 +548,7 @@ bool DnsServer::storeCacheFileMd5(const std::string& md5)
 // ─────────────────────────────────────────────────────
 // Statistics across a planned restart (Statistica.dat)
 //
-// Three numbers, 44 bytes, written before a restart and read once at boot. It
+// Nine numbers, 92 bytes, written before a restart and read once at boot. It
 // is the same *shape* as the cache job below — its own task, its own verdict,
 // its own progress endpoint — and deliberately not a shared one: the two files
 // have separate switches, and the page shows them as two steps. The reason for
@@ -685,6 +685,18 @@ RestartSaveJobState::Verdict DnsServer::writeStatsNow(std::string& detail)
     totals.hitUsSum = internalCacheHitUs_;
     if (internalCacheHitUs_ != totals.hitUsSum) totals.hitUsSum = internalCacheHitUs_;
 
+    // Stage 128: the sums behind the split of that average travel with it. One
+    // stats() call — taken under the arena lock, but this runs in the save job
+    // and not in the query path, so the lock costs nothing here and all six
+    // numbers describe one moment.
+    const InternalDnsCache::Stats ic = internalCache_.stats();
+    totals.waitUs = ic.waitUs;
+    totals.walkedNodes = ic.walkedNodes;
+    totals.stores = ic.stores;
+    totals.evictScans = ic.evictScans;
+    totals.evictScanUs = ic.evictScanUs;
+    totals.evictScanNodes = ic.evictScanNodes;
+
     std::string why;
     // Retry once, from a clean slate, and report both attempts to the error log
     // (the operator asked for exactly that; see DnsStatStore::saveWithRetry).
@@ -698,10 +710,11 @@ RestartSaveJobState::Verdict DnsServer::writeStatsNow(std::string& detail)
         return RestartSaveJobState::Verdict::Failed;
     }
 
-    ESP_LOGI(TAG, "statistics saved: hits=%llu forward=%llu avg=%u us",
+    ESP_LOGI(TAG, "statistics saved: hits=%llu forward=%llu avg=%u us wait=%u us",
              static_cast<unsigned long long>(totals.hits),
              static_cast<unsigned long long>(totals.forwards),
-             static_cast<unsigned>(totals.avgHitUs()));
+             static_cast<unsigned>(totals.avgHitUs()),
+             static_cast<unsigned>(totals.avgWaitUs()));
     return RestartSaveJobState::Verdict::Ok;
 }
 
@@ -735,9 +748,16 @@ bool DnsServer::restoreStatsFromFile()
                           ? 0xFFFFFFFFu
                           : static_cast<uint32_t>(totals.forwards);
     internalCacheHitUs_ = totals.hitUsSum;
+    // Stage 128: the split comes back as well, so the second line of the cache
+    // block is exactly as old as the average on the first one. This runs after
+    // applyInternalCache() — enable() zeroes these counters.
+    internalCache_.restoreMeasurement(totals.waitUs, totals.walkedNodes,
+                                      totals.stores, totals.evictScans,
+                                      totals.evictScanUs, totals.evictScanNodes);
 
-    ESP_LOGI(TAG, "statistics restored: hits=%u forward=%u avg=%u us",
-             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs());
+    ESP_LOGI(TAG, "statistics restored: hits=%u forward=%u avg=%u us wait=%u us",
+             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs(),
+             static_cast<unsigned>(totals.avgWaitUs()));
     return true;
 }
 
@@ -754,7 +774,7 @@ bool DnsServer::deleteStatsFile()
 // ─────────────────────────────────────────────────────
 // Cache across a planned restart (cache.dat)
 //
-// The statistics file is 44 bytes and can be written in the reboot path itself.
+// The statistics file is 92 bytes and can be written in the reboot path itself.
 // The cache cannot: a full table is a few megabytes and seconds of file I/O, so
 // the restart reuses the background save job and only waits for it here.
 // ─────────────────────────────────────────────────────

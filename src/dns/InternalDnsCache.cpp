@@ -117,6 +117,12 @@ bool InternalDnsCache::enable(size_t sizeMb)
     misses_ = 0;
     evicted_ = 0;
     usesTotal_ = 0;
+    lookupWaitUs_ = 0;
+    walkedNodes_ = 0;
+    stores_ = 0;
+    evictScans_ = 0;
+    evictScanUs_ = 0;
+    evictScanNodes_ = 0;
     resetTop();
 
     ESP_LOGI(TAG, "Internal DNS cache enabled: %u MB arena, %u buckets, "
@@ -148,9 +154,9 @@ void InternalDnsCache::disable()
 // Helpers
 // ─────────────────────────────────────────────────────
 
-uint64_t InternalDnsCache::nowMs()
+uint32_t InternalDnsCache::nowMs()
 {
-    return static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
+    return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
 std::string InternalDnsCache::lower(const std::string& s)
@@ -187,37 +193,47 @@ void InternalDnsCache::freeNode(int idx)
 }
 
 int InternalDnsCache::findNode(uint32_t bucket, uint32_t hash,
-                               const char* name, uint16_t qtype) const
+                               const char* name, uint16_t qtype,
+                               uint32_t* walked) const
 {
+    uint32_t seen = 0;
     for (int idx = buckets_[bucket]; idx >= 0; idx = nodes_[idx].next) {
+        seen++;
         const Node& n = nodes_[idx];
         if (n.hash == hash && n.qtype == qtype &&
             strcmp(n.name, name) == 0) {
+            if (walked) *walked = seen;
             return idx;
         }
     }
+    if (walked) *walked = seen;   // a miss walks its chain to the end
     return -1;
 }
 
 // Walk every bucket chain and return the used node with the lowest usage
 // counter (ties: the oldest store time). Used for overflow eviction — the
 // record nobody asks for goes first, not merely the one stored earliest.
-int InternalDnsCache::findEvictVictim(int* bucketOut) const
+int InternalDnsCache::findEvictVictim(uint32_t now, int* bucketOut,
+                                     uint32_t* walked) const
 {
     int best = -1;
-    uint64_t bestUses = UINT64_MAX;
-    uint64_t bestMs = UINT64_MAX;   // storedMs cannot turn over, so smallest = oldest
+    uint32_t bestUses = UINT32_MAX;
+    uint32_t bestAge = 0;   // the largest age is the oldest record
+    uint32_t seen = 0;
     for (uint32_t b = 0; b < numBuckets_; b++) {
         for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
+            seen++;
             const Node& n = nodes_[idx];
             if (best >= 0 && n.uses > bestUses) continue;
-            if (n.uses == bestUses && n.storedMs >= bestMs) continue;
+            const uint32_t age = elapsedMs(now, n.storedMs);
+            if (best >= 0 && n.uses == bestUses && age <= bestAge) continue;
             bestUses = n.uses;
-            bestMs = n.storedMs;
+            bestAge = age;
             best = idx;
             if (bucketOut) *bucketOut = static_cast<int>(b);
         }
     }
+    if (walked) *walked = seen;   // the scan visits the whole pool
     return best;
 }
 
@@ -280,9 +296,10 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
 
     uint32_t h = hashName(lname.c_str());
     uint32_t b = bucketOf(h);
-    const uint64_t now = nowMs();
+    const uint32_t now = nowMs();
 
-    // Upsert existing entry (domain + type).
+    // Upsert existing entry (domain + type). The walk count is only reported
+    // from the lookup path, which is the one the meter times.
     int idx = findNode(b, h, lname.c_str(), qtype);
     if (idx < 0) {
         // New entry — need a free node (evict the least used if the pool is
@@ -290,7 +307,16 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
         idx = allocNode();
         if (idx < 0) {
             int oldBucket = 0;
-            int victim = findEvictVictim(&oldBucket);
+            uint32_t scanned = 0;
+            // Stage 127: this scan walks the whole arena while holding the
+            // mutex, so every concurrent lookup waits inside its own measured
+            // hit time. Count and time it — that is the one thing in this cache
+            // that can turn tens of microseconds into milliseconds.
+            const int64_t scanStart = esp_timer_get_time();
+            int victim = findEvictVictim(now, &oldBucket, &scanned);
+            evictScanUs_ += static_cast<uint64_t>(esp_timer_get_time() - scanStart);
+            evictScans_++;
+            evictScanNodes_ += scanned;
             if (victim < 0) {  // pool full but nothing to evict — should not happen
                 unlock();
                 return;
@@ -336,11 +362,15 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
 
     // Counter last, so it sees the final record: a refresh keeps the old count
     // and adds today's use; a restore writes the value that was saved.
+    stores_++;   // one record written (new, refreshed or restored)
     if (countUse) {
-        bumpUse(n);
+        bumpUse(n, idx);
     } else {
-        n.uses = usesExact;
-        noteTop(n);
+        // A restore is not a use: the counter is written as it was saved. The
+        // in-memory field is 32-bit, so a larger saved value is clamped.
+        n.uses = (usesExact > UINT32_MAX) ? UINT32_MAX
+                                          : static_cast<uint32_t>(usesExact);
+        noteMark(n, idx);
     }
 
     unlock();
@@ -354,31 +384,53 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
 // just a wrong number — `uses` is what the eviction orders by, so a record
 // that rolled over to 0 would look like the least used one and be thrown out
 // first, and the running total would report that names were never used.
-void InternalDnsCache::bumpUse(Node& n)
+void InternalDnsCache::bumpUse(Node& n, int idx)
 {
-    if (n.uses != UINT64_MAX) n.uses++;
-    if (usesTotal_ != UINT64_MAX) usesTotal_++;
-    noteTop(n);
+    if (n.uses != UINT32_MAX) n.uses++;
+    if (usesTotal_ != UINT32_MAX) usesTotal_++;
+    noteMark(n, idx);
 }
 
-// A record whose counter reached the highest value so far becomes the new
-// mark. "The same value twice" also refreshes the mark, so the reported name
-// is one that is actually in the cache at the moment it was passed.
-void InternalDnsCache::noteTop(const Node& n)
+// Which record leads the field — an index and a qtype, nothing else. Deliberately
+// no name copy: this runs on every hit, and the name is only needed when the
+// status is read (see noteTop()).
+//
+// A record whose counter reached the highest value so far becomes the new mark;
+// "the same value twice" also refreshes it, so what the mark points at is a
+// record that is actually in the cache at the moment it was passed.
+void InternalDnsCache::noteMark(const Node& n, int idx)
 {
     if (n.uses == 0) return;   // a record nobody used is not a candidate
     if (topValid_ && n.uses < topUses_) return;
     topUses_ = n.uses;
     topQtype_ = n.qtype;
+    topIdx_ = idx;
+    topValid_ = true;
+}
+
+// The mark's name, produced on demand. This is the only place that copies the
+// 128 bytes; it is called under the arena lock from stats(), never from
+// lookup(). The slot may have been recycled since the mark was taken — the
+// counter check then fails and the previous name stays, which is what the mark
+// always promised (a high-water mark, not a live reading).
+void InternalDnsCache::noteTop() const
+{
+    if (!topValid_) {
+        topName_[0] = '\0';
+        return;
+    }
+    if (topIdx_ < 0 || topIdx_ >= nodeCount_) return;
+    const Node& n = nodes_[topIdx_];
+    if (n.uses != topUses_) return;
     memcpy(topName_, n.name, sizeof(topName_));
     topName_[sizeof(topName_) - 1] = '\0';
-    topValid_ = true;
 }
 
 void InternalDnsCache::resetTop()
 {
     topUses_ = 0;
     topQtype_ = 0;
+    topIdx_ = -1;
     topName_[0] = '\0';
     topValid_ = false;
 }
@@ -392,11 +444,17 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
     const std::string lname = lower(domain);
     if (lname.size() >= kMaxNameLen) return false;
 
+    // Stage 127: the wait for the arena mutex is inside the interval the caller
+    // measures, and it is somebody else's work (a store evicting from a full
+    // pool, a save taking its snapshot), not ours. Time it separately.
+    const int64_t lockStart = esp_timer_get_time();
     lock();
+    const uint64_t waitUs = static_cast<uint64_t>(esp_timer_get_time() - lockStart);
 
     uint32_t h = hashName(lname.c_str());
     uint32_t b = bucketOf(h);
-    int idx = findNode(b, h, lname.c_str(), qtype);
+    uint32_t walked = 0;
+    int idx = findNode(b, h, lname.c_str(), qtype, &walked);
 
     if (idx < 0) {
         misses_++;
@@ -406,11 +464,12 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
 
     Node& n = nodes_[idx];
     // One age for both decisions below (two clock reads could straddle a
-    // millisecond and disagree).
-    const uint64_t elapsed = nowMs() - n.storedMs;
+    // millisecond and disagree). elapsedMs() is modular, so this stays correct
+    // across the 49.7-day turnover of the 32-bit millisecond clock.
+    const uint32_t elapsed = elapsedMs(nowMs(), n.storedMs);
 
     // Honoring TTL: an entry older than its TTL is a miss and is purged.
-    if (!ignoreTtl_ && n.ttl != 0 && elapsed / 1000ULL >= n.ttl) {
+    if (!ignoreTtl_ && n.ttl != 0 && elapsed / 1000u >= n.ttl) {
         unlinkNode(b, idx);
         evicted_++;
         misses_++;
@@ -447,16 +506,39 @@ bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
     if (ignoreTtl_ || n.ttl == 0) {
         ttl = n.ttl;
     } else {
-        const uint64_t remainMs = (static_cast<uint64_t>(n.ttl) * 1000ULL) - elapsed;
-        ttl = static_cast<uint32_t>((remainMs + 999) / 1000ULL);  // ceil to seconds
+        // Both operands are 32-bit seconds/ms and the expiry check above
+        // guarantees elapsed < ttl*1000, so this neither underflows nor
+        // overflows for any TTL below 49.7 days.
+        const uint32_t remainMs = (static_cast<uint32_t>(n.ttl) * 1000u) - elapsed;
+        ttl = (remainMs + 999u) / 1000u;  // ceil to seconds
     }
 
     // The record served the client — that is one use of this name (an expired
-    // or empty answer above returned early and is not counted).
-    bumpUse(n);
+    // or empty answer above returned early and is not counted). The hot path
+    // pays two saturating increments and the mark's index, not a name copy.
+    // Stage 127: the wait and the walk are reported per hit, so the average
+    // DnsServer publishes can be split into ours and somebody else's.
+    lookupWaitUs_ += waitUs;
+    walkedNodes_ += walked;
+    bumpUse(n, idx);
     hits_++;
     unlock();
     return true;
+}
+
+void InternalDnsCache::restoreMeasurement(uint64_t waitUs, uint64_t walkedNodes,
+                                         uint64_t stores, uint64_t evictScans,
+                                         uint64_t evictScanUs,
+                                         uint64_t evictScanNodes)
+{
+    lock();
+    lookupWaitUs_ = waitUs;
+    walkedNodes_ = walkedNodes;
+    stores_ = stores;
+    evictScans_ = evictScans;
+    evictScanUs_ = evictScanUs;
+    evictScanNodes_ = evictScanNodes;
+    unlock();
 }
 
 void InternalDnsCache::clear()
@@ -492,15 +574,22 @@ void InternalDnsCache::clear()
 //     u16 qtype
 //     u8  nA, u8 nAAAA
 //     u32 ttlRemainingSec
-//     u64 uses            (version 2 only)
+//     u32 uses            (version 3; version 2 has it as u64, version 1 none)
 //     nA  × 4 B  (IPv4, network byte order)
 //     nAAAA × 16 B (IPv6)
 //
-// Version 1 files (written before the usage counter existed) are still read:
-// their records come back with uses == 0.
+// Three versions are read. Version 1 was written before the usage counter
+// existed (its records come back with uses == 0); version 2 carried an 8-byte
+// counter, from the time the field in memory was 64-bit; version 3 writes the
+// 4 bytes the field actually has now (stage 126 made it uint32_t). Writing 4
+// bytes costs backward compatibility in one direction — an older firmware
+// refuses the newer file, since it cannot know what the shorter record means —
+// and saves ~230 KB in a full 20 MB snapshot. The value is clamped to
+// UINT32_MAX on load, so a version 2 file with a larger counter still loads.
 namespace {
-constexpr uint32_t kFileVersion = 2;      // written now
-constexpr uint32_t kFileVersionMin = 1;   // still readable
+constexpr uint32_t kFileVersion = 3;         // written now (4-byte usage counter)
+constexpr uint32_t kFileVersionMin = 1;      // readable: 1, 2 and 3
+constexpr uint32_t kFileVersionUses64 = 2;   // up to this version the counter is 8 B
 constexpr uint32_t kMaxNameSave = 127;
 
 void putU32(uint8_t* d, uint32_t v)
@@ -517,10 +606,8 @@ uint32_t getU32(const uint8_t* s)
            (static_cast<uint32_t>(s[2]) << 16) |
            (static_cast<uint32_t>(s[3]) << 24);
 }
-void putU64(uint8_t* d, uint64_t v)
-{
-    for (int i = 0; i < 8; i++) d[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-}
+// Only reading needs the 64-bit helper: version 2 files carry an 8-byte usage
+// counter, while what this build writes (version 3) is 4 bytes.
 uint64_t getU64(const uint8_t* s)
 {
     uint64_t v = 0;
@@ -552,14 +639,14 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         }
         // Count first (we only know entries_ total, but expired entries are
         // skipped below when expiry is honored — count those we keep).
-        const uint64_t now = nowMs();
+        const uint32_t now = nowMs();
         uint32_t keep = 0;
         for (uint32_t b = 0; b < numBuckets_; b++) {
             for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
                 const Node& n = nodes_[idx];
                 if (n.name[0] == '\0') continue;
                 if (!ignoreTtl_ && n.ttl != 0 &&
-                    (now - n.storedMs) / 1000ULL >= n.ttl) {
+                    elapsedMs(now, n.storedMs) / 1000u >= n.ttl) {
                     continue;  // already expired — skip
                 }
                 keep++;
@@ -585,7 +672,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
                 const Node& n = nodes_[idx];
                 if (n.name[0] == '\0') continue;
                 if (!ignoreTtl_ && n.ttl != 0 &&
-                    (now - n.storedMs) / 1000ULL >= n.ttl) {
+                    elapsedMs(now, n.storedMs) / 1000u >= n.ttl) {
                     continue;
                 }
                 snap[s++] = idx;
@@ -615,7 +702,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         return false;
     }
 
-    const uint64_t now = nowMs();
+    const uint32_t now = nowMs();
     bool ok = true;
     uint32_t written = 0;
     for (uint32_t s = 0; s < total && ok; s++) {
@@ -633,7 +720,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
 
         uint32_t ttlRem = n.ttl;
         if (!ignoreTtl_ && n.ttl != 0) {
-            const uint64_t ageSec = (now - n.storedMs) / 1000ULL;
+            const uint32_t ageSec = elapsedMs(now, n.storedMs) / 1000u;
             if (ageSec >= n.ttl) {
                 // Expired between the snapshot and this write — keep the header
                 // count consistent and store a 1 s lifetime so it self-purges
@@ -656,10 +743,11 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         putU32(tail + 4, ttlRem);
         if (fwrite(tail, 1, sizeof(tail), f) != sizeof(tail)) { ok = false; break; }
 
-        // Usage counter (version 2): the frequency survives a save/load, so a
-        // restored cache keeps its eviction order and its "hottest name".
-        uint8_t usesBuf[8];
-        putU64(usesBuf, n.uses);
+        // Usage counter (version 2 onward): the frequency survives a save/load,
+        // so a restored cache keeps its eviction order and its "hottest name".
+        // Version 3 writes four bytes — the width the field has in memory.
+        uint8_t usesBuf[4];
+        putU32(usesBuf, n.uses);
         if (fwrite(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) {
             ok = false;
             break;
@@ -744,13 +832,20 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
         const uint32_t ttlRem = getU32(tail + 4);
         if (nA > 16 || nAAAA > 8) break;
 
-        // Version 2 carries the usage counter; version 1 files simply have
-        // none, and their records come back counted as never used.
+        // Versions 2 and 3 carry the usage counter, in 8 and 4 bytes
+        // respectively; version 1 files simply have none, and their records
+        // come back counted as never used.
         uint64_t uses = 0;
-        if (ver >= 2) {
-            uint8_t usesBuf[8];
-            if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
-            uses = getU64(usesBuf);
+        if (ver >= kFileVersionUses64) {
+            if (ver >= 3) {
+                uint8_t usesBuf[4];
+                if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
+                uses = getU32(usesBuf);
+            } else {
+                uint8_t usesBuf[8];
+                if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
+                uses = getU64(usesBuf);
+            }
         }
 
         std::vector<std::string> ips;
@@ -823,8 +918,15 @@ InternalDnsCache::Stats InternalDnsCache::stats() const
     s.hits = hits_;
     s.misses = misses_;
     s.evicted = evicted_;
+    s.waitUs = lookupWaitUs_;
+    s.walkedNodes = walkedNodes_;
+    s.stores = stores_;
+    s.evictScans = evictScans_;
+    s.evictScanUs = evictScanUs_;
+    s.evictScanNodes = evictScanNodes_;
     s.usesTotal = usesTotal_;
     s.usesMax = topUses_;
+    noteTop();   // materialise the mark's name — the hot path never copies it
     if (topValid_) {
         s.topName.assign(topName_);
         s.topQtype = topQtype_;

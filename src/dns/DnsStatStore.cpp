@@ -59,18 +59,27 @@ std::string DnsStatStore::encode(const DnsStatTotals& totals)
     out.reserve(kRecordSize);
     out.append(kMagic, sizeof(kMagic));
     putU32(out, kVersion);
-    putU32(out, 24);            // payload size: three 64-bit counters
+    putU32(out, 72);            // payload size: nine 64-bit counters
     putU32(out, 0);             // reserved — the next growth of the format
     putU64(out, totals.hits);
     putU64(out, totals.forwards);
     putU64(out, totals.hitUsSum);
+    // Stage 128: the sums behind the split of the average. They are written
+    // rather than the averages, for the same reason the average itself is not:
+    // only a total can be continued after a reboot.
+    putU64(out, totals.waitUs);
+    putU64(out, totals.walkedNodes);
+    putU64(out, totals.stores);
+    putU64(out, totals.evictScans);
+    putU64(out, totals.evictScanUs);
+    putU64(out, totals.evictScanNodes);
     putU32(out, checksumOf(out));
     return out;
 }
 
 bool DnsStatStore::decode(const std::string& record, DnsStatTotals& out, std::string* why)
 {
-    if (record.size() != kRecordSize) {
+    if (record.size() != kRecordSize && record.size() != kRecordSizeLegacy) {
         if (why) *why = "unexpected size";
         return false;
     }
@@ -86,13 +95,18 @@ bool DnsStatStore::decode(const std::string& record, DnsStatTotals& out, std::st
         if (why) *why = "unsupported version";
         return false;
     }
-    if (getU32(record, 8) != 24) {
+    // The payload size has to agree with the version *and* with the length of
+    // the record: that is what tells a version 1 file (three counters) from a
+    // version 2 one (nine), and a torn write from a plausible file.
+    const uint32_t wantPayload = (version == kVersionLegacy) ? 24u : 72u;
+    const uint32_t wantSize = 16u + wantPayload + 4u;
+    if (getU32(record, 8) != wantPayload || record.size() != wantSize) {
         if (why) *why = "payload size mismatch";
         return false;
     }
 
-    const uint32_t stored = getU32(record, kRecordSize - 4);
-    if (stored != checksumOf(record.substr(0, kRecordSize - 4))) {
+    const uint32_t stored = getU32(record, record.size() - 4);
+    if (stored != checksumOf(record.substr(0, record.size() - 4))) {
         if (why) *why = "checksum mismatch";
         return false;
     }
@@ -100,6 +114,14 @@ bool DnsStatStore::decode(const std::string& record, DnsStatTotals& out, std::st
     out.hits = getU64(record, 16);
     out.forwards = getU64(record, 24);
     out.hitUsSum = getU64(record, 32);
+    if (version >= 2) {
+        out.waitUs = getU64(record, 40);
+        out.walkedNodes = getU64(record, 48);
+        out.stores = getU64(record, 56);
+        out.evictScans = getU64(record, 64);
+        out.evictScanUs = getU64(record, 72);
+        out.evictScanNodes = getU64(record, 80);
+    }
     return true;
 }
 
@@ -177,11 +199,23 @@ bool DnsStatStore::load(const std::string& path, DnsStatTotals& out, std::string
         return false;
     }
 
+    // Read as much as any record can hold, then hand `decode()` exactly the
+    // length the header claims — a version 1 file is 44 bytes and must not be
+    // refused just because this build writes 92.
     char buffer[kRecordSize];
     const size_t got = std::fread(buffer, 1, sizeof(buffer), file);
     std::fclose(file);
-
-    return decode(std::string(buffer, got), out, why);
+    if (got < 16) {
+        if (why) *why = "unexpected size";
+        return false;
+    }
+    const uint32_t payload = getU32(std::string(buffer, 16), 8);
+    const size_t size = 16u + payload + 4u;
+    if (size > got) {
+        if (why) *why = "truncated file";
+        return false;
+    }
+    return decode(std::string(buffer, size), out, why);
 }
 
 bool DnsStatStore::remove(const std::string& path)

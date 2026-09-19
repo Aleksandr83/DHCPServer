@@ -375,6 +375,34 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                    static_cast<int64_t>(st.freeBytes), true);
         addJsonInt(json, "internal_cache_hits", icHits, true);
         addJsonInt(json, "internal_cache_avg_hit_us", avgUs, true);
+        // Stage 127: the split of that average. `avg_wait_us` is the time a
+        // lookup spent waiting for the arena mutex (somebody else's work),
+        // `avg_work_us` is what is left (ours), `walk_x100` is the average
+        // chain length x100 — the load factor the hash table really has — and
+        // the scan fields are the cost of the full-arena eviction, which runs
+        // on inserts and is paid for inside somebody else's measured hit.
+        uint64_t avgWaitUs = 0, avgWorkUs = 0, walkX100 = 0;
+        if (st.hits > 0) {
+            avgWaitUs = st.waitUs / st.hits;
+            avgWorkUs = (avgUs > static_cast<int64_t>(avgWaitUs))
+                            ? static_cast<uint64_t>(avgUs) - avgWaitUs
+                            : 0;
+            walkX100 = (st.walkedNodes * 100u) / st.hits;
+        }
+        addJsonInt(json, "internal_cache_avg_wait_us",
+                   static_cast<int64_t>(avgWaitUs), true);
+        addJsonInt(json, "internal_cache_avg_work_us",
+                   static_cast<int64_t>(avgWorkUs), true);
+        addJsonInt(json, "internal_cache_walk_x100",
+                   static_cast<int64_t>(walkX100), true);
+        addJsonInt(json, "internal_cache_stores",
+                   static_cast<int64_t>(st.stores), true);
+        addJsonInt(json, "internal_cache_evict_scans",
+                   static_cast<int64_t>(st.evictScans), true);
+        addJsonInt(json, "internal_cache_evict_scan_ms",
+                   static_cast<int64_t>(st.evictScanUs / 1000), true);
+        addJsonInt(json, "internal_cache_evict_scan_nodes",
+                   static_cast<int64_t>(st.evictScanNodes), true);
         // Usage frequency (stage 104): how often names were needed, and the
         // record that was needed most. The name is the high-water mark kept by
         // the cache — reading the live maximum would mean walking the whole
@@ -2313,7 +2341,7 @@ esp_err_t RestApi::handleGetInternalCacheFile(httpd_req* req)
 // State of the background statistics write: {busy, last_result}. The same shape
 // as the cache endpoint next to it, because the page reads them the same way —
 // `last_result` is a word (ok | skipped | failed, "" = nothing finished yet),
-// and there is no progress to report: 44 bytes have no percentage.
+// and there is no progress to report: 92 bytes have no percentage.
 
 esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
 {
