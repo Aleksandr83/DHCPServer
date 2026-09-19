@@ -23,6 +23,7 @@ constexpr size_t kTableCountBytes = 1;      // the count byte before the table
 
 // First-level encoding: every byte becomes two letters, high nibble first.
 constexpr int kNibbleShift = 4;
+constexpr uint8_t kNibbleMask = 0x0F;       // the low nibble, the second letter
 constexpr char kEncodingBase = 'A';         // nibble 0 is 'A', nibble 15 is 'P'
 constexpr uint8_t kWildcardNameByte = '*';  // the name every NetBIOS host answers
 
@@ -80,7 +81,7 @@ std::vector<uint8_t> NbstatProbe::buildQuery(uint16_t id)
     q.push_back(static_cast<uint8_t>(kNameBytes * 2));   // label length = 0x20
     for (size_t i = 0; i < kNameBytes; i++) {
         q.push_back(static_cast<uint8_t>(kEncodingBase + (raw[i] >> kNibbleShift)));
-        q.push_back(static_cast<uint8_t>(kEncodingBase + (raw[i] & 0x0F)));
+        q.push_back(static_cast<uint8_t>(kEncodingBase + (raw[i] & kNibbleMask)));
     }
     q.push_back(0x00);                                   // end of the name
 

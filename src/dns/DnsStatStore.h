@@ -118,6 +118,20 @@ public:
     static constexpr uint32_t kVersionLegacy = 1;
     static constexpr uint32_t kRecordSizeLegacy = 44;
 
+    /// Rule 39: the record layout used to live only in the table above.
+    static constexpr uint32_t kVersionOffset = 4;      // u32: format version
+    static constexpr uint32_t kPayloadSizeOffset = 8;  // u32: bytes of counters
+    static constexpr uint32_t kHeaderBytes = 16;       // version, size, reserved
+    static constexpr uint32_t kChecksumBytes = 4;      // trailing checksum
+    static constexpr uint32_t kPayloadV1Bytes = 24;    // three 64-bit counters
+    static constexpr uint32_t kPayloadV2Bytes = 72;    // nine 64-bit counters
+    static constexpr uint32_t kOffsetHits = 16;        // the counters, in order
+    static constexpr uint32_t kOffsetForwards = 24;
+    static constexpr uint32_t kOffsetHitUsSum = 32;
+    static constexpr uint32_t kOffsetWaitUs = 40;
+    static constexpr uint32_t kOffsetWalkedNodes = 48;
+    static constexpr uint32_t kOffsetStores = 56;
+
     /** @brief Serialise @p totals into exactly @ref kRecordSize bytes. */
     static std::string encode(const DnsStatTotals& totals);
 

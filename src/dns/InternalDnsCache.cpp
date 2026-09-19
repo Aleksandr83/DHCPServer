@@ -21,6 +21,26 @@ namespace {
 constexpr size_t kMaxNameLen = 127;      // chars (fits Node::name[128])
 constexpr size_t kMaxA    = 16;          // max IPv4 addresses per entry
 constexpr size_t kMaxAAAA = 8;           // max IPv6 addresses per entry
+
+// Rule 39: the rest of the numbers this module used to spell out.
+constexpr uint16_t kTypeA = 1;                 // QTYPE of an IPv4 answer
+constexpr uint16_t kTypeAaaa = 28;             // QTYPE of an IPv6 answer
+constexpr uint32_t kMinCacheSizeMb = 1;        // smallest arena the page accepts
+constexpr uint32_t kMaxCacheSizeMb = 20;       // fits cache.dat on the FAT volume
+constexpr size_t kBucketGranularityBytes = 4096;  // one bucket head per this much
+constexpr uint32_t kMinBuckets = 1024;         // fewer than this is pointless
+constexpr size_t kCacheFileHeaderBytes = 16;   // magic, version, count, reserved
+constexpr char kCacheFileMagic[] = "DCC1";
+constexpr size_t kCacheFileMagicBytes = 4;
+constexpr size_t kCacheFileVersionOffset = 4;
+constexpr size_t kCacheFileCountOffset = 8;
+constexpr size_t kCacheFileReservedOffset = 12;
+constexpr size_t kCacheFileTailBytes = 8;      // qtype, counts, remaining TTL
+constexpr uint32_t kMaxPlausibleEntries = 2000000;  // ~20 MB of records
+constexpr uint64_t kProgressEvery = 64;
+// Rule 39: FNV-1a, the same hash the DHCP names use — offset basis and prime.
+constexpr uint32_t kFnvOffsetBasis = 2166136261u;
+constexpr uint32_t kFnvPrime = 16777619u;        // report progress every N entries
 } // namespace
 
 // ─────────────────────────────────────────────────────
@@ -51,16 +71,16 @@ bool InternalDnsCache::enable(size_t sizeMb)
         unlock();
         return true;
     }
-    if (sizeMb < 1) sizeMb = 1;
-    if (sizeMb > 20) sizeMb = 20;  // cap 20 MB (fits cache.dat on the FAT partition)
+    if (sizeMb < kMinCacheSizeMb) sizeMb = kMinCacheSizeMb;
+    if (sizeMb > kMaxCacheSizeMb) sizeMb = kMaxCacheSizeMb;  // cap 20 MB (fits cache.dat on the FAT partition)
 
     const size_t nodeSize = sizeof(Node);
     const size_t arenaBytes = sizeMb * 1024 * 1024;
 
     // Bucket table ~ one 4-byte head per 4 KiB of arena (a small fraction),
     // the rest is the fixed node pool.
-    uint32_t numBuckets = static_cast<uint32_t>(arenaBytes / 4096);
-    if (numBuckets < 1024) numBuckets = 1024;
+    uint32_t numBuckets = static_cast<uint32_t>(arenaBytes / kBucketGranularityBytes);
+    if (numBuckets < kMinBuckets) numBuckets = kMinBuckets;
     const size_t bucketBytes = static_cast<size_t>(numBuckets) * sizeof(int32_t);
     if (bucketBytes >= arenaBytes) {
         ESP_LOGW(TAG, "Arena %u MB too small for the bucket table", (unsigned)sizeMb);
@@ -168,11 +188,11 @@ std::string InternalDnsCache::lower(const std::string& s)
 
 uint32_t InternalDnsCache::hashName(const char* s)
 {
-    uint32_t h = 2166136261u;
+    uint32_t h = kFnvOffsetBasis;
     for (const unsigned char* p = reinterpret_cast<const unsigned char*>(s);
          *p; ++p) {
         h ^= *p;
-        h *= 16777619u;
+        h *= kFnvPrime;
     }
     return h;
 }
@@ -287,7 +307,7 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
     if (!arena_) return;
     if (domain.empty() || ips.empty()) return;
     // Only A (IPv4) and AAAA (IPv6) answers are cached.
-    if (qtype != 1 && qtype != 28) return;
+    if (qtype != kTypeA && qtype != kTypeAaaa) return;
 
     const std::string lname = lower(domain);
     if (lname.size() >= kMaxNameLen) return;
@@ -691,11 +711,11 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
 
     // Header: magic "DCC1" | version u32 | entryCount u32 | reserved u32.
     // entryCount is patched at the end with the exact number actually written.
-    uint8_t hdr[16];
-    memcpy(hdr, "DCC1", 4);
-    putU32(hdr + 4, kFileVersion);
-    putU32(hdr + 8, 0);
-    putU32(hdr + 12, 0);
+    uint8_t hdr[kCacheFileHeaderBytes];
+    memcpy(hdr, kCacheFileMagic, kCacheFileMagicBytes);
+    putU32(hdr + kCacheFileVersionOffset, kFileVersion);
+    putU32(hdr + kCacheFileCountOffset, 0);
+    putU32(hdr + kCacheFileReservedOffset, 0);
     if (fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
         fclose(f);
         heap_caps_free(snap);
@@ -735,7 +755,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         if (fwrite(&nameLenU8, 1, 1, f) != 1) { ok = false; break; }
         if (fwrite(n.name, 1, nameLen, f) != nameLen) { ok = false; break; }
 
-        uint8_t tail[8];  // qtype(2) + nA(1) + nAAAA(1) + ttl(4)
+        uint8_t tail[kCacheFileTailBytes];  // qtype(2) + nA(1) + nAAAA(1) + ttl(4)
         tail[0] = static_cast<uint8_t>(n.qtype & 0xFF);
         tail[1] = static_cast<uint8_t>((n.qtype >> 8) & 0xFF);
         tail[2] = static_cast<uint8_t>(n.nA);
@@ -761,7 +781,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
 
         // Report progress periodically (every 64 records keeps the overhead
         // negligible for a 60k-node snapshot).
-        if (progress && (written % 64 == 0 || written == total)) {
+        if (progress && (written % kProgressEvery == 0 || written == total)) {
             progress(written, total, progressCtx);
         }
     }
@@ -797,19 +817,20 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
     FILE* f = fopen(path, "rb");
     if (!f) return false;
 
-    uint8_t hdr[16];
+    uint8_t hdr[kCacheFileHeaderBytes];
     if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
         fclose(f);
         return false;
     }
-    const uint32_t ver = (memcmp(hdr, "DCC1", 4) == 0) ? getU32(hdr + 4) : 0;
+    const uint32_t ver = (memcmp(hdr, kCacheFileMagic, kCacheFileMagicBytes) == 0)
+                              ? getU32(hdr + kCacheFileVersionOffset) : 0;
     if (ver < kFileVersionMin || ver > kFileVersion) {
         ESP_LOGW(TAG, "loadFromFile: %s has unsupported header", path);
         fclose(f);
         return false;
     }
-    const uint32_t want = getU32(hdr + 8);
-    if (want > 2000000) {  // sanity bound (~20 MB / min record)
+    const uint32_t want = getU32(hdr + kCacheFileCountOffset);
+    if (want > kMaxPlausibleEntries) {  // sanity bound (~20 MB / min record)
         ESP_LOGW(TAG, "loadFromFile: %s header count %u implausible", path,
                  (unsigned)want);
         fclose(f);
@@ -824,13 +845,13 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
         char name[128];
         if (fread(name, 1, nameLen, f) != nameLen) break;
         name[nameLen] = '\0';
-        uint8_t tail[8];
-        if (fread(tail, 1, 8, f) != 8) break;
+        uint8_t tail[kCacheFileTailBytes];
+        if (fread(tail, 1, kCacheFileTailBytes, f) != kCacheFileTailBytes) break;
         const uint16_t qtype = static_cast<uint16_t>(tail[0] | (tail[1] << 8));
         const uint8_t nA = tail[2];
         const uint8_t nAAAA = tail[3];
         const uint32_t ttlRem = getU32(tail + 4);
-        if (nA > 16 || nAAAA > 8) break;
+        if (nA > kMaxA || nAAAA > kMaxAAAA) break;
 
         // Versions 2 and 3 carry the usage counter, in 8 and 4 bytes
         // respectively; version 1 files simply have none, and their records
@@ -874,7 +895,7 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
         loaded++;
 
         // Report progress periodically.
-        if (progress && (loaded % 64 == 0 || loaded == want)) {
+        if (progress && (loaded % kProgressEvery == 0 || loaded == want)) {
             progress(static_cast<uint32_t>(loaded), want, progressCtx);
         }
     }
@@ -897,11 +918,11 @@ InternalDnsCache::FileInfo InternalDnsCache::fileInfo(const char* path) const
     const long sz = ftell(f);
     info.size = (sz > 0) ? static_cast<size_t>(sz) : 0;
     fseek(f, 0, SEEK_SET);
-    uint8_t hdr[16];
+    uint8_t hdr[kCacheFileHeaderBytes];
     if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
-        memcmp(hdr, "DCC1", 4) == 0) {
-        info.version = getU32(hdr + 4);
-        info.entries = getU32(hdr + 8);
+        memcmp(hdr, kCacheFileMagic, kCacheFileMagicBytes) == 0) {
+        info.version = getU32(hdr + kCacheFileVersionOffset);
+        info.entries = getU32(hdr + kCacheFileCountOffset);
     }
     fclose(f);
     return info;

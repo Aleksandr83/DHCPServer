@@ -33,6 +33,17 @@ public:
     static constexpr int kMinYear = 1970;
     static constexpr int kMaxYear = 2100;
 
+    /** @brief Calendar and clock bounds (a time is 00:00:00..23:59:59). */
+    static constexpr int kMonthsPerYear = 12;
+    static constexpr int kMaxHour   = 23;
+    static constexpr int kMaxMinute = 59;
+    static constexpr int kMaxSecond = 59;
+
+    /** @brief The scale a timestamp is counted in. */
+    static constexpr int64_t kSecondsPerMinute = 60;
+    static constexpr int64_t kSecondsPerHour   = 3600;
+    static constexpr int64_t kSecondsPerDay    = 86400;
+
     /** @brief Gregorian leap-year rule. */
     static bool isLeapYear(int year);
 

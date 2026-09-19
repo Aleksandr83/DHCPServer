@@ -16,11 +16,15 @@ namespace led {
  */
 class LedController : public ILedController {
 public:
+    /** @brief The GPIO the status LED of this board sits on (rule 39). */
+    static constexpr int kDefaultLedGpio = 26;
+
     /**
-     * @param gpioPin   GPIO pin number (default 26, or -1 to disable).
+     * @param gpioPin   GPIO pin number (default kDefaultLedGpio, or -1 to
+     *                  disable the LED entirely).
      * @param activeHigh true = GPIO high turns LED on (default).
      */
-    explicit LedController(int gpioPin = 26, bool activeHigh = true);
+    explicit LedController(int gpioPin = kDefaultLedGpio, bool activeHigh = true);
     ~LedController() override;
 
     void turnOn() override;

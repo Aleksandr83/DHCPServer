@@ -1,4 +1,5 @@
 #include "DnsLogger.h"
+#include "core/RestSenderLimits.h"
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +15,13 @@ static const char* TAG = "DnsLogger";
 // Capture the HTTP response body (first bytes) so a non-2xx reply (e.g.
 // Laravel's 400/422 JSON error) can be logged for diagnostics.
 namespace {
+
+// Rule 39: the record types this logger prints and the drop log period.
+constexpr uint16_t kTypeA = 1;
+constexpr uint16_t kTypeAaaa = 28;
+constexpr uint16_t kTypeMx = 15;
+constexpr uint16_t kTypeCname = 5;
+constexpr unsigned kDropLogEvery = 50;
 struct RestRespCapture {
     char buf[256] = {0};
     size_t len = 0;
@@ -138,10 +146,10 @@ void DnsLogger::logToTerminal(const std::string& domain, uint16_t type,
     const char* tag = (source == DnsLogSource::LOCAL) ? "local" :
                       (source == DnsLogSource::CACHE) ? "cache" : "forward";
 
-    const char* typeStr = (type == 1) ? "A" :
-                          (type == 28) ? "AAAA" :
-                          (type == 15) ? "MX" :
-                          (type == 5) ? "CNAME" : "OTHER";
+    const char* typeStr = (type == kTypeA) ? "A" :
+                          (type == kTypeAaaa) ? "AAAA" :
+                          (type == kTypeMx) ? "MX" :
+                          (type == kTypeCname) ? "CNAME" : "OTHER";
 
     if (resolved) {
         ESP_LOGI(TAG, "DNS: [%s] %s %s -> %s (from %s mac=%s)",
@@ -183,7 +191,7 @@ void DnsLogger::logToRest(const std::string& domain, uint16_t type,
         }
         ++restDropped_;
         // Log at WARN only occasionally so a flooded server doesn't spam.
-        if ((restDropped_ % 50) == 1) {
+        if ((restDropped_ % kDropLogEvery) == 1) {
             ESP_LOGW(TAG, "REST log queue full, oldest dropped (%u total)",
                      static_cast<unsigned>(restDropped_));
         }
@@ -228,13 +236,13 @@ void DnsLogger::stopRestSender()
     RestLogRecord marker;
     marker.stop = true;
     if (restQueue_) {
-        xQueueSendToBack(restQueue_, &marker, pdMS_TO_TICKS(10));
+        xQueueSendToBack(restQueue_, &marker, pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     // Wait for the sender to exit (an in-flight POST may take up to the
     // timeout). The queue is kept allocated to avoid a use-after-free.
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
     while (restTask_ != nullptr && xTaskGetTickCount() < deadline) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     restStopRequested_ = false;
 }
@@ -244,7 +252,7 @@ void DnsLogger::restSenderTask(void* arg)
     auto* self = static_cast<DnsLogger*>(arg);
     RestLogRecord rec;
     while (!self->restStopRequested_) {
-        if (xQueueReceive(self->restQueue_, &rec, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(self->restQueue_, &rec, pdMS_TO_TICKS(core::kQueueWaitMs)) == pdTRUE) {
             if (rec.stop) break;
             self->sendRestLog(rec);
         }
@@ -307,9 +315,9 @@ void DnsLogger::sendRestLog(const RestLogRecord& rec)
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = kRestSendTimeoutMs;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 1024;
+    cfg.timeout_ms = core::kSendTimeoutMs;
+    cfg.buffer_size = core::kHttpClientBufferBytes;
+    cfg.buffer_size_tx = core::kHttpClientBufferBytes;
     // Do NOT follow 3xx redirects automatically (redirect loops used to end
     // in ESP_ERR_HTTP_MAX_REDIRECT after 10 hops); the 3xx status is logged
     // below as a WARN together with the Location header.

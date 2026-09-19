@@ -1,4 +1,5 @@
 #ifndef DHCP_WEB_AUTHMANAGER_H
+#include "core/Config.h"
 #define DHCP_WEB_AUTHMANAGER_H
 
 #include <string>
@@ -57,8 +58,8 @@ private:
 
     std::string username_ = "admin";
     std::string password_ = "admin";
-    uint32_t maxAttempts_ = 5;
-    uint32_t lockoutPeriodSec_ = 300;
+    uint32_t maxAttempts_ = core::SecurityConfig::kDefaultMaxAttempts;
+    uint32_t lockoutPeriodSec_ = core::SecurityConfig::kDefaultLockoutSec;
 
     /** True after reloadConfig() successfully loaded from NVS */
     bool configLoaded_ = false;

@@ -65,21 +65,28 @@ public:
     void stopRestSender();
 
 private:
+    // Rule 39: the fixed-size fields of one DHCP event, in text.
+    static constexpr size_t kEventTextBytes = 16;
+    static constexpr size_t kMacTextBytes = 24;
+    static constexpr size_t kIpTextBytes = 16;
+    static constexpr size_t kMaskTextBytes = 16;
+    static constexpr size_t kGatewayTextBytes = 16;
+    static constexpr size_t kDnsTextBytes = 16;
+
     // Fixed-size queue item (no heap allocation in the DHCP task).
     struct Record {
-        char event[16] = {0};
-        char mac[24] = {0};
-        char ip[16] = {0};
-        char mask[16] = {0};
-        char gateway[16] = {0};
-        char dns[16] = {0};
+        char event[kEventTextBytes] = {0};
+        char mac[kMacTextBytes] = {0};
+        char ip[kIpTextBytes] = {0};
+        char mask[kMaskTextBytes] = {0};
+        char gateway[kGatewayTextBytes] = {0};
+        char dns[kDnsTextBytes] = {0};
         int32_t leaseTime = 0;
         bool stop = false;   // internal stop marker
     };
     static constexpr int kQueueDepth = 16;
     static constexpr int kSenderStack = 8192;
     static constexpr int kSenderPriority = 3;
-    static constexpr int kSendTimeoutMs = 5000;
 
     void updateSenderState();
     void ensureSender();

@@ -1,4 +1,5 @@
 #include "DhcpRestLogger.h"
+#include "core/RestSenderLimits.h"
 #include <cstdio>
 #include <cstring>
 
@@ -65,11 +66,11 @@ void DhcpRestLogger::stopRestSender()
     Record marker;
     marker.stop = true;
     if (queue_) {
-        xQueueSendToBack(queue_, &marker, pdMS_TO_TICKS(10));
+        xQueueSendToBack(queue_, &marker, pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
     while (task_ != nullptr && xTaskGetTickCount() < deadline) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     stopRequested_ = false;
 }
@@ -107,7 +108,7 @@ void DhcpRestLogger::senderTask(void* arg)
     auto* self = static_cast<DhcpRestLogger*>(arg);
     Record rec;
     while (!self->stopRequested_) {
-        if (xQueueReceive(self->queue_, &rec, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(self->queue_, &rec, pdMS_TO_TICKS(core::kQueueWaitMs)) == pdTRUE) {
             if (rec.stop) break;
             self->sendRecord(rec);
         }
@@ -125,9 +126,9 @@ void DhcpRestLogger::sendRecord(const Record& rec)
     esp_http_client_config_t cfg = {};
     cfg.url = url_.c_str();
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = kSendTimeoutMs;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 1024;
+    cfg.timeout_ms = core::kSendTimeoutMs;
+    cfg.buffer_size = core::kHttpClientBufferBytes;
+    cfg.buffer_size_tx = core::kHttpClientBufferBytes;
     // Do NOT follow 3xx redirects automatically (redirect loops used to end
     // in ESP_ERR_HTTP_MAX_REDIRECT); the 3xx status is logged as a WARN below.
     cfg.disable_auto_redirect = true;

@@ -126,20 +126,32 @@ void EthManager::init()
     // initializes fields out of declaration order (mdc_freq_hz before the
     // data-if/clk-loopback fields), which fails -Werror, so the same defaults
     // are spelled out here explicitly.
+    // Rule 39: the pins the RMII interface of this board uses. The SPI pins
+    // of the ENC28J60 have #defines of their own; these had nothing.
+    constexpr int kPinMdc = 31;        // management clock
+    constexpr int kPinMdio = 52;       // management data
+    constexpr int kPinRmiiClock = 50;  // 50 MHz reference clock from the PHY
+    constexpr int kPinRmiiTxEn = 49;
+    constexpr int kPinRmiiTxd0 = 34;
+    constexpr int kPinRmiiTxd1 = 35;
+    constexpr int kPinRmiiCrsDv = 28;
+    constexpr int kPinRmiiRxd0 = 29;
+    constexpr int kPinRmiiRxd1 = 30;
+
     {
         eth_esp32_emac_config_t emacCfg = {};
-        emacCfg.smi_gpio.mdc_num = 31;
-        emacCfg.smi_gpio.mdio_num = 52;
+        emacCfg.smi_gpio.mdc_num = kPinMdc;
+        emacCfg.smi_gpio.mdio_num = kPinMdio;
         emacCfg.interface = EMAC_DATA_INTERFACE_RMII;
         emacCfg.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
-        emacCfg.clock_config.rmii.clock_gpio = 50;
+        emacCfg.clock_config.rmii.clock_gpio = kPinRmiiClock;
         emacCfg.dma_burst_len = ETH_DMA_BURST_LEN_32;
-        emacCfg.emac_dataif_gpio.rmii.tx_en_num = 49;
-        emacCfg.emac_dataif_gpio.rmii.txd0_num = 34;
-        emacCfg.emac_dataif_gpio.rmii.txd1_num = 35;
-        emacCfg.emac_dataif_gpio.rmii.crs_dv_num = 28;
-        emacCfg.emac_dataif_gpio.rmii.rxd0_num = 29;
-        emacCfg.emac_dataif_gpio.rmii.rxd1_num = 30;
+        emacCfg.emac_dataif_gpio.rmii.tx_en_num = kPinRmiiTxEn;
+        emacCfg.emac_dataif_gpio.rmii.txd0_num = kPinRmiiTxd0;
+        emacCfg.emac_dataif_gpio.rmii.txd1_num = kPinRmiiTxd1;
+        emacCfg.emac_dataif_gpio.rmii.crs_dv_num = kPinRmiiCrsDv;
+        emacCfg.emac_dataif_gpio.rmii.rxd0_num = kPinRmiiRxd0;
+        emacCfg.emac_dataif_gpio.rmii.rxd1_num = kPinRmiiRxd1;
         emacCfg.clock_config_out_in.rmii.clock_mode = EMAC_CLK_EXT_IN;
         emacCfg.clock_config_out_in.rmii.clock_gpio = -1;
         emacCfg.mdc_freq_hz = 0;

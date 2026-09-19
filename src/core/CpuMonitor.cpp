@@ -28,6 +28,17 @@ static const char* TAG = "CpuMonitor";
 // were in regular flash, we'd get "Cache disabled but cached memory region
 // accessed" -> Guru Meditation -> reboot.
 namespace {
+
+// Rule 39: how often the load is sampled, the scale the percentages use, and
+// the size of the physical internal SRAM window reported as "RAM total".
+constexpr int kSamplePeriodMs = 1000;
+constexpr int kPercentScale = 100;
+constexpr int kPercentMin = 0;
+constexpr uint32_t kSramWindowKib = 768;
+
+// Rule 39: the sampler only reads counters and stores three numbers.
+constexpr uint32_t kSampleTaskStackBytes = 4096;
+
 volatile uint32_t s_idle0 = 0;  // idle hook calls on core 0
 volatile uint32_t s_idle1 = 0;  // idle hook calls on core 1
 volatile uint32_t s_ticks  = 0; // tick hook calls (core 0)
@@ -66,7 +77,7 @@ volatile uint32_t CpuMonitor::s_psramLargest = 0;
 void CpuMonitor::start()
 {
     // FreeRTOS hooks are compiled in; just start the sampling task.
-    xTaskCreatePinnedToCore(sampleTask, "cpu_mon", 4096, nullptr, 5,
+    xTaskCreatePinnedToCore(sampleTask, "cpu_mon", kSampleTaskStackBytes, nullptr, 5,
                             nullptr, tskNO_AFFINITY);
     ESP_LOGI(TAG, "CpuMonitor started");
 }
@@ -76,7 +87,7 @@ void CpuMonitor::sampleTask(void* arg)
     uint32_t lastTicks = 0, lastIdle0 = 0, lastIdle1 = 0;
 
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(kSamplePeriodMs));
 
         uint32_t ticks = s_ticks;
         uint32_t idle0 = s_idle0;
@@ -84,12 +95,12 @@ void CpuMonitor::sampleTask(void* arg)
 
         uint32_t dTicks = ticks - lastTicks;
         if (dTicks > 0) {
-            int load0 = 100 - (int)((idle0 - lastIdle0) * 100 / dTicks);
-            int load1 = 100 - (int)((idle1 - lastIdle1) * 100 / dTicks);
-            if (load0 < 0) load0 = 0;
-            if (load0 > 100) load0 = 100;
-            if (load1 < 0) load1 = 0;
-            if (load1 > 100) load1 = 100;
+            int load0 = kPercentScale - (int)((idle0 - lastIdle0) * kPercentScale / dTicks);
+            int load1 = kPercentScale - (int)((idle1 - lastIdle1) * kPercentScale / dTicks);
+            if (load0 < kPercentMin) load0 = kPercentMin;
+            if (load0 > kPercentScale) load0 = kPercentScale;
+            if (load1 < kPercentMin) load1 = kPercentMin;
+            if (load1 > kPercentScale) load1 = kPercentScale;
             s_load0 = load0;
             s_load1 = load1;
         }
@@ -111,7 +122,7 @@ void CpuMonitor::sampleTask(void* arg)
         // app statics, cache, retention, etc.). On other targets there is no
         // such window, so report the managed heap total instead.
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
-        s_ramTotal = 768U * 1024U;
+        s_ramTotal = kSramWindowKib * 1024U;
 #else
         s_ramTotal = s_totalHeap;
 #endif

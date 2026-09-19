@@ -1,5 +1,12 @@
 #include "JsonWriter.h"
 
+namespace {
+
+// Rule 39: the same control-character limit the file name rules use.
+constexpr unsigned char kAsciiPrintableMin = 0x20;
+
+} // namespace
+
 namespace dhcp {
 namespace web {
 
@@ -58,7 +65,7 @@ std::string JsonWriter::escape(const std::string& in)
             case '\t': out += "\\t";  break;
             default:
                 // Control characters would make the body invalid JSON.
-                if (static_cast<unsigned char>(c) < 0x20) break;
+                if (static_cast<unsigned char>(c) < kAsciiPrintableMin) break;
                 out += c;
         }
     }

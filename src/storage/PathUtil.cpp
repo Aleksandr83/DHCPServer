@@ -2,6 +2,14 @@
 
 #include <vector>
 
+namespace {
+
+// Rule 39: printable ASCII — del is a control character too.
+constexpr unsigned char kAsciiPrintableMin = 0x20;
+constexpr unsigned char kAsciiDel = 0x7F;
+
+} // namespace
+
 namespace dhcp {
 namespace storage {
 
@@ -65,7 +73,7 @@ bool PathUtil::isValidChar(char c)
 {
     const unsigned char u = static_cast<unsigned char>(c);
 
-    if (u < 0x20 || u == 0x7F) return false;   // control characters
+    if (u < kAsciiPrintableMin || u == kAsciiDel) return false;   // control characters
     if (c == '/' || c == '\\') return false;   // separators are handled outside
     switch (c) {
         case '"': case '*': case '<': case '>':

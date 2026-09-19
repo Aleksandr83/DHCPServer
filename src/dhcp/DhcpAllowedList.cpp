@@ -18,6 +18,14 @@ static std::string trim(const std::string& s)
     return s.substr(b, e - b);
 }
 
+// Rule 39: the FNV-1a hash of a client name — the standard offset basis and
+// the standard prime, one multiply and one xor per character.
+constexpr uint32_t kFnvOffsetBasis = 2166136261u;
+constexpr uint32_t kFnvPrime = 16777619u;
+
+// Rule 39: "xx:xx:xx:xx:xx:xx" plus the NUL, the room a MAC address needs.
+constexpr size_t kMacTextLen = 18;
+
 static int hexNibble(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -48,7 +56,7 @@ bool DhcpAllowedList::parseMac(const std::string& mac, uint8_t out[6])
 
 std::string DhcpAllowedList::formatMac(const uint8_t mac[6])
 {
-    char buf[18];
+    char buf[kMacTextLen];
     std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return std::string(buf);
@@ -145,10 +153,10 @@ size_t DhcpAllowedList::storageBytes()
 uint32_t DhcpAllowedList::hashMac(const uint8_t mac[6])
 {
     // FNV-1a over the 6 address bytes.
-    uint32_t h = 2166136261u;
+    uint32_t h = kFnvOffsetBasis;
     for (size_t i = 0; i < 6; i++) {
         h ^= mac[i];
-        h *= 16777619u;
+        h *= kFnvPrime;
     }
     return h;
 }

@@ -59,16 +59,18 @@ public:
 
 private:
     // ─── Async REST logging (fire-and-forget) ───────
+    // Rule 39: the client address is the only text in this record.
+    static constexpr size_t kClientTextBytes = 48;
+
     struct RestLogRecord {
         uint32_t ts = 0;          // uptime ms
         uint8_t  stratum = 0;
         bool     stop = false;    // internal: stop marker for the sender task
-        char client[48] = {0};
+        char client[kClientTextBytes] = {0};
     };
     static constexpr int kRestQueueDepth = 16;
     static constexpr int kRestSenderStack = 8192;  // sender task stack (TLS)
     static constexpr int kRestSenderPriority = 3;
-    static constexpr int kRestSendTimeoutMs = 5000;
 
     void updateRestSenderState();
     void ensureRestSender();

@@ -11,6 +11,26 @@ constexpr uint8_t kOptEnd   = 255;
 constexpr uint8_t kOptHostName = 12;   // RFC 2132
 constexpr uint8_t kOptFqdn     = 81;   // RFC 4702
 constexpr uint8_t kFqdnFlagE   = 0x04; // domain name is DNS-encoded
+
+// Rule 39: a UTF-8 continuation byte carries 10 in its top two bits — the same
+// 0xC0 a DNS label uses for its pointer, but a different meaning entirely, so
+// it gets a name of its own. The 0x7F bound is the printable-ASCII one.
+constexpr uint8_t kUtf8LeadMask = 0xC0;
+constexpr uint8_t kUtf8Continuation = 0x80;
+constexpr unsigned char kAsciiPrintableMin = 0x20;
+constexpr unsigned char kAsciiDel = 0x7F;
+
+// Rule 39: the lead byte says how long the sequence is, but not every value
+// that looks like a lead byte is one: 0xC0 and 0xC1 would encode a character in
+// more bytes than it needs, and 0xF5 and above go past U+10FFFF. These are the
+// ranges that UTF-8 itself allows, and being a character of two, three or four
+// bytes is what the three tests below decide on.
+constexpr unsigned char kUtf8Lead2Min = 0xC2;   // two bytes
+constexpr unsigned char kUtf8Lead2Max = 0xDF;
+constexpr unsigned char kUtf8Lead3Min = 0xE0;   // three bytes
+constexpr unsigned char kUtf8Lead3Max = 0xEF;
+constexpr unsigned char kUtf8Lead4Min = 0xF0;   // four bytes
+constexpr unsigned char kUtf8Lead4Max = 0xF4;
 } // namespace
 
 const uint8_t* DhcpClientName::findOption(const uint8_t* options, size_t len,
@@ -118,27 +138,29 @@ std::string DhcpClientName::sanitize(const std::string& name)
         // the settings export, where an invalid byte breaks the reader.
         size_t charLen = 1;
         bool keep = false;
-        if (c >= 0x20 && c < 0x7F) {
+        if (c >= kAsciiPrintableMin && c < kAsciiDel) {
             // '|' separates the fields of the allow-list blob and CR/LF separate
             // its lines: a name carrying one would corrupt what it is copied to.
             keep = (c != '|');
-        } else if (c >= 0xC2 && c <= 0xDF) {
+        } else if (c >= kUtf8Lead2Min && c <= kUtf8Lead2Max) {
             charLen = 2;
             keep = (i + 1 < name.size()) &&
-                   ((static_cast<unsigned char>(name[i + 1]) & 0xC0) == 0x80);
-        } else if (c >= 0xE0 && c <= 0xEF) {
+                   ((static_cast<unsigned char>(name[i + 1]) & kUtf8LeadMask) == kUtf8Continuation);
+        } else if (c >= kUtf8Lead3Min && c <= kUtf8Lead3Max) {
             charLen = 3;
             keep = (i + 2 < name.size()) &&
-                   ((static_cast<unsigned char>(name[i + 1]) & 0xC0) == 0x80) &&
-                   ((static_cast<unsigned char>(name[i + 2]) & 0xC0) == 0x80);
-        } else if (c >= 0xF0 && c <= 0xF4) {
+                   ((static_cast<unsigned char>(name[i + 1]) & kUtf8LeadMask) == kUtf8Continuation) &&
+                   ((static_cast<unsigned char>(name[i + 2]) & kUtf8LeadMask) == kUtf8Continuation);
+        } else if (c >= kUtf8Lead4Min && c <= kUtf8Lead4Max) {
             charLen = 4;
             keep = (i + 3 < name.size()) &&
-                   ((static_cast<unsigned char>(name[i + 1]) & 0xC0) == 0x80) &&
-                   ((static_cast<unsigned char>(name[i + 2]) & 0xC0) == 0x80) &&
-                   ((static_cast<unsigned char>(name[i + 3]) & 0xC0) == 0x80);
+                   ((static_cast<unsigned char>(name[i + 1]) & kUtf8LeadMask) == kUtf8Continuation) &&
+                   ((static_cast<unsigned char>(name[i + 2]) & kUtf8LeadMask) == kUtf8Continuation) &&
+                   ((static_cast<unsigned char>(name[i + 3]) & kUtf8LeadMask) == kUtf8Continuation);
         } else {
-            keep = false;   // control byte, stray continuation or 5-byte form
+            // Not ASCII, not one of the three UTF-8 lead ranges: a control
+            // byte, a stray continuation byte, or a form that does not exist.
+            keep = false;
         }
 
         if (keep) {

@@ -26,6 +26,10 @@ constexpr int kMaxFiles = 8;
 /** @brief Cluster size for a freshly formatted card (FAT32 friendly). */
 constexpr int kAllocUnit = 16 * 1024;
 
+// Rule 39: the pause after the card is powered. The SD specification asks for
+// about 1 ms; 20 ms is a comfortable margin on this hardware.
+constexpr uint32_t kPowerSettleMs = 20;
+
 /**
  * @brief Configured polarity of the slot power switch (`CONFIG_FILES_SD_PWR_ACTIVE_HIGH`).
  *
@@ -297,7 +301,7 @@ void SdFileSystem::applySlotPower(bool inverted)
     // costs nothing once per polarity change.
     gpio_set_level(pin, level);
     pwrLevel_ = level;
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(kPowerSettleMs));
     ESP_LOGI(TAG, "slot power GPIO %d driven %s", CONFIG_FILES_SD_PWR_GPIO,
              level ? "high" : "low");
 #else
@@ -328,7 +332,7 @@ bool SdFileSystem::powerCycle(uint32_t offMs)
     gpio_set_level(pin, onLevel);
     // The SD specification asks for ~1 ms after power-up; the same 20 ms margin
     // the mount path uses.
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(kPowerSettleMs));
     pwrLevel_ = onLevel;
 
     // The state of this object is deliberately left alone: the call that is stuck

@@ -33,6 +33,15 @@ const char* TAG = "FileManager";
 /** @brief Read window of the volume check (one FAT/SDMMC transfer per chunk). */
 constexpr size_t kCheckChunkBytes = 16 * 1024;
 
+// Rule 39: the check task only reads directory entries; the transfer task
+// copies with a 4 KB window on its stack, so it needs the larger one.
+constexpr uint32_t kCheckTaskStackBytes = 6144;
+constexpr uint32_t kTransferTaskStackBytes = 8192;
+
+// Rule 39: the mode a directory is created with (rwx for everyone, like the
+// rest of the data volume).
+constexpr mode_t kDirMode = 0777;
+
 /** @brief errno text for the `detail` out-parameter. */
 std::string errnoText()
 {
@@ -389,7 +398,7 @@ FileStatus FileManager::mkdir(const std::string& volumeId, const std::string& pa
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::AlreadyExists;   // the root always exists
 
-    if (::mkdir(full.c_str(), 0777) != 0) {
+    if (::mkdir(full.c_str(), kDirMode) != 0) {
         if (detail) *detail = errnoText();
         return (errno == EEXIST) ? FileStatus::AlreadyExists : FileStatus::IoError;
     }
@@ -750,7 +759,7 @@ FileStatus FileManager::checkStart(const std::string& volumeId, std::string* det
         return FileStatus::Busy;
     }
 
-    const BaseType_t res = xTaskCreate(checkTask, "file_check", 6144, this,
+    const BaseType_t res = xTaskCreate(checkTask, "file_check", kCheckTaskStackBytes, this,
                                        tskIDLE_PRIORITY + 1,
                                        reinterpret_cast<TaskHandle_t*>(&checkTask_));
     if (res != pdTRUE) {
@@ -1089,7 +1098,8 @@ FileStatus FileManager::transferStart(const TransferRequest& req, std::string* d
 
     // The engine copies with a 4 KB window on the stack, so the task needs room
     // for that plus the walk's bookkeeping (the same 8 KB the downloads use).
-    const BaseType_t res = xTaskCreate(transferTask, "file_transfer", 8192, this,
+    const BaseType_t res = xTaskCreate(transferTask, "file_transfer",
+                                       kTransferTaskStackBytes, this,
                                        tskIDLE_PRIORITY + 1,
                                        reinterpret_cast<TaskHandle_t*>(&transferTask_));
     if (res != pdTRUE) {

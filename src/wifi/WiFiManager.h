@@ -1,4 +1,5 @@
 #ifndef DHCP_WIFI_WIFIMANAGER_H
+#include "core/NetworkDefaults.h"
 #define DHCP_WIFI_WIFIMANAGER_H
 
 #include "IWiFiManager.h"
@@ -28,9 +29,9 @@ public:
      * @param netmask    Subnet mask (default "255.255.255.0")
      * @param ip6        Static IPv6 global/ULA address (default "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d")
      */
-    WiFiManager(const std::string& ip4 = "192.168.1.201",
-                const std::string& gateway = "192.168.1.1",
-                const std::string& netmask = "255.255.255.0",
+    WiFiManager(const std::string& ip4 = core::kDefaultServerIp,
+                const std::string& gateway = core::kDefaultGateway,
+                const std::string& netmask = core::kDefaultSubnetMask,
                 const std::string& ip6 = "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d");
 
     ~WiFiManager() override;

@@ -4,6 +4,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+// Rule 39: the mode a directory is created with (rwx for everyone, like the
+// rest of the data volume).
+constexpr mode_t kDirMode = 0777;
 namespace dhcp {
 namespace core {
 

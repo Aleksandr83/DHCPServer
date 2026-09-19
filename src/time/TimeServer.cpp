@@ -16,6 +16,22 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
+namespace {
+
+// Rule 39: the field bases of struct tm — the year counts from 1900, the month
+// from 0 — and the scale that turns a whole-hour offset into seconds.
+constexpr int kTmYearBase = 1900;
+constexpr int kTmMonthBase = 1;
+constexpr int64_t kSecondsPerHour = 3600;
+
+// Rule 39: the NTP task formats replies and touches no large buffer.
+constexpr uint32_t kServerTaskStackBytes = 4096;
+
+// Rule 39: "255.255.255.255" plus the NUL, the room a client address needs.
+constexpr size_t kIp4TextLen = 16;
+
+} // namespace
+
 static const char* TAG = "TimeServer";
 
 namespace dhcp {
@@ -54,7 +70,7 @@ bool TimeServer::start()
     applyAccessFilter();
 
     BaseType_t res = xTaskCreatePinnedToCore(
-        serverTask, "ntp_server", 4096, this,
+        serverTask, "ntp_server", kServerTaskStackBytes, this,
         configMAX_PRIORITIES - 3, &taskHandle_, 0);
     if (res != pdTRUE) {
         ESP_LOGE(TAG, "Failed to create NTP server task");
@@ -228,7 +244,7 @@ std::string TimeServer::nowUtcString() const
     gmtime_r(&secs, &tmv);
     char buf[80];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_year + kTmYearBase, tmv.tm_mon + kTmMonthBase, tmv.tm_mday,
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     return std::string(buf);
 }
@@ -237,12 +253,12 @@ std::string TimeServer::nowLocalString() const
 {
     struct timeval tv;
     if (gettimeofday(&tv, nullptr) != 0) return "";
-    time_t secs = tv.tv_sec + static_cast<time_t>(utcOffsetHours_) * 3600;
+    time_t secs = tv.tv_sec + static_cast<time_t>(utcOffsetHours_) * kSecondsPerHour;
     struct tm tmv;
     gmtime_r(&secs, &tmv);
     char buf[80];
     std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_year + kTmYearBase, tmv.tm_mon + kTmMonthBase, tmv.tm_mday,
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     return std::string(buf);
 }
@@ -362,7 +378,7 @@ void TimeServer::serverLoop()
             // Throttle the log: a flood must not flood the console as well.
             if (nowMs - lastDropLogMs_ >= 5000) {
                 lastDropLogMs_ = nowMs;
-                char clientIpStr[16];
+                char clientIpStr[kIp4TextLen];
                 inet_ntop(AF_INET, &from.sin_addr, clientIpStr, sizeof(clientIpStr));
                 ESP_LOGW(TAG, "NTP request from %s dropped (%s; totals: %u subnet, %u rate)",
                          clientIpStr, dropReason,
@@ -382,14 +398,15 @@ void TimeServer::serverLoop()
         NtpPacket resp;
         memset(&resp, 0, sizeof(resp));
         uint8_t vn = ntpVersion(req);
-        if (vn < 3) vn = 4;
-        resp.liVnMode = ntpMakeLiVnMode(unsynced ? 3 : 0, vn, kNtpModeServer);
-        resp.stratum = unsynced ? 16 : stratum_;
+        if (vn < kNtpVersionMin) vn = kNtpVersionFallback;
+        resp.liVnMode = ntpMakeLiVnMode(
+            unsynced ? kNtpLeapNotSynchronized : kNtpLeapNoWarning, vn, kNtpModeServer);
+        resp.stratum = unsynced ? kNtpStratumUnsynchronized : stratum_;
         resp.poll = req.poll;
-        resp.precision = -20;  // ~1 µs
-        resp.rootDelay = toBe32(0x00010000);       // 1 s (16.16)
-        resp.rootDispersion = toBe32(0x00010000);  // 1 s (16.16)
-        resp.refId = toBe32(0x4C4F434C);           // "LOCL"
+        resp.precision = kNtpPrecisionUs;
+        resp.rootDelay = toBe32(kNtpOneSecond16_16);       // 1 s (16.16)
+        resp.rootDispersion = toBe32(kNtpOneSecond16_16);  // 1 s (16.16)
+        resp.refId = toBe32(kNtpRefIdLocal);               // "LOCL"
 
         // Reference = moment of the last successful sync (or now if never).
         struct timeval now;
@@ -416,7 +433,7 @@ void TimeServer::serverLoop()
         sendto(socketFd_, &resp, sizeof(resp), 0,
                (struct sockaddr*)&from, fromLen);
 
-        char clientIp[16];
+        char clientIp[kIp4TextLen];
         inet_ntop(AF_INET, &from.sin_addr, clientIp, sizeof(clientIp));
         if (unsynced) {
             // Not counted/logged as a served request — the time was not

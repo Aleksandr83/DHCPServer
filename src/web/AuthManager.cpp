@@ -17,8 +17,8 @@ namespace web {
 AuthManager::AuthManager()
     : username_("admin")
     , password_("admin")
-    , maxAttempts_(5)
-    , lockoutPeriodSec_(300)
+    , maxAttempts_(core::SecurityConfig::kDefaultMaxAttempts)
+    , lockoutPeriodSec_(core::SecurityConfig::kDefaultLockoutSec)
 {
     /* Don't call reloadConfig() here — it needs Config which opens NVS,
        and we may be constructed during static init (before app_main).

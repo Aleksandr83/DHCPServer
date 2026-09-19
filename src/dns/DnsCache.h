@@ -128,10 +128,14 @@ public:
     /**
      * @brief A completed cache lookup result (echoed back to the caller).
      */
+    // Rule 39: the answer and the name both travel through these buffers.
+    static constexpr size_t kIpListBytes = 256;   // comma-separated addresses
+    static constexpr size_t kDomainBytes = 128;   // a DNS name, as text
+
     struct LookupResult {
         uint8_t token = 0;          // caller token (e.g. forward slot index)
         bool hit = false;           // cache returned a matching answer
-        char ips[256] = {0};        // comma-separated matching IPs if hit
+        char ips[kIpListBytes] = {0};        // comma-separated matching IPs if hit
     };
 
     /**
@@ -173,13 +177,12 @@ private:
     struct CacheStoreRecord {
         bool stop = false;    // internal: stop marker for the sender task
         uint16_t type = 0;    // DNS query type (1=A, 28=AAAA)
-        char domain[128] = {0};
-        char ips[256] = {0};  // comma-separated IP list (no spaces)
+        char domain[kDomainBytes] = {0};
+        char ips[kIpListBytes] = {0};  // comma-separated IP list (no spaces)
     };
     static constexpr int kStoreQueueDepth = 32;      // ring buffer capacity
     static constexpr int kStoreSenderStack = 8192;   // sender task stack (TLS)
     static constexpr int kStoreSenderPriority = 3;
-    static constexpr int kStoreSendTimeoutMs = 5000;
     // Per-lookup socket timeout. Must exceed the cache server's response
     // time (~0.9 s here) so lookups complete as 404 misses instead of
     // failing with ESP_ERR_HTTP_EAGAIN.
@@ -204,7 +207,7 @@ private:
     struct LookupRequest {
         uint8_t token = 0;
         uint16_t type = 0;
-        char domain[128] = {0};
+        char domain[kDomainBytes] = {0};
     };
     static constexpr int kLookupQueueDepth = 16;
     static constexpr int kLookupWorkerStack = 8192;   // TLS in the worker

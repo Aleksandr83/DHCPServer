@@ -20,6 +20,18 @@ const char* methodName(::dhcp::web::RouteMethod method)
 
 } // namespace
 
+namespace {
+
+// Rule 39: the numbers the httpd configuration used to spell out.
+constexpr size_t kHttpdStackBytes = 8192;    // the server task's stack (TLS)
+constexpr size_t kMaxOpenSockets = 16;       // connections served at once
+constexpr int kKeepAliveIdleSec = 5;         // idle keep-alive timeout
+constexpr int kKeepAliveIntervalSec = 5;     // ...and its probe interval
+constexpr int kLingerTimeoutSec = 1;         // how long a close may linger
+constexpr size_t kStaticFileChunkBytes = 512; // one chunk of a served file
+
+} // namespace
+
 namespace dhcp {
 namespace web {
 
@@ -67,22 +79,22 @@ bool WebServer::start()
     // bodies on the httpd task — the default 4096-byte stack overflows (panic:
     // LoadProhibited in the FreeRTOS scheduler, stack filled with 0xa5). Raise
     // the httpd task stack; there is plenty of free heap (~150 KB).
-    config.stack_size = 8192;
+    config.stack_size = kHttpdStackBytes;
     // Bigger socket pool: the web UI polls /api/status periodically, and with
     // the default pool of 7 (3 reserved for internal use -> only 4 clients)
     // connections pile up in TIME_WAIT and httpd stops accepting
     // ("httpd_accept_conn: error in accept (23)").
     // NOTE: httpd caps max_open_sockets at LWIP_MAX_SOCKETS - 3 (3 are used
     // internally). With LWIP_MAX_SOCKETS=24 the cap is 21; 16 leaves headroom.
-    config.max_open_sockets = 16;
+    config.max_open_sockets = kMaxOpenSockets;
     // Keep-alive: the browser reuses one connection for the polling instead
     // of opening a new TCP connection every poll.
     config.keep_alive_enable = true;
-    config.keep_alive_idle = 5;
-    config.keep_alive_interval = 5;
+    config.keep_alive_idle = kKeepAliveIdleSec;
+    config.keep_alive_interval = kKeepAliveIntervalSec;
     // Close sockets promptly (avoid TIME_WAIT backlog building up)
     config.enable_so_linger = true;
-    config.linger_timeout = 1;
+    config.linger_timeout = kLingerTimeoutSec;
     config.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&server_, &config);
@@ -326,7 +338,7 @@ esp_err_t WebServer::staticFileHandler(httpd_req* req)
     }
 
     // Read and send file in chunks
-    char buf[512];
+    char buf[kStaticFileChunkBytes];
     size_t readBytes;
     while ((readBytes = fread(buf, 1, sizeof(buf), f)) > 0) {
         if (httpd_resp_send_chunk(req, buf, readBytes) != ESP_OK) {

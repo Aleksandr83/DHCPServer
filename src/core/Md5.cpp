@@ -13,6 +13,17 @@ namespace dhcp::core {
 namespace {
 
 // Per-round left-rotation amounts and the sine-derived constants, as in RFC 1321.
+// Rule 39: the byte that starts the padding of the final block (a lone 1
+// bit followed by zeros), and the mask that takes one hexadecimal digit out of
+// a byte — the low nibble is a different value here, not a DNS RCODE.
+constexpr uint8_t kPaddingByte = 0x80;
+constexpr uint8_t kNibbleMask = 0x0F;
+
+// Rule 39: one byte out of a 32-bit word, and how wide a byte is — the two
+// helpers below read and write a word in little-endian byte order.
+constexpr uint32_t kByteMask = 0xFF;
+constexpr uint32_t kByteBits = 8;
+
 constexpr uint32_t kShift[64] = {
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
     5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
@@ -43,16 +54,18 @@ inline uint32_t rotl(uint32_t x, uint32_t n) { return (x << n) | (x >> (32 - n))
 
 inline uint32_t getU32(const uint8_t* p)
 {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << kByteBits) |
+           (static_cast<uint32_t>(p[2]) << (2 * kByteBits)) |
+           (static_cast<uint32_t>(p[3]) << (3 * kByteBits));
 }
 
 inline void putU32le(uint8_t* p, uint32_t v)
 {
-    p[0] = static_cast<uint8_t>(v & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    p[0] = static_cast<uint8_t>(v & kByteMask);
+    p[1] = static_cast<uint8_t>((v >> kByteBits) & kByteMask);
+    p[2] = static_cast<uint8_t>((v >> (2 * kByteBits)) & kByteMask);
+    p[3] = static_cast<uint8_t>((v >> (3 * kByteBits)) & kByteMask);
 }
 
 }  // namespace
@@ -143,13 +156,15 @@ std::string Md5::hex()
     const uint64_t bits = tail.bitCount_;
     uint8_t pad[72];
     memset(pad, 0, sizeof(pad));
-    pad[0] = 0x80;
-    // 0x80, then zeros until 8 bytes are left in the block, then the length.
+    pad[0] = kPaddingByte;
+    // The padding byte, then zeros until 8 bytes are left in the block, then
+    // the length.
     const size_t padLen = (tail.buffered_ <= 55) ? (56 - tail.buffered_)
                                                  : (120 - tail.buffered_);
     tail.update(pad, padLen);
     uint8_t lenBytes[8];
-    for (int i = 0; i < 8; i++) lenBytes[i] = static_cast<uint8_t>((bits >> (8 * i)) & 0xFF);
+    for (int i = 0; i < 8; i++)
+        lenBytes[i] = static_cast<uint8_t>((bits >> (kByteBits * i)) & kByteMask);
     tail.update(lenBytes, 8);
 
     uint8_t out[16];
@@ -160,7 +175,7 @@ std::string Md5::hex()
     s.reserve(32);
     for (int i = 0; i < 16; i++) {
         s.push_back(kHexDigits[out[i] >> 4]);
-        s.push_back(kHexDigits[out[i] & 0x0F]);
+        s.push_back(kHexDigits[out[i] & kNibbleMask]);
     }
     return s;
 }

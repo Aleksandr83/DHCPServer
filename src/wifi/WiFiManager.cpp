@@ -12,7 +12,7 @@
 static const char* TAG = "WiFiManager";
 
 // Default external DNS server
-#define DEFAULT_DNS_SERVER "192.168.1.1"
+#define DEFAULT_DNS_SERVER core::kDefaultExternalDns
 
 namespace dhcp {
 namespace wifi {

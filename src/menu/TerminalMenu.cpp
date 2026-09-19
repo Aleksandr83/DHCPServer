@@ -158,8 +158,8 @@ void TerminalMenu::cmdPasswdReset()
     dhcp::core::SecurityConfig sec;
     sec.username = "admin";
     sec.password = "admin";
-    sec.maxAttempts = 5;
-    sec.lockoutPeriodSec = 300;
+    sec.maxAttempts = core::SecurityConfig::kDefaultMaxAttempts;
+    sec.lockoutPeriodSec = core::SecurityConfig::kDefaultLockoutSec;
     dhcp::core::Config::instance().setSecurity(sec);
 
     // Apply immediately in the running web server

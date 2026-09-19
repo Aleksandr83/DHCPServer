@@ -38,7 +38,11 @@ public:
     static constexpr uint8_t kMaskRcode = 0x0F;      // low nibble of flags 2
 
     // ─── Name and record layout ──────────────────────────
-    static constexpr uint8_t kMaskLabelType = 0xC0;  // top two bits of a length byte
+    // Rule 39: 0xC0 means two different things right here — as a mask it selects
+// the top two bits of a length byte (11 says "this is a pointer"), as a value
+// it is that pointer marker. They stay two names on purpose, and neither of
+// them is the UTF-8 lead mask the DHCP name filter uses.
+static constexpr uint8_t kMaskLabelType = 0xC0;  // top two bits of a length byte
     static constexpr uint8_t kLabelPointer = 0xC0;   // 11: the rest is an offset
     static constexpr uint8_t kMaskPointerOffset = 0x3F;  // low 14 bits of a pointer
     static constexpr size_t kMaxLabelBytes = 63;     // RFC 1035: 2^6 - 1

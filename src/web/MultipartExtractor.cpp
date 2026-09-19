@@ -2,6 +2,13 @@
 
 #include <utility>
 
+namespace {
+
+/// Rule 39: the length of the CRLF CRLF that ends the part headers.
+constexpr size_t kHeaderTerminatorBytes = 4;
+
+} // namespace
+
 namespace dhcp {
 namespace web {
 
@@ -35,7 +42,7 @@ bool MultipartExtractor::feed(const uint8_t* data, size_t len)
         }
 
         dataStarted_ = true;
-        const std::string payload = headerAcc_.substr(end + 4);
+        const std::string payload = headerAcc_.substr(end + kHeaderTerminatorBytes);
         headerAcc_.clear();
 
         if (!payload.empty()) {

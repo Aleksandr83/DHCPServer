@@ -1,4 +1,5 @@
 #include "RestApi.h"
+#include "core/NetworkDefaults.h"
 #include "AuthManager.h"
 #include "FileJson.h"
 #include "JsonWriter.h"
@@ -39,6 +40,61 @@
 #include "lwip/sockets.h"
 
 static const char* TAG = "RestApi";
+
+namespace {
+
+// Rule 39: the numbers this file used to spell out.
+// Rule 39: the time scale the time module owns (an offset is whole hours, a
+// sync interval is counted in days) and the limits RFC 4330 and the API put
+// on both.
+constexpr int64_t kMaxSyncIntervalSec = 7 * ::dhcp::time::TimeMath::kSecondsPerDay;
+constexpr int64_t kMinSyncIntervalSec = 15;  // RFC 4330 minimum
+constexpr int kMinUtcOffsetHours = -12;
+constexpr int kMaxUtcOffsetHours = 14;
+constexpr int kSocketRetryLimit = 20;        // send() retries on a socket timeout
+
+// Rule 39: the connection test talks TLS on its stack; cutting the card's
+// power is two calls and a log line.
+constexpr uint32_t kTestConnTaskStackBytes = 8192;
+constexpr uint32_t kPowerCutTaskStackBytes = 3072;
+
+// Rule 39: what an IPv4 address and a MAC address look like in text.
+constexpr size_t kIp4TextLen = 16;   // "255.255.255.255" plus the NUL
+constexpr size_t kMacTextLen = 18;   // "xx:xx:xx:xx:xx:xx" plus the NUL
+constexpr size_t kRelayChunkBytes = 1024;    // one chunk of a relayed body
+constexpr int kRestartStepDelayMs = 700;     // between the steps of a restart
+constexpr int kRestartPollMs = 500;          // polling for the device to come back
+constexpr int kConnectionTestWaitMs = 7000;  // waiting for "test connection"
+constexpr size_t kMaxRelPathLen = 64;        // a path inside the data volume
+constexpr size_t kMaxUint64Digits = 20;      // decimal digits of a uint64_t
+
+// ASCII and hex вЂ” the same limits JsonWriter and PathUtil apply to a file name.
+constexpr uint8_t kHexNibbleMask = 0x0F;
+constexpr unsigned char kAsciiPrintableMin = 0x20;
+constexpr unsigned char kAsciiDel = 0x7F;
+constexpr unsigned char kAsciiHighBound = 0x80;
+
+// UTF-8, spelled out once instead of per branch.
+constexpr unsigned kUtf8Shift6 = 6;
+constexpr unsigned kUtf8Shift12 = 12;
+constexpr unsigned kUtf8Shift18 = 18;
+constexpr uint32_t kUtf8TwoByteLimit = 0x800;    // below this: one byte
+constexpr uint32_t kUtf8ThreeByteLimit = 0x10000; // below this: three bytes
+constexpr uint32_t kUtf8Lead2 = 0xC0;
+constexpr uint32_t kUtf8Lead3 = 0xE0;
+constexpr uint32_t kUtf8Lead4 = 0xF0;
+constexpr uint32_t kUtf8Continuation = 0x80;
+constexpr uint32_t kUtf8PayloadMask = 0x3F;
+
+// UTF-16 surrogate pairs, as they arrive in a JSON escape.
+constexpr uint32_t kSurrogateHighMin = 0xD800;
+constexpr uint32_t kSurrogateHighMax = 0xDBFF;
+constexpr uint32_t kSurrogateLowMin = 0xDC00;
+constexpr uint32_t kSurrogateLowMax = 0xDFFF;
+constexpr uint32_t kSurrogateBase = 0x10000;
+constexpr unsigned kSurrogateShift = 10;
+
+} // namespace
 
 namespace dhcp {
 namespace web {
@@ -200,7 +256,7 @@ std::string RestApi::readBody(httpd_req* req, size_t maxLen)
         const size_t want = totalLen - offset;
         int ret = httpd_req_recv(req, &body[offset], want);
         if (ret < 0) {
-            if (ret == HTTPD_SOCK_ERR_TIMEOUT && offset > 0 && retries++ < 20) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT && offset > 0 && retries++ < kSocketRetryLimit) {
                 continue;
             }
             break;
@@ -536,27 +592,27 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     ::dhcp::core::DhcpConfig cfg;
     cfg.enabled = jsonGetBool(body, "enabled", false);
     cfg.startIp = jsonGetStr(body, "start_ip");
-    if (cfg.startIp.empty()) cfg.startIp = "192.168.1.100";
+    if (cfg.startIp.empty()) cfg.startIp = core::kDefaultPoolStart;
     cfg.endIp = jsonGetStr(body, "end_ip");
-    if (cfg.endIp.empty()) cfg.endIp = "192.168.1.200";
+    if (cfg.endIp.empty()) cfg.endIp = core::kDefaultPoolEnd;
     cfg.subnet = jsonGetStr(body, "subnet");
-    if (cfg.subnet.empty()) cfg.subnet = "255.255.255.0";
+    if (cfg.subnet.empty()) cfg.subnet = core::kDefaultSubnetMask;
     cfg.gateway = jsonGetStr(body, "gateway");
-    if (cfg.gateway.empty()) cfg.gateway = "192.168.1.1";
+    if (cfg.gateway.empty()) cfg.gateway = core::kDefaultGateway;
     cfg.serverIp = jsonGetStr(body, "server_ip");
-    if (cfg.serverIp.empty()) cfg.serverIp = "192.168.1.201";
+    if (cfg.serverIp.empty()) cfg.serverIp = core::kDefaultServerIp;
     cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
     cfg.logRest = jsonGetBool(body, "log_rest", false);
     cfg.logUrl = jsonGetStr(body, "log_url");
     cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
     cfg.logAuthUser = jsonGetStr(body, "log_auth_user");
     cfg.logAuthPassword = jsonGetStr(body, "log_auth_password");
-    cfg.leaseTimeSec = jsonGetInt(body, "lease_time", 86400);
+    cfg.leaseTimeSec = jsonGetInt(body, "lease_time", static_cast<int>(core::kDefaultLeaseSec));
     {
         int64_t maxEntries = jsonGetInt(body, "max_lease_entries", 0);
         if (maxEntries != 0) {       // 0 = auto (2x pool size)
-            if (maxEntries < 8) maxEntries = 8;
-            if (maxEntries > 512) maxEntries = 512;
+            if (maxEntries < core::kMinLeaseEntries) maxEntries = core::kMinLeaseEntries;
+            if (maxEntries > core::kMaxLeaseEntries) maxEntries = core::kMaxLeaseEntries;
         }
         cfg.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
     }
@@ -861,7 +917,7 @@ esp_err_t RestApi::handlePostLookupClientName(httpd_req* req)
     ::dhcp::dhcp::IDhcpServer::ClientNameResult found;
     if (s_dhcp) found = s_dhcp->lookupClientName(mac);
 
-    char foundIp[16] = "";
+    char foundIp[kIp4TextLen] = "";
     if (found.ipNet != 0) inet_ntop(AF_INET, &found.ipNet, foundIp, sizeof(foundIp));
 
     std::string json = "{";
@@ -897,13 +953,13 @@ esp_err_t RestApi::handleGetLeases(httpd_req* req)
         auto leases = dhcpFull->getLeases();
         for (size_t i = 0; i < leases.size(); i++) {
             if (i > 0) json += ",";
-            char macStr[18];
+            char macStr[kMacTextLen];
             std::snprintf(macStr, sizeof(macStr),
                           "%02x:%02x:%02x:%02x:%02x:%02x",
                           leases[i].mac[0], leases[i].mac[1],
                           leases[i].mac[2], leases[i].mac[3],
                           leases[i].mac[4], leases[i].mac[5]);
-            char ipStr[16];
+            char ipStr[kIp4TextLen];
             inet_ntop(AF_INET, &leases[i].ip, ipStr, sizeof(ipStr));
             // hostname is what the client reported about itself in its request
             // (option 12/81); it is untrusted text, so it goes through the same
@@ -989,7 +1045,7 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     ::dhcp::core::DnsConfig cfg;
     cfg.enabled = jsonGetBool(body, "enabled", true);
     cfg.externalDns = jsonGetStr(body, "external_dns");
-    if (cfg.externalDns.empty()) cfg.externalDns = "192.168.1.1";
+    if (cfg.externalDns.empty()) cfg.externalDns = core::kDefaultExternalDns;
     cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
     cfg.logForwarded = jsonGetBool(body, "log_forwarded", true);
     cfg.logLocal = jsonGetBool(body, "log_local", true);
@@ -1509,8 +1565,8 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                         seg, "max_lease_entries",
                         static_cast<int64_t>(cur.maxLeaseEntries));
                     if (maxEntries != 0) {   // 0 = auto (2x pool size)
-                        if (maxEntries < 8) maxEntries = 8;
-                        if (maxEntries > 512) maxEntries = 512;
+                        if (maxEntries < core::kMinLeaseEntries) maxEntries = core::kMinLeaseEntries;
+                        if (maxEntries > core::kMaxLeaseEntries) maxEntries = core::kMaxLeaseEntries;
                     }
                     cur.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
                 }
@@ -1658,12 +1714,12 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.timezone = v;
                 cur.utcOffsetHours =
                     jsonGetInt(seg, "utc_offset_hours", cur.utcOffsetHours);
-                if (cur.utcOffsetHours < -12) cur.utcOffsetHours = -12;
-                if (cur.utcOffsetHours > 14) cur.utcOffsetHours = 14;
+                if (cur.utcOffsetHours < kMinUtcOffsetHours) cur.utcOffsetHours = kMinUtcOffsetHours;
+                if (cur.utcOffsetHours > kMaxUtcOffsetHours) cur.utcOffsetHours = kMaxUtcOffsetHours;
                 int64_t syncSec = jsonGetInt(seg, "sync_interval_sec",
                                              static_cast<int64_t>(cur.syncIntervalSec));
-                if (syncSec < 15) syncSec = 15;
-                if (syncSec > 7 * 86400) syncSec = 7 * 86400;
+                if (syncSec < kMinSyncIntervalSec) syncSec = kMinSyncIntervalSec;
+                if (syncSec > kMaxSyncIntervalSec) syncSec = kMaxSyncIntervalSec;
                 cur.syncIntervalSec = static_cast<uint32_t>(syncSec);
                 cur.allowOwnSubnet =
                     jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
@@ -1866,7 +1922,7 @@ esp_err_t RestApi::handlePostSettingsReset(httpd_req* req)
         "{\"status\":\"ok\",\"message\":\"Settings reset to factory defaults. Rebooting...\",\"reboot\":true}");
 
     // Give the response time to be sent before reboot
-    vTaskDelay(pdMS_TO_TICKS(700));
+    vTaskDelay(pdMS_TO_TICKS(kRestartStepDelayMs));
     esp_restart();
     return ESP_OK;
 }
@@ -1906,7 +1962,7 @@ esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
     }
 
     // Give the response time to be sent before reboot
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(kRestartPollMs));
     esp_restart();
     return ESP_OK;
 }
@@ -2109,7 +2165,7 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
     });
 
     // ── Stream the body ────────────────────────────────
-    char buf[1024];
+    char buf[kRelayChunkBytes];
     uint32_t remaining = static_cast<uint32_t>(req->content_len);
     int retries = 0;
     bool badBody = false;
@@ -2119,7 +2175,7 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
                                                         : (uint32_t)sizeof(buf);
         const int got = httpd_req_recv(req, buf, want);
         if (got < 0) {
-            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < kSocketRetryLimit) continue;
             badBody = true;
             break;
         }
@@ -2208,7 +2264,7 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
     }
 
     // Give the response (and the log) time to get out before the reboot.
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(kRestartPollMs));
     esp_restart();
     return ESP_OK;
 }
@@ -2294,7 +2350,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
     };
-    bool valid = !relPath.empty() && relPath.size() <= 64 && relPath[0] != '/';
+    bool valid = !relPath.empty() && relPath.size() <= kMaxRelPathLen && relPath[0] != '/';
     if (valid) {
         size_t segStart = 0;
         while (segStart <= relPath.size()) {
@@ -2338,7 +2394,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
     // Stream the raw body to the file. Reuse the bounded timeout-retry pattern
     // from readBody(): httpd_req_recv can return HTTPD_SOCK_ERR_TIMEOUT between
     // TCP segments of a multi-chunk body.
-    char buf[1024];
+    char buf[kRelayChunkBytes];
     size_t remaining = req->content_len;
     size_t written = 0;
     int retries = 0;
@@ -2347,7 +2403,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
         size_t want = remaining < sizeof(buf) ? remaining : sizeof(buf);
         int got = httpd_req_recv(req, buf, want);
         if (got < 0) {
-            if (got == HTTPD_SOCK_ERR_TIMEOUT && written > 0 && retries++ < 20) {
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && written > 0 && retries++ < kSocketRetryLimit) {
                 continue;
             }
             ok = false;
@@ -2557,7 +2613,8 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
 
     // Dedicated task with a stack large enough for TLS (8192, like the REST
     // senders). 7 s wait covers the 5 s client timeout plus scheduling slack.
-    BaseType_t created = xTaskCreate(&testConnectionTask, "tst_conn", 8192,
+    BaseType_t created = xTaskCreate(&testConnectionTask, "tst_conn",
+                                      kTestConnTaskStackBytes,
                                      &ctx, 5, nullptr);
     if (created != pdPASS) {
         vSemaphoreDelete(ctx.done);
@@ -2565,7 +2622,7 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
         httpd_resp_sendstr(req, "{\"ok\":false,\"http\":0,\"elapsed_ms\":0,\"error\":\"task create failed\"}");
         return ESP_OK;
     }
-    xSemaphoreTake(ctx.done, pdMS_TO_TICKS(7000));
+    xSemaphoreTake(ctx.done, pdMS_TO_TICKS(kConnectionTestWaitMs));
     vSemaphoreDelete(ctx.done);
 
     // ok only when the round-trip succeeded AND the server did not reject
@@ -2898,11 +2955,11 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
         cfg.timezone = clean;
     }
     cfg.utcOffsetHours = jsonGetInt(body, "utc_offset_hours", 3);
-    if (cfg.utcOffsetHours < -12) cfg.utcOffsetHours = -12;
-    if (cfg.utcOffsetHours > 14) cfg.utcOffsetHours = 14;
-    int64_t syncSec = jsonGetInt(body, "sync_interval_sec", 86400);
-    if (syncSec < 15) syncSec = 15;              // RFC 4330 minimum
-    if (syncSec > 7 * 86400) syncSec = 7 * 86400;
+    if (cfg.utcOffsetHours < kMinUtcOffsetHours) cfg.utcOffsetHours = kMinUtcOffsetHours;
+    if (cfg.utcOffsetHours > kMaxUtcOffsetHours) cfg.utcOffsetHours = kMaxUtcOffsetHours;
+    int64_t syncSec = jsonGetInt(body, "sync_interval_sec", ::dhcp::time::TimeMath::kSecondsPerDay);
+    if (syncSec < kMinSyncIntervalSec) syncSec = kMinSyncIntervalSec;              // RFC 4330 minimum
+    if (syncSec > kMaxSyncIntervalSec) syncSec = kMaxSyncIntervalSec;
     cfg.syncIntervalSec = static_cast<uint32_t>(syncSec);
     cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
     {
@@ -3031,7 +3088,8 @@ esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
 
     // Local → UTC (the offset is positive east of Greenwich).
     const int64_t localSec = static_cast<int64_t>(::dhcp::time::TimeMath::toUnixSec(dt));
-    const int64_t utcSec = localSec - static_cast<int64_t>(offsetHours) * 3600;
+    const int64_t utcSec = localSec -
+        static_cast<int64_t>(offsetHours) * ::dhcp::time::TimeMath::kSecondsPerHour;
     if (utcSec <= 0) {
         return sendError("400 Bad Request",
                          "datetime out of range (before 1970-01-01 UTC)");
@@ -3558,7 +3616,7 @@ void powerCutTask(void* arg)
 void startPowerCut(::dhcp::files::IFileManager* files, const std::string& volume)
 {
     auto* work = new PowerCutWork{files, volume};
-    if (xTaskCreate(powerCutTask, "sd_power_cut", 3072, work,
+    if (xTaskCreate(powerCutTask, "sd_power_cut", kPowerCutTaskStackBytes, work,
                     tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
         delete work;
         ESP_LOGW(TAG, "cannot start the card power cut task");
@@ -3851,7 +3909,7 @@ std::string rfc5987Encode(const std::string& in)
         } else {
             out += '%';
             out += kHex[c >> 4];
-            out += kHex[c & 0x0F];
+            out += kHex[c & kHexNibbleMask];
         }
     }
     return out;
@@ -3864,8 +3922,8 @@ std::string asciiName(const std::string& in)
     out.reserve(in.size());
     for (char c : in) {
         const unsigned char u = static_cast<unsigned char>(c);
-        if (u < 0x20 || u == 0x7F) continue;       // never in a header value
-        out += (u < 0x80) ? c : '_';
+        if (u < kAsciiPrintableMin || u == kAsciiDel) continue;       // never in a header value
+        out += (u < kAsciiHighBound) ? c : '_';
     }
     if (out.empty()) out = "download";
     return out;
@@ -3910,7 +3968,7 @@ void downloadTask(void* arg)
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
 
     TransferWindow window;
-    uint8_t stackBuf[1024];
+    uint8_t stackBuf[kRelayChunkBytes];
     uint8_t* buf = window.data();
     size_t bufSize = window.size();
     if (buf == nullptr) {
@@ -4008,7 +4066,7 @@ static bool queryParamU64(httpd_req* req, const char* key, uint64_t& out)
 {
     std::string raw;
     if (!queryParam(req, key, raw)) return false;
-    if (raw.empty() || raw.size() > 20) return false;
+    if (raw.empty() || raw.size() > kMaxUint64Digits) return false;
 
     uint64_t value = 0;
     for (char c : raw) {
@@ -4156,7 +4214,7 @@ void uploadTask(void* arg)
     uint64_t reported = 0;
 
     TransferWindow window;
-    uint8_t stackBuf[1024];
+    uint8_t stackBuf[kRelayChunkBytes];
     uint8_t* buf = window.data();
     size_t bufSize = window.size();
     if (buf == nullptr) {
@@ -4175,7 +4233,7 @@ void uploadTask(void* arg)
             (remaining < bufSize) ? remaining : bufSize);
         const int got = httpd_req_recv(req, reinterpret_cast<char*>(buf), want);
         if (got < 0) {
-            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < 20) continue;
+            if (got == HTTPD_SOCK_ERR_TIMEOUT && retries++ < kSocketRetryLimit) continue;
             ok = false;
             break;
         }
@@ -4589,20 +4647,20 @@ bool jsonDecodeStr(const std::string& json, const std::string& key, std::string&
 
     /** @brief Append one code point as UTF-8. */
     auto appendUtf8 = [&out](uint32_t cp) {
-        if (cp < 0x80) {
+        if (cp < kAsciiHighBound) {
             out += static_cast<char>(cp);
-        } else if (cp < 0x800) {
-            out += static_cast<char>(0xC0 | (cp >> 6));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            out += static_cast<char>(0xE0 | (cp >> 12));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < kUtf8TwoByteLimit) {
+            out += static_cast<char>(kUtf8Lead2 | (cp >> kUtf8Shift6));
+            out += static_cast<char>(kUtf8Continuation | (cp & kUtf8PayloadMask));
+        } else if (cp < kUtf8ThreeByteLimit) {
+            out += static_cast<char>(kUtf8Lead3 | (cp >> kUtf8Shift12));
+            out += static_cast<char>(kUtf8Continuation | ((cp >> kUtf8Shift6) & kUtf8PayloadMask));
+            out += static_cast<char>(kUtf8Continuation | (cp & kUtf8PayloadMask));
         } else {
-            out += static_cast<char>(0xF0 | (cp >> 18));
-            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (cp & 0x3F));
+            out += static_cast<char>(kUtf8Lead4 | (cp >> kUtf8Shift18));
+            out += static_cast<char>(kUtf8Continuation | ((cp >> kUtf8Shift12) & kUtf8PayloadMask));
+            out += static_cast<char>(kUtf8Continuation | ((cp >> kUtf8Shift6) & kUtf8PayloadMask));
+            out += static_cast<char>(kUtf8Continuation | (cp & kUtf8PayloadMask));
         }
     };
 
@@ -4641,7 +4699,7 @@ bool jsonDecodeStr(const std::string& json, const std::string& key, std::string&
                 pos += 4;
 
                 // Surrogate pair → one code point above the BMP.
-                if (cp >= 0xD800 && cp <= 0xDBFF && pos + 6 <= json.size() &&
+                if (cp >= kSurrogateHighMin && cp <= kSurrogateHighMax && pos + 6 <= json.size() &&
                     json[pos] == '\\' && json[pos + 1] == 'u') {
                     uint32_t lo = 0;
                     bool ok = true;
@@ -4653,8 +4711,9 @@ bool jsonDecodeStr(const std::string& json, const std::string& key, std::string&
                         if (v < 0) { ok = false; break; }
                         lo = (lo << 4) | static_cast<uint32_t>(v);
                     }
-                    if (ok && lo >= 0xDC00 && lo <= 0xDFFF) {
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    if (ok && lo >= kSurrogateLowMin && lo <= kSurrogateLowMax) {
+                        cp = kSurrogateBase + ((cp - kSurrogateHighMin) << kSurrogateShift) +
+             (lo - kSurrogateLowMin);
                         pos += 6;
                     }
                 }
@@ -4682,7 +4741,7 @@ bool looksLikeText(const std::string& data)
     size_t suspicious = 0;
     for (unsigned char c : data) {
         if (c == '\t' || c == '\n' || c == '\r') continue;
-        if (c >= 0x20 && c != 0x7F) continue;   // printable ASCII or UTF-8 byte
+        if (c >= kAsciiPrintableMin && c != kAsciiDel) continue;   // printable ASCII or UTF-8 byte
         ++suspicious;
     }
     return suspicious * 100 <= data.size() * kBinaryRatioPercent;

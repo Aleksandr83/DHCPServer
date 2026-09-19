@@ -1,4 +1,5 @@
 #include "DnsCache.h"
+#include "core/RestSenderLimits.h"
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -26,6 +27,16 @@ namespace dns {
 // cJSON is not part of ESP-IDF 6, so parse it with a small self-contained
 // parser instead of pulling in a managed component.
 namespace {
+
+// Rule 39: the numbers this module used to spell out.
+constexpr size_t kRespCaptureBytes = 512;      // response body kept for logging
+constexpr size_t kRedirectLocationBytes = 256; // Location header of a redirect
+constexpr int kHttpOk = 200;                   // the only status that is a hit
+constexpr int kHttpRedirectMin = 300;          // 3xx starts here,
+constexpr int kHttpRedirectLimit = 400;        // and ends here (exclusive)
+constexpr int kHttpNotFound = 404;             // "no such record" — a normal miss
+constexpr uint8_t kQueueStopToken = 0xFF;      // wake the worker to stop it
+constexpr unsigned kDropLogEvery = 50;         // log every Nth dropped record
 bool parseLookupIps(const std::string& body, std::vector<std::string>& ips)
 {
     const std::string needle = "\"ips\"";
@@ -53,9 +64,9 @@ bool parseLookupIps(const std::string& body, std::vector<std::string>& ips)
 }
 
 struct CacheRespCapture {
-    char buf[512] = {0};
+    char buf[kRespCaptureBytes] = {0};
     size_t len = 0;
-    char location[256] = {0};
+    char location[kRedirectLocationBytes] = {0};
 };
 
 esp_err_t cacheRespHandler(esp_http_client_event_t* evt)
@@ -208,11 +219,11 @@ bool DnsCache::doLookupAndParse(const std::string& domain, uint16_t type,
     std::string body;
     const int status = doLookup(url, body);
     if (status == 0) return false;              // transport failure (already WARN)
-    if (status == 404) {                        // not found / expired — normal miss
+    if (status == kHttpNotFound) {                        // not found / expired — normal miss
         if (terminalLogging_) ESP_LOGI(TAG, "Cache miss: %s type=%u (404)", d.c_str(), type);
         return false;
     }
-    if (status != 200) {
+    if (status != kHttpOk) {
         ESP_LOGW(TAG, "Cache lookup HTTP %d: domain=%s (miss)", status, d.c_str());
         return false;
     }
@@ -377,13 +388,13 @@ void DnsCache::stopLookupWorker()
     lookupStopRequested_ = true;
     // Wake the worker if it is blocked on the queue.
     LookupRequest wake;
-    wake.token = 0xFF;
+    wake.token = kQueueStopToken;
     if (lookupQueue_) {
-        xQueueSendToBack(lookupQueue_, &wake, pdMS_TO_TICKS(10));
+        xQueueSendToBack(lookupQueue_, &wake, pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
     while (lookupTask_ != nullptr && xTaskGetTickCount() < deadline) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     lookupStopRequested_ = false;
 }
@@ -399,10 +410,10 @@ void DnsCache::lookupWorkerLoop()
 {
     LookupRequest req;
     while (!lookupStopRequested_) {
-        if (xQueueReceive(lookupQueue_, &req, pdMS_TO_TICKS(500)) != pdTRUE) {
+        if (xQueueReceive(lookupQueue_, &req, pdMS_TO_TICKS(core::kQueueWaitMs)) != pdTRUE) {
             continue;
         }
-        if (req.token == 0xFF) break;  // stop marker
+        if (req.token == kQueueStopToken) break;  // stop marker
 
         if (terminalLogging_) ESP_LOGI(TAG, "Cache lookup WORKER: domain=%s type=%u token=%u",
                                        req.domain, req.type, req.token);
@@ -459,8 +470,8 @@ int DnsCache::doLookup(const std::string& url, std::string& respBody)
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_GET;
     cfg.timeout_ms = kLookupTimeoutMs;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 1024;
+    cfg.buffer_size = core::kHttpClientBufferBytes;
+    cfg.buffer_size_tx = core::kHttpClientBufferBytes;
     // Do NOT follow 3xx redirects automatically: a redirect loop (e.g. a
     // server bouncing to /login) used to burn 10 requests (~2.4 s each) and
     // end in ESP_ERR_HTTP_MAX_REDIRECT. With auto-redirect off the 3xx status
@@ -510,7 +521,7 @@ int DnsCache::doLookup(const std::string& url, std::string& respBody)
     } else {
         status = esp_http_client_get_status_code(client);
         respBody.assign(respCap.buf, respCap.len);
-        if (status >= 300 && status < 400) {
+        if (status >= kHttpRedirectMin && status < kHttpRedirectLimit) {
             // Redirect to /login (or a loop) — surface it loudly.
             ESP_LOGW(TAG, "Cache lookup HTTP %d (redirect): url=%s location=%s (%lld ms)",
                      status, url.c_str(),
@@ -570,7 +581,7 @@ void DnsCache::store(const std::string& domain, uint16_t type,
             xQueueSendToBack(storeQueue_, &rec, 0);
         }
         ++storeDropped_;
-        if ((storeDropped_ % 50) == 1) {
+        if ((storeDropped_ % kDropLogEvery) == 1) {
             ESP_LOGW(TAG, "Cache store queue full, oldest dropped (%u total)",
                      static_cast<unsigned>(storeDropped_));
         }
@@ -614,13 +625,13 @@ void DnsCache::stopCacheSender()
     CacheStoreRecord marker;
     marker.stop = true;
     if (storeQueue_) {
-        xQueueSendToBack(storeQueue_, &marker, pdMS_TO_TICKS(10));
+        xQueueSendToBack(storeQueue_, &marker, pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     // Wait for the sender to exit (an in-flight POST may take up to the
     // timeout). The queue is kept allocated to avoid a use-after-free.
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
     while (storeTask_ != nullptr && xTaskGetTickCount() < deadline) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     storeStopRequested_ = false;
 }
@@ -630,7 +641,7 @@ void DnsCache::cacheSenderTask(void* arg)
     auto* self = static_cast<DnsCache*>(arg);
     CacheStoreRecord rec;
     while (!self->storeStopRequested_) {
-        if (xQueueReceive(self->storeQueue_, &rec, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(self->storeQueue_, &rec, pdMS_TO_TICKS(core::kQueueWaitMs)) == pdTRUE) {
             if (rec.stop) break;
             self->sendStore(rec);
         }
@@ -654,9 +665,9 @@ void DnsCache::sendStore(const CacheStoreRecord& rec)
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_PUT;
-    cfg.timeout_ms = kStoreSendTimeoutMs;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 1024;
+    cfg.timeout_ms = core::kSendTimeoutMs;
+    cfg.buffer_size = core::kHttpClientBufferBytes;
+    cfg.buffer_size_tx = core::kHttpClientBufferBytes;
     // See doLookup: never chase 3xx redirect loops automatically.
     cfg.disable_auto_redirect = true;
     if (authEnabled_ && !authUser_.empty()) {
@@ -695,7 +706,7 @@ void DnsCache::sendStore(const CacheStoreRecord& rec)
                  static_cast<long long>(elapsedMs));
     } else {
         const int status = esp_http_client_get_status_code(client);
-        if (status >= 200 && status < 300) {
+        if (status >= kHttpOk && status < kHttpRedirectMin) {
         if (terminalLogging_) {
             ESP_LOGI(TAG, "Cache store OK: domain=%s type=%u status=%d body=\"%s\" (%lld ms)",
                      rec.domain, rec.type, status, respCap.buf,

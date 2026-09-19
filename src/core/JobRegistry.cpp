@@ -23,11 +23,14 @@ const char* jobStateText(JobState state)
     return "unknown";
 }
 
+// Rule 39: job progress is reported as a percentage.
+constexpr int kPercentScale = 100;
+
 int JobInfo::percent() const
 {
     if (total == 0) return -1;
-    if (done >= total) return 100;
-    return static_cast<int>((static_cast<uint64_t>(done) * 100) / total);
+    if (done >= total) return kPercentScale;
+    return static_cast<int>((static_cast<uint64_t>(done) * kPercentScale) / total);
 }
 
 JobRegistry& JobRegistry::instance()

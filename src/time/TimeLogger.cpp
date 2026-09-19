@@ -1,4 +1,5 @@
 #include "TimeLogger.h"
+#include "core/RestSenderLimits.h"
 
 #include <cstdio>
 #include <cstring>
@@ -122,11 +123,11 @@ void TimeLogger::stopRestSender()
     RestLogRecord marker;
     marker.stop = true;
     if (restQueue_) {
-        xQueueSendToBack(restQueue_, &marker, pdMS_TO_TICKS(10));
+        xQueueSendToBack(restQueue_, &marker, pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
     while (restTask_ != nullptr && xTaskGetTickCount() < deadline) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
     }
     restStopRequested_ = false;
 }
@@ -136,7 +137,7 @@ void TimeLogger::restSenderTask(void* arg)
     auto* self = static_cast<TimeLogger*>(arg);
     RestLogRecord rec;
     while (!self->restStopRequested_) {
-        if (xQueueReceive(self->restQueue_, &rec, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (xQueueReceive(self->restQueue_, &rec, pdMS_TO_TICKS(core::kQueueWaitMs)) == pdTRUE) {
             if (rec.stop) break;
             self->sendRestLog(rec);
         }
@@ -155,9 +156,9 @@ void TimeLogger::sendRestLog(const RestLogRecord& rec)
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
     cfg.method = HTTP_METHOD_POST;
-    cfg.timeout_ms = kRestSendTimeoutMs;
-    cfg.buffer_size = 1024;
-    cfg.buffer_size_tx = 1024;
+    cfg.timeout_ms = core::kSendTimeoutMs;
+    cfg.buffer_size = core::kHttpClientBufferBytes;
+    cfg.buffer_size_tx = core::kHttpClientBufferBytes;
     // Do NOT follow 3xx redirects automatically (avoids redirect loops).
     cfg.disable_auto_redirect = true;
     if (logAuthEnabled_ && !logAuthUser_.empty()) {

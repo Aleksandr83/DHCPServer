@@ -10,6 +10,28 @@ const CONFIG = {
     AUTH: null, // set after login
 };
 
+/* ─── Numbers the interface works with (rule 39) ────── */
+
+// How often the status page refreshes. The 500 ms of the restart flow is a
+// different timer and lives with the code that uses it.
+const kStatusPollMs = 5000;
+const kPercentScale = 100;
+const kBytesPerKib = 1024;
+const kBytesPerMib = 1024 * 1024;
+const kSmallValueRatio = 0.01;   // below this many MB a value is shown in KB
+const kUsPerMs = 1000;
+
+// The modal input is shared by every prompt of the interface. The firmware
+// truncates a client name at 32 bytes (DhcpClientName::kMaxLen) and stores 20
+// in the allow-list, so a longer text typed here is cut by the device — the
+// limit is kept at 128 on purpose, decided on 19.09.2026, not overlooked.
+const kNameInputMaxLen = 128;
+
+// Used only when the device reports no memory total at all. The firmware does
+// report one (768 KiB of internal SRAM on the P4, CpuMonitor::kSramWindowKib);
+// this older, smaller figure is kept as it is on purpose, same decision.
+const kFallbackRamTotalBytes = 320 * 1024;
+
 /* ─── Session Auth ──────────────────────────────────── */
 
 // Restore auth from session storage
@@ -237,7 +259,8 @@ function uiDialog() {
         '<div class="modal-card" role="dialog" aria-modal="true">' +
         '<h3 id="ui-modal-title"></h3>' +
         '<p class="hint" id="ui-modal-hint" style="display:none;"></p>' +
-        '<input type="text" id="ui-modal-input" style="display:none;" maxlength="128">' +
+        '<input type="text" id="ui-modal-input" style="display:none;" maxlength="' +
+        kNameInputMaxLen + '">' +
         '<div class="modal-actions">' +
         '<button class="btn" id="ui-modal-cancel"></button>' +
         '<button class="btn" id="ui-modal-extra" style="display:none;"></button>' +
@@ -372,7 +395,7 @@ async function prepareRestartFlow(onStep, action) {
 
             const done = p ? (p.done || 0) : 0;
             const total = p ? (p.total || 0) : 0;
-            const pct = total > 0 ? Math.round(done * 100 / total) : null;
+            const pct = total > 0 ? Math.round(done * kPercentScale / total) : null;
             step(tr('restart.cache_saving') +
                  (pct === null ? '' : ' ' + pct + '%') +
                  (total > 0 ? ' (' + done + ' / ' + total + ')' : ''));
@@ -688,14 +711,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         poll();
         // Auto-refresh every 5 s — live bars like Task Manager.
-        setInterval(poll, 5000);
+        setInterval(poll, kStatusPollMs);
     }
 });
 
 function setMeter(id, pct) {
     const bar = document.getElementById(id);
     if (!bar) return;
-    const v = Math.max(0, Math.min(100, Math.round(pct)));
+    const v = Math.max(0, Math.min(kPercentScale, Math.round(pct)));
     bar.style.width = v + '%';
 }
 
@@ -704,12 +727,12 @@ function setMeter(id, pct) {
    single helper covers both RAM and storage rows. */
 function formatBytes(bytes) {
     const b = Number(bytes) || 0;
-    if (b < 1024) return b + ' B';
-    const kb = b / 1024;
-    if (kb < 1024) return kb.toFixed(0) + ' KB';
-    const mb = kb / 1024;
-    if (mb < 1024) return mb.toFixed(mb < 10 ? 1 : 0) + ' MB';
-    return (mb / 1024).toFixed(2) + ' GB';
+    if (b < kBytesPerKib) return b + ' B';
+    const kb = b / kBytesPerKib;
+    if (kb < kBytesPerKib) return kb.toFixed(0) + ' KB';
+    const mb = kb / kBytesPerKib;
+    if (mb < kBytesPerKib) return mb.toFixed(mb < 10 ? 1 : 0) + ' MB';
+    return (mb / kBytesPerKib).toFixed(2) + ' GB';
 }
 
 /* Device time for DISPLAY: the API/browser fields use the ISO-ish wire format
@@ -756,9 +779,13 @@ async function updateStatus() {
         const uptimeEl = document.getElementById('uptime');
         if (uptimeEl && data.uptime_sec != null) {
             const sec = Math.max(0, Math.floor(Number(data.uptime_sec) || 0));
-            const days = Math.floor(sec / 86400);
-            const hours = Math.floor(sec / 3600);
-            const mins = Math.floor(sec / 60);
+            // Rule 39: the scale the uptime is broken down into.
+            const SEC_PER_DAY = 86400;
+            const SEC_PER_HOUR = 3600;
+            const SEC_PER_MIN = 60;
+            const days = Math.floor(sec / SEC_PER_DAY);
+            const hours = Math.floor(sec / SEC_PER_HOUR);
+            const mins = Math.floor(sec / SEC_PER_MIN);
             const value = days >= 1 ? days + ' ' + tr('app.uptime_days')
                         : hours >= 1 ? hours + ' ' + tr('app.uptime_hours')
                         : mins >= 1 ? mins + ' ' + tr('app.uptime_min')
@@ -797,14 +824,15 @@ async function updateStatus() {
         // 768 KB on ESP32-P4); free comes from the managed heap, so the fill
         // bar reflects true chip utilisation (used = total - free heap).
         const ramTotal = data.ram_total != null ? data.ram_total
-            : (data.heap_total != null ? data.heap_total : 320 * 1024);
+            : (data.heap_total != null ? data.heap_total : kFallbackRamTotalBytes);
         const ramFree = data.heap_free != null ? data.heap_free : 0;
         const ramTotalEl = document.getElementById('ram-total');
         if (ramTotalEl) ramTotalEl.textContent = formatBytes(ramTotal);
         const freeRamEl = document.getElementById('free-ram');
         if (freeRamEl) freeRamEl.textContent = formatBytes(ramFree) + ' ' + tr('app.free_short');
         if (document.getElementById('ram-bar')) {
-            setMeter('ram-bar', ramTotal > 0 ? (1 - ramFree / ramTotal) * 100 : 0);
+            setMeter('ram-bar',
+                     ramTotal > 0 ? (1 - ramFree / ramTotal) * kPercentScale : 0);
         }
         const psramEl = document.getElementById('psram-meter');
         if (psramEl) {
@@ -817,7 +845,7 @@ async function updateStatus() {
                 const freePsramEl = document.getElementById('free-psram');
                 if (freePsramEl) freePsramEl.textContent = formatBytes(psramFree) + ' ' + tr('app.free_short');
                 if (document.getElementById('psram-bar')) {
-                    setMeter('psram-bar', (1 - psramFree / psramTotal) * 100);
+                    setMeter('psram-bar', (1 - psramFree / psramTotal) * kPercentScale);
                 }
             } else {
                 psramEl.style.display = 'none';
@@ -864,7 +892,8 @@ async function updateStatus() {
                     freeEl.textContent = mounted
                         ? formatBytes(vol.free_bytes) + ' ' + tr('app.free_short') : '';
                 }
-                setMeter(barId, mounted ? (1 - vol.free_bytes / vol.total_bytes) * 100 : 0);
+                setMeter(barId,
+                         mounted ? (1 - vol.free_bytes / vol.total_bytes) * kPercentScale : 0);
             };
 
             renderVolume(fat, 'fat-label', 'fat-bar', 'fat-total', 'fat-free');
@@ -897,7 +926,7 @@ async function updateStatus() {
                 icRow.style.display = 'none';
             } else {
                 icRow.style.display = '';
-                const MB = 1048576;
+                const MB = kBytesPerMib;
                 const used = data.internal_cache_used_bytes != null ? data.internal_cache_used_bytes : 0;
                 const free = data.internal_cache_free_bytes != null ? data.internal_cache_free_bytes : 0;
                 const entries = data.internal_cache_entries != null ? data.internal_cache_entries : 0;
@@ -907,18 +936,21 @@ async function updateStatus() {
                 const avgUs = data.internal_cache_avg_hit_us != null ? data.internal_cache_avg_hit_us : 0;
                 const mbFmt = (bytes) => {
                     const m = bytes / MB;
-                    if (m > 0 && m < 0.01) return (bytes / 1024).toFixed(0) + ' KB';
+                    if (m > 0 && m < kSmallValueRatio) {
+                        return (bytes / kBytesPerKib).toFixed(0) + ' KB';
+                    }
                     return m.toFixed(2) + ' MB';
                 };
                 const usFmt = (us) => {
-                    if (us < 1000) return us + 'µs';
-                    return (us / 1000).toFixed(1) + 'ms';
+                    if (us < kUsPerMs) return us + 'µs';
+                    return (us / kUsPerMs).toFixed(1) + 'ms';
                 };
                 const usedEl = document.getElementById('internal-cache-used');
                 if (usedEl) usedEl.textContent = mbFmt(used);
                 const freeEl = document.getElementById('internal-cache-free');
                 if (freeEl) freeEl.textContent = mbFmt(free) + ' free';
-                const pct = (used + free) > 0 ? (used / (used + free)) * 100 : 0;
+                const pct = (used + free) > 0
+                    ? (used / (used + free)) * kPercentScale : 0;
                 setMeter('internal-cache-bar', pct);
                 const statsEl = document.getElementById('internal-cache-stats');
                 const diagEl = document.getElementById('internal-cache-diag');

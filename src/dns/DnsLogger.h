@@ -137,21 +137,26 @@ private:
     // the oldest record is overwritten. A dedicated sender task drains the
     // buffer and POSTs each record with a timeout, so a slow REST server
     // never blocks the DNS task.
+    // Rule 39: the record the page sees is built from these buffers.
+    static constexpr size_t kDomainBytes = 128;
+    static constexpr size_t kClientTextBytes = 48;
+    static constexpr size_t kMacTextBytes = 32;
+    static constexpr size_t kAnswerTextBytes = 64;
+
     struct RestLogRecord {
         uint32_t ts = 0;      // uptime ms (diagnostics)
         uint16_t type = 0;    // DNS query type (1=A, 28=AAAA)
         bool resolved = false;
         bool stop = false;    // internal: stop marker for the sender task
         uint8_t source = 0;   // 0=local, 1=cache, 2=forwarded
-        char domain[128] = {0};
-        char client[48] = {0};
-        char mac[32] = {0};   // client MAC ("xx:xx:xx:xx:xx:xx", empty if unknown)
-        char answer[64] = {0};
+        char domain[kDomainBytes] = {0};
+        char client[kClientTextBytes] = {0};
+        char mac[kMacTextBytes] = {0};   // client MAC ("xx:xx:xx:xx:xx:xx", empty if unknown)
+        char answer[kAnswerTextBytes] = {0};
     };
     static constexpr int kRestQueueDepth = 48;     // ring buffer capacity
     static constexpr int kRestSenderStack = 8192;  // sender task stack (TLS)
     static constexpr int kRestSenderPriority = 3;
-    static constexpr int kRestSendTimeoutMs = 5000;
 
     void updateRestSenderState();
     void ensureRestSender();

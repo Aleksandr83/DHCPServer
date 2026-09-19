@@ -1,4 +1,5 @@
 #ifndef DHCP_CORE_CONFIG_H
+#include "core/NetworkDefaults.h"
 #define DHCP_CORE_CONFIG_H
 
 #include <string>
@@ -21,12 +22,12 @@ struct WifiConfig {
  */
 struct DhcpConfig {
     bool enabled = false;
-    std::string serverIp = "192.168.1.201";
-    std::string startIp = "192.168.1.100";
-    std::string endIp = "192.168.1.200";
-    std::string subnet = "255.255.255.0";
-    std::string gateway = "192.168.1.1";
-    uint32_t leaseTimeSec = 86400; // 24h
+    std::string serverIp = core::kDefaultServerIp;
+    std::string startIp = core::kDefaultPoolStart;
+    std::string endIp = core::kDefaultPoolEnd;
+    std::string subnet = core::kDefaultSubnetMask;
+    std::string gateway = core::kDefaultGateway;
+    uint32_t leaseTimeSec = core::kDefaultLeaseSec; // 24h
     // Hard cap on the lease/offer table (DoS hardening: a DHCP starvation
     // flood with random MACs must not grow it without bound). 0 = auto
     // (2× the pool size, clamped 8..512); otherwise clamped to 8..512.
@@ -70,7 +71,7 @@ struct StaticBinding {
  */
 struct DnsConfig {
     bool enabled = true;            // master switch for the built-in DNS server
-    std::string externalDns = "192.168.1.1";
+    std::string externalDns = core::kDefaultExternalDns;
     bool logTerminal = false;
     // Terminal-logging category filters (only relevant when logTerminal is on)
     bool logForwarded = true;       // queries resolved via external DNS
@@ -139,8 +140,11 @@ struct LocalHostEntry {
 struct SecurityConfig {
     std::string username = "admin";
     std::string password = "admin";
-    uint32_t maxAttempts = 5;
-    uint32_t lockoutPeriodSec = 300; // 5 min
+    /// Rule 39: the pair the login lockout defaults to.
+    static constexpr uint32_t kDefaultMaxAttempts = 5;
+    static constexpr uint32_t kDefaultLockoutSec = 300;
+    uint32_t maxAttempts = kDefaultMaxAttempts;
+    uint32_t lockoutPeriodSec = kDefaultLockoutSec; // 5 min
 };
 
 /**

@@ -1,4 +1,5 @@
 #ifndef DHCP_ETH_ETHMANAGER_H
+#include "core/NetworkDefaults.h"
 #define DHCP_ETH_ETHMANAGER_H
 
 #include "IEthManager.h"
@@ -31,9 +32,9 @@ namespace eth {
  */
 class EthManager : public IEthManager {
 public:
-    EthManager(const std::string& ip4 = "192.168.1.201",
-               const std::string& gateway = "192.168.1.1",
-               const std::string& netmask = "255.255.255.0",
+    EthManager(const std::string& ip4 = core::kDefaultServerIp,
+               const std::string& gateway = core::kDefaultGateway,
+               const std::string& netmask = core::kDefaultSubnetMask,
                const std::string& ip6 = "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d");
     ~EthManager() override;
 

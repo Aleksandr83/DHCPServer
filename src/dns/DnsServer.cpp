@@ -1,4 +1,5 @@
 #include "DnsServer.h"
+#include "dhcp/DnsMessage.h"
 #include "DnsStatStore.h"
 #include "../core/Config.h"
 #include "../core/ErrorLog.h"
@@ -42,8 +43,27 @@ static const char* TAG = "DnsServer";
 // while nslookup works). 4096 covers typical EDNS0 responses.
 #define DNS_MAX_MSG_SIZE    4096
 
+// Rule 39: the numbers below all carried meaning without saying it.
+#define DNS_DEFAULT_TTL_SEC          300  // answer TTL when the source has none
+#define DNS_UDP_POLL_US           200000  // one poll of the UDP socket: 200 ms
+#define DNS_FOREIGN_LOG_THROTTLE_MS 5000  // a dropped foreign query is logged at
+                                          // most this often, not per packet
+#define DNS_COUNTER_MAX      0xFFFFFFFFu  // mirrored counters saturate here
+#define IP4_TEXT_LEN                  16  // "255.255.255.255" plus the NUL
+#define MAC_TEXT_LEN                  18  // "xx:xx:xx:xx:xx:xx" plus the NUL
+#define DNS_SERVER_TASK_STACK_BYTES   16384  // builds answers and MD5s on the stack
+#define DNS_PERSIST_TASK_STACK_BYTES   8192  // walks megabytes of cache records
+#define DNS_STATS_TASK_STACK_BYTES     4096  // three numbers, a string, one stdio call
+
 namespace dhcp {
 namespace dns {
+
+// The DNS wire format is defined once, in the DHCP module, because the name
+// probes there were written first (DnsMessage.h). Both modules are nested under
+// `dhcp`, and the DHCP one is itself called `dhcp` — so the qualified name is
+// spelled in full (with the leading `::`) exactly once, here, and the rest of
+// the file reads `DnsMessage::kHeaderBytes` and the like.
+using DnsMessage = ::dhcp::dhcp::DnsMessage;
 
 // ─────────────────────────────────────────────────────
 // Construction
@@ -145,7 +165,7 @@ bool DnsServer::start()
     stopRequested_ = false;
 
     BaseType_t res = xTaskCreatePinnedToCore(
-        serverTask, "dns_server", 16384, this,
+        serverTask, "dns_server", DNS_SERVER_TASK_STACK_BYTES, this,
         configMAX_PRIORITIES - 2, &taskHandle_, 0);
 
     if (res != pdTRUE) {
@@ -211,7 +231,7 @@ bool DnsServer::startPersistJob(bool save, bool force)
     }
 
     BaseType_t res = xTaskCreate(
-        persistJobTask, "ic_persist", 8192, this,
+        persistJobTask, "ic_persist", DNS_PERSIST_TASK_STACK_BYTES, this,
         tskIDLE_PRIORITY + 1, &persistTaskHandle_);
     if (res != pdTRUE) {
         if (persistJobMutex_) {
@@ -603,9 +623,9 @@ DnsServer::RestartSave DnsServer::startStatsSaveJob()
             break;   // Started (or Failed, handled below)
     }
 
-    // 4 KB, not the cache job's 8: three numbers, one std::string and one stdio
-    // call. The cache needs the rest because it walks megabytes of records.
-    BaseType_t res = xTaskCreate(statsJobTask, "stats_save", 4096, this,
+    // Much less than the persist job below: three numbers, one std::string and
+    // one stdio call, against megabytes of records walked there.
+    BaseType_t res = xTaskCreate(statsJobTask, "stats_save", DNS_STATS_TASK_STACK_BYTES, this,
                                  tskIDLE_PRIORITY + 1, &statsTaskHandle_);
     if (res != pdTRUE) {
         if (statsJobMutex_) {
@@ -741,11 +761,11 @@ bool DnsServer::restoreStatsFromFile()
 
     // Saturate instead of wrapping: four billion hits is far away, but a counter
     // that passes through zero would look like a device that lost its cache.
-    internalCacheHits_ = (totals.hits > 0xFFFFFFFFull)
-                             ? 0xFFFFFFFFu
+    internalCacheHits_ = (totals.hits > DNS_COUNTER_MAX)
+                             ? DNS_COUNTER_MAX
                              : static_cast<uint32_t>(totals.hits);
-    forwardedCount_ = (totals.forwards > 0xFFFFFFFFull)
-                          ? 0xFFFFFFFFu
+    forwardedCount_ = (totals.forwards > DNS_COUNTER_MAX)
+                          ? DNS_COUNTER_MAX
                           : static_cast<uint32_t>(totals.forwards);
     internalCacheHitUs_ = totals.hitUsSum;
     // Stage 128: the split comes back as well, so the second line of the cache
@@ -856,7 +876,7 @@ void DnsServer::setDhcpServer(::dhcp::dhcp::IDhcpServer* dhcp)
 
 std::string DnsServer::resolveClientMac(uint32_t clientIpNet) const
 {
-    char mac[18] = {0};
+    char mac[MAC_TEXT_LEN] = {0};
     uint8_t bytes[6] = {0};
 
     // 1) ARP cache first — a client that just sent a query is very likely
@@ -957,7 +977,7 @@ void DnsServer::serverLoop()
             if (cacheFd > maxFd) maxFd = cacheFd;
         }
 
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+        struct timeval tv = { .tv_sec = 0, .tv_usec = DNS_UDP_POLL_US };
         int sel = select(maxFd + 1, &readfds, nullptr, nullptr, &tv);
         if (sel < 0) {
             // Never kill the whole DNS task on a transient select error.
@@ -993,7 +1013,7 @@ void DnsServer::serverLoop()
                 ssize_t rl = recvfrom(pf.fwdFd, response.data(), response.size(), 0,
                                       nullptr, nullptr);
                 if (rl > 0) {
-                    char clientIp[16];
+                    char clientIp[IP4_TEXT_LEN];
                     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp,
                               sizeof(clientIp));
                     const std::string clientMac =
@@ -1016,7 +1036,7 @@ void DnsServer::serverLoop()
                         if (internalCache_.available()) {
                             internalCache_.store(pf.domain, pf.qtype,
                                                  answerIps,
-                                                 answerTtl ? answerTtl : 300);
+                                                 answerTtl ? answerTtl : DNS_DEFAULT_TTL_SEC);
                         }
                         // External REST cache (fire-and-forget sender).
                         cache_.store(pf.domain, pf.qtype, answerIps);
@@ -1101,17 +1121,17 @@ void DnsServer::serverLoop()
                     // Warm the built-in PSRAM cache from an external-cache hit
                     // (the REST stub carries no TTL — use the default 300 s).
                     if (internalCache_.available()) {
-                        internalCache_.store(pf.domain, pf.qtype, ips, 300);
+                        internalCache_.store(pf.domain, pf.qtype, ips, DNS_DEFAULT_TTL_SEC);
                     }
 
                     size_t rl = buildAnswer(response.data(), response.size(),
                                             pf.qid, pf.domain, pf.qtype,
-                                            pf.qclass, ips, 300);
+                                            pf.qclass, ips, DNS_DEFAULT_TTL_SEC);
                     if (rl > 0) {
                         sendto(socketFd_, response.data(), rl, 0,
                                (struct sockaddr*)&pf.client, pf.clientLen);
                     }
-                    char clientIp[16];
+                    char clientIp[IP4_TEXT_LEN];
                     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp,
                               sizeof(clientIp));
                     const std::string clientMac =
@@ -1152,7 +1172,7 @@ void DnsServer::serverLoop()
             }
 
             // Client IP string
-            char clientIpStr[16];
+            char clientIpStr[IP4_TEXT_LEN];
             inet_ntop(AF_INET, &from.sin_addr, clientIpStr, sizeof(clientIpStr));
 
             // Optional LAN-only filter: drop queries from outside the device's
@@ -1164,7 +1184,7 @@ void DnsServer::serverLoop()
                                         ntohl(from.sin_addr.s_addr))) {
                 ++foreignDropped_;
                 const uint64_t nowMsValue = nowMs();
-                if (nowMsValue - lastForeignLogMs_ >= 5000) {
+                if (nowMsValue - lastForeignLogMs_ >= DNS_FOREIGN_LOG_THROTTLE_MS) {
                     lastForeignLogMs_ = nowMsValue;
                     ESP_LOGW(TAG, "Own-subnet filter: dropped DNS query from %s "
                                   "(%u dropped in total)",
@@ -1252,7 +1272,7 @@ void DnsServer::serverLoop()
             // Build and send response
             size_t respLen = 0;
             if (found && !resolvedIps.empty()) {
-                const uint32_t respTtl = internalHit ? internalTtl : 300;
+                const uint32_t respTtl = internalHit ? internalTtl : DNS_DEFAULT_TTL_SEC;
                 respLen = buildAnswer(response.data(), response.size(),
                                       qid, domain, qtype, qclass,
                                       resolvedIps, respTtl);
@@ -1268,7 +1288,7 @@ void DnsServer::serverLoop()
                 // NODATA (NOERROR, 0 records) so the client falls back to
                 // another type instead of failing. Do not forward.
                 respLen = buildAnswer(response.data(), response.size(),
-                                      qid, domain, qtype, qclass, {}, 300);
+                                      qid, domain, qtype, qclass, {}, DNS_DEFAULT_TTL_SEC);
                 logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                  fromLocal ? DnsLogSource::LOCAL : DnsLogSource::CACHE,
                                  false, "");
@@ -1286,7 +1306,7 @@ void DnsServer::serverLoop()
                 if (blockForwardNonAA_ &&
                     qtype != DNS_TYPE_A && qtype != DNS_TYPE_AAAA) {
                     respLen = buildAnswer(response.data(), response.size(),
-                                          qid, domain, qtype, qclass, {}, 300);
+                                          qid, domain, qtype, qclass, {}, DNS_DEFAULT_TTL_SEC);
                     logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                      DnsLogSource::FORWARDED, false, "");
                     if (logTerminal_ && logger_.logForwarded()) {
@@ -1408,7 +1428,7 @@ void DnsServer::expirePendingSlot(int idx)
     if (idx < 0 || idx >= kMaxPendingForwards) return;
     auto& pf = pendingForwards_[idx];
 
-    char clientIp[16];
+    char clientIp[IP4_TEXT_LEN];
     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp, sizeof(clientIp));
     const std::string clientMac = resolveClientMac(pf.client.sin_addr.s_addr);
     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
@@ -1481,25 +1501,27 @@ bool DnsServer::parseQuery(const uint8_t* buf, size_t len,
                             std::string& domain, uint16_t& type,
                             uint16_t& cls, uint16_t& id)
 {
-    if (len < 12) return false;
+    if (len < DnsMessage::kHeaderBytes) return false;
 
     // Header
     id = (buf[0] << 8) | buf[1];
-    uint16_t flags = (buf[2] << 8) | buf[3];
+    uint16_t flags = (buf[DnsMessage::kFlags1Offset] << 8) |
+                    buf[DnsMessage::kFlags2Offset];
 
     // Must be a standard query (QR=0, Opcode=0)
-    if (flags & 0x8000) return false;
+    if (flags & DNS_FLAG_QR) return false;
 
-    uint16_t qdcount = (buf[4] << 8) | buf[5];
+    uint16_t qdcount = (buf[DnsMessage::kQdCountOffset] << 8) |
+                       buf[DnsMessage::kQdCountOffset + 1];
     if (qdcount == 0) return false;
 
     // Decode question name
-    size_t offset = 12;
+    size_t offset = DnsMessage::kHeaderBytes;
     domain = decodeDomainName(buf, len, offset);
     if (domain.empty()) return false;
 
     // QTYPE and QCLASS
-    if (offset + 4 > len) return false;
+    if (offset + DnsMessage::kQuestionTailBytes > len) return false;
     type = (buf[offset] << 8) | buf[offset + 1];
     cls = (buf[offset + 2] << 8) | buf[offset + 3];
 
@@ -1515,35 +1537,37 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
                                    uint32_t& ttlSec)
 {
     ttlSec = 0;
-    if (len < 12) return;
-    const uint16_t qdcount = (buf[4] << 8) | buf[5];
+    if (len < DnsMessage::kHeaderBytes) return;
+    const uint16_t qdcount = (buf[DnsMessage::kQdCountOffset] << 8) |
+                             buf[DnsMessage::kQdCountOffset + 1];
     const uint16_t ancount = (buf[6] << 8) | buf[7];
     if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: len=%u qd=%u an=%u",
                                static_cast<unsigned>(len), qdcount, ancount);
 
-    size_t offset = 12;
+    size_t offset = DnsMessage::kHeaderBytes;
     // Skip the question section (each question = name + 4 bytes).
     for (uint16_t q = 0; q < qdcount && offset < len; ++q) {
         decodeDomainName(buf, len, offset);
-        offset += 4;
+        offset += DnsMessage::kQuestionTailBytes;
     }
 
     // Walk the answer records.
-    for (uint16_t a = 0; a < ancount && offset + 10 <= len; ++a) {
+    for (uint16_t a = 0; a < ancount &&
+         offset + DnsMessage::kRecordFixedBytes <= len; ++a) {
         decodeDomainName(buf, len, offset);   // NAME (compression pointer)
-        if (offset + 10 > len) return;
+        if (offset + DnsMessage::kRecordFixedBytes > len) return;
         const uint16_t type = (buf[offset] << 8) | buf[offset + 1];
         const uint32_t ttlN = (static_cast<uint32_t>(buf[offset + 4]) << 24) |
                               (static_cast<uint32_t>(buf[offset + 5]) << 16) |
                               (static_cast<uint32_t>(buf[offset + 6]) << 8) |
                               static_cast<uint32_t>(buf[offset + 7]);
         const uint16_t rdlen = (buf[offset + 8] << 8) | buf[offset + 9];
-        offset += 10;
+        offset += DnsMessage::kRecordFixedBytes;
         if (offset + rdlen > len) return;
 
         bool ipAnswer = false;
         if (type == DNS_TYPE_A && rdlen == 4) {
-            char ip[16];
+            char ip[IP4_TEXT_LEN];
             std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
                           buf[offset], buf[offset + 1],
                           buf[offset + 2], buf[offset + 3]);
@@ -1581,7 +1605,7 @@ size_t DnsServer::buildAnswer(uint8_t* buf, size_t bufSize,
     size_t pos = 0;
 
     // Header
-    if (pos + 12 > bufSize) return 0;
+    if (pos + DnsMessage::kHeaderBytes > bufSize) return 0;
     buf[pos++] = (id >> 8) & 0xFF;
     buf[pos++] = id & 0xFF;
     buf[pos++] = (DNS_FLAG_QR | DNS_FLAG_RD | DNS_FLAG_RA) >> 8;
@@ -1609,11 +1633,11 @@ size_t DnsServer::buildAnswer(uint8_t* buf, size_t bufSize,
 
     // Answer section — one RR per IP
     for (const auto& ip : ips) {
-        if (pos + 16 > bufSize) break;
+        if (pos + DnsMessage::kHeaderBytes + DnsMessage::kQuestionTailBytes > bufSize) break;
 
         // NAME = pointer to domain in question
-        buf[pos++] = 0xC0;
-        buf[pos++] = 0x0C; // offset 12
+        buf[pos++] = DnsMessage::kLabelPointer;
+        buf[pos++] = static_cast<uint8_t>(DnsMessage::kHeaderBytes);
 
         // TYPE: derive from the address format (A for IPv4, AAAA for IPv6)
         // so a host is answered with whatever records it actually has.
@@ -1655,7 +1679,7 @@ size_t DnsServer::buildNxdomain(uint8_t* buf, size_t bufSize,
     size_t pos = 0;
 
     // Header
-    if (pos + 12 > bufSize) return 0;
+    if (pos + DnsMessage::kHeaderBytes > bufSize) return 0;
     buf[pos++] = (id >> 8) & 0xFF;
     buf[pos++] = id & 0xFF;
     buf[pos++] = (DNS_FLAG_QR | DNS_FLAG_RD | DNS_FLAG_RA) >> 8;
@@ -1732,19 +1756,20 @@ std::string DnsServer::decodeDomainName(const uint8_t* data, size_t len,
             break;
         }
 
-        if ((b & 0xC0) == 0xC0) {
+        if ((b & DnsMessage::kMaskLabelType) == DnsMessage::kLabelPointer) {
             // Compression pointer (top two bits = 11).
             if (pos + 1 >= len) return {};
             if (!offsetSet) {
                 offset = pos + 2;   // end of the name as written at its origin
                 offsetSet = true;
             }
-            pos = (static_cast<size_t>(b & 0x3F) << 8) | data[pos + 1];
+            pos = (static_cast<size_t>(b & DnsMessage::kMaskPointerOffset) << 8) |
+              data[pos + 1];
             if (++jumps > kMaxPointers) return {};   // cycle / too many hops
             continue;
         }
 
-        if ((b & 0xC0) != 0) return {};   // reserved label type (bits 10/01)
+        if ((b & DnsMessage::kMaskLabelType) != 0) return {};   // reserved label type (bits 10/01)
         const uint8_t labelLen = b;
         pos++;
         if (labelLen > len - pos) return {};              // label overruns packet

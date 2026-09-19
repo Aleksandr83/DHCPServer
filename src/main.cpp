@@ -42,13 +42,19 @@
 static const char* TAG = "DHCPServer";
 
 // Global instances
+// Rule 39: what the console loop and the SPIFFS mount are configured with.
+constexpr int kSpiffsMaxFiles = 10;    // files the VFS keeps open at once
+constexpr int kConsoleBufBytes = 256;  // one line typed at the console
+constexpr int kHeartbeatLoops = 600;   // log the heap every 600 loops (30 s)
+constexpr int kMainLoopMs = 50;        // poll the console every 50 ms
+
 static dhcp::eth::EthManager    s_ethManager;
 static dhcp::eth::EthWifiAdapter s_netAdapter(s_ethManager);  // wraps Eth as IWiFiManager
 static dhcp::led::LedController s_ledController(
 #if CONFIG_IDF_TARGET_ESP32P4
     -1  // Waveshare ESP32-P4-ETH has no user LED
 #else
-    26
+    dhcp::led::LedController::kDefaultLedGpio
 #endif
 );
 static dhcp::dhcp::DhcpServer   s_dhcpServer;
@@ -92,7 +98,7 @@ extern "C" void app_main(void)
     esp_vfs_spiffs_conf_t spiffs_conf = {
         .base_path = "/spiffs",
         .partition_label = "spiffs",
-        .max_files = 10,
+        .max_files = kSpiffsMaxFiles,
         .format_if_mount_failed = true,
     };
     ret = esp_vfs_spiffs_register(&spiffs_conf);
@@ -159,7 +165,7 @@ extern "C" void app_main(void)
     s_terminalMenu.print("dhcp> ");
     uint32_t heartbeat = 0;
     while (1) {
-        char buf[256];
+        char buf[kConsoleBufBytes];
         if (fgets(buf, sizeof(buf), stdin)) {
             // Remove trailing newline(s)
             size_t len = strlen(buf);
@@ -172,16 +178,16 @@ extern "C" void app_main(void)
             }
         }
 
-        // Heap heartbeat every ~30 s (600 * 50 ms) — diagnostics for hangs
-        // caused by memory leaks. Pinned to internal RAM so it stays useful
-        // on chips where PSRAM is enabled.
-        if (++heartbeat % 600 == 0) {
+        // Heap heartbeat every ~30 s (kHeartbeatLoops * kMainLoopMs) —
+        // diagnostics for hangs caused by memory leaks. Pinned to internal RAM
+        // so it stays useful on chips where PSRAM is enabled.
+        if (++heartbeat % kHeartbeatLoops == 0) {
             ESP_LOGI(TAG, "HEAP: free=%lu largest_block=%lu",
                      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(kMainLoopMs));
     }
 }
 

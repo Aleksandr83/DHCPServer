@@ -58,6 +58,37 @@ static const char* TAG = "DhcpServer";
 #define DHCP_OPT_REQ_ADDR     50
 #define DHCP_OPT_END          255
 
+// Rule 39: the numbers the DHCP header and its options used to spell out.
+#define DHCP_BOOTREPLY            2       // msg.op: this is a reply, not a request
+#define DHCP_HWADDR_LEN           6       // msg.hlen, and every MAC copy: 6 bytes
+#define DHCP_FLAG_BROADCAST       0x8000  // msg.flags: answer by broadcast
+#define DHCP_BROADCAST_IP         0xFFFFFFFFu  // limited broadcast destination
+#define DHCP_OPTVAL_IP4_LEN       4       // value of every 4-byte option (address, time)
+#define DHCP_OPTIONS_BYTES        308     // RFC 2131: 548 - 240 bytes of fixed header
+#define DHCP_MESSAGE_BYTES        548     // RFC 2131, whole message
+#define DHCP_MIN_LEASE_ENTRIES    8       // lease table bounds — the same pair
+#define DHCP_MAX_LEASE_ENTRIES    512     // is enforced by Config and the REST API
+
+namespace {
+
+// Rule 39: how long the server waits, and how often it says so.
+// Rule 39: the server task builds every reply on its stack, so it is the one
+// that needs the most room here.
+constexpr uint32_t kServerTaskStackBytes = 8192;
+
+// Rule 39: "255.255.255.255" plus the NUL, the room an IPv4 address needs.
+constexpr size_t kIp4TextLen = 16;
+constexpr int kProbeTimeoutMs = 800;      // one ICMP echo request
+constexpr int kProbeWaitMs = 1000;        // ...and the wait for its answer
+constexpr int kProbeSettleMs = 200;       // between the attempts
+constexpr int kProbeResultWaitMs = 3000;  // the outer wait around a whole probe
+constexpr int kLoopIdleMs = 100;          // the server task's idle delay
+constexpr int kHeartbeatLogEvery = 30;    // one heartbeat line per N loops
+constexpr int kSocketRecvTimeoutSec = 2;  // receive timeout of the DHCP socket
+constexpr size_t kMacTextBytes = 24;      // "xx:xx:xx:xx:xx:xx" plus room
+
+} // namespace
+
 // Minimum DHCP message size: op..cookie = 240 bytes
 #define DHCP_MIN_MSGSIZE      240
 
@@ -79,11 +110,12 @@ struct DhcpMessage {
     char     sname[64];
     char     file[128];
     uint32_t cookie;
-    uint8_t  options[308];
+    uint8_t  options[DHCP_OPTIONS_BYTES];
 };
 #pragma pack(pop)
 
-static_assert(sizeof(DhcpMessage) == 548, "DhcpMessage must be 548 bytes");
+static_assert(sizeof(DhcpMessage) == DHCP_MESSAGE_BYTES,
+              "DhcpMessage must be the RFC 2131 size");
 
 namespace dhcp {
 namespace dhcp {
@@ -111,7 +143,7 @@ static void arpProbeCb(void* arg)
         struct eth_addr* mac = nullptr;
         const ip4_addr_t* resolvedIp = nullptr;
         if (etharp_find_addr(c->nif, &c->ip, &mac, &resolvedIp) == 1 && mac != nullptr) {
-            memcpy(c->ownerMac, mac->addr, 6);
+            memcpy(c->ownerMac, mac->addr, DHCP_HWADDR_LEN);
             c->found = 1;
             c->macValid = 1;
         } else {
@@ -138,7 +170,7 @@ bool DhcpServer::probeIp(uint32_t ip, uint8_t ownerMac[6]) const
         // is reported as unknown.
         uint8_t mac[6];
         if (arpProbeIp(ip, mac)) {
-            if (ownerMac != nullptr) memcpy(ownerMac, mac, 6);
+            if (ownerMac != nullptr) memcpy(ownerMac, mac, DHCP_HWADDR_LEN);
         } else if (ownerMac != nullptr) {
             memset(ownerMac, 0, 6);
         }
@@ -171,25 +203,25 @@ bool DhcpServer::arpProbeIp(uint32_t ip, uint8_t ownerMac[6]) const
     ctx.stage = 0;
     err_t cbErr = tcpip_callback(arpProbeCb, &ctx);
     if (cbErr == ERR_OK) {
-        xSemaphoreTake(ctx.done, pdMS_TO_TICKS(1000));
+        xSemaphoreTake(ctx.done, pdMS_TO_TICKS(kProbeWaitMs));
     } else {
         ESP_LOGW(TAG, "ARP probe: tcpip_callback failed (stage 0, err=%d)", cbErr);
     }
     // Give the owner time to answer (tcpip thread processes the reply)
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(kProbeSettleMs));
 
     // Stage 1: check whether the IP now sits in the ARP cache
     ctx.stage = 1;
     cbErr = tcpip_callback(arpProbeCb, &ctx);
     if (cbErr == ERR_OK) {
-        xSemaphoreTake(ctx.done, pdMS_TO_TICKS(1000));
+        xSemaphoreTake(ctx.done, pdMS_TO_TICKS(kProbeWaitMs));
     } else {
         ESP_LOGW(TAG, "ARP probe: tcpip_callback failed (stage 1, err=%d)", cbErr);
     }
 
     bool inUse = ctx.found != 0;
     if (inUse && ownerMac != nullptr) {
-        memcpy(ownerMac, ctx.ownerMac, 6);
+        memcpy(ownerMac, ctx.ownerMac, DHCP_HWADDR_LEN);
     }
     vSemaphoreDelete(ctx.done);
     if (logTerminal_) {
@@ -235,7 +267,7 @@ bool DhcpServer::icmpProbeIp(uint32_t ip) const
     esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
     cfg.count = 1;
     cfg.interval_ms = 0;
-    cfg.timeout_ms = 800;
+    cfg.timeout_ms = kProbeTimeoutMs;
     cfg.target_addr.type = IPADDR_TYPE_V4;
     cfg.target_addr.u_addr.ip4.addr = ip;
     cfg.interface = static_cast<uint32_t>(nifIdx);
@@ -257,7 +289,7 @@ bool DhcpServer::icmpProbeIp(uint32_t ip) const
         return false;
     }
 
-    xSemaphoreTake(ctx.done, pdMS_TO_TICKS(3000));
+    xSemaphoreTake(ctx.done, pdMS_TO_TICKS(kProbeResultWaitMs));
     bool inUse = ctx.success != 0;
 
     esp_ping_delete_session(hdl);
@@ -373,7 +405,7 @@ bool DhcpServer::start()
 
     // Create server task
     BaseType_t res = xTaskCreatePinnedToCore(
-        serverTask, "dhcp_server", 8192, this,
+        serverTask, "dhcp_server", kServerTaskStackBytes, this,
         configMAX_PRIORITIES - 2, &taskHandle_, 0);
 
     if (res != pdTRUE) {
@@ -402,7 +434,7 @@ void DhcpServer::stop()
             socketFd_ = -1;
         }
         // Wait for task to finish
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(kLoopIdleMs));
         taskHandle_ = nullptr;
     }
 
@@ -442,7 +474,7 @@ void DhcpServer::refreshAllowedStaticRefs()
     allowedStaticRefs_.reserve(staticBindings_.size());
     for (const auto& entry : staticBindings_) {
         DhcpAllowedList::StaticRef ref;
-        memcpy(ref.mac, entry.mac, 6);
+        memcpy(ref.mac, entry.mac, DHCP_HWADDR_LEN);
         ref.enabled = entry.enabled;
         allowedStaticRefs_.push_back(ref);
     }
@@ -501,7 +533,7 @@ void DhcpServer::serverLoop()
     }
 
     // Set receive timeout so we can check stopRequested_ periodically
-    struct timeval rcvTimeout = { .tv_sec = 2, .tv_usec = 0 };
+    struct timeval rcvTimeout = { .tv_sec = kSocketRecvTimeoutSec, .tv_usec = 0 };
     setsockopt(socketFd_, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, sizeof(rcvTimeout));
 
     ESP_LOGI(TAG, "DHCP server listening on port 67");
@@ -519,7 +551,7 @@ void DhcpServer::serverLoop()
             removeExpiredLeases();
             // Heartbeat log every ~30 iterations (60 seconds)
             heartbeatCounter++;
-            if (heartbeatCounter % 30 == 0 && logTerminal_) {
+            if (heartbeatCounter % kHeartbeatLogEvery == 0 && logTerminal_) {
                 ESP_LOGD(TAG, "Server alive, leases: %u", static_cast<unsigned>(leases_.size()));
             }
             continue;
@@ -805,18 +837,18 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
 
     DhcpMessage msg;
     memset(&msg, 0, sizeof(msg));
-    msg.op = 2;              // BOOTREPLY
+    msg.op = DHCP_BOOTREPLY;              // BOOTREPLY
     msg.htype = 1;           // Ethernet
-    msg.hlen = 6;
+    msg.hlen = DHCP_HWADDR_LEN;
     msg.hops = 0;
     msg.xid = transactionId;
     msg.secs = 0;
-    msg.flags = htons(0x8000); // Broadcast flag
+    msg.flags = htons(DHCP_FLAG_BROADCAST); // Broadcast flag
     msg.ciaddr = 0;
     msg.yiaddr = offerIp;
     msg.siaddr = serverIp_;
     msg.giaddr = relayIp;
-    memcpy(msg.chaddr, clientMac, 6);
+    memcpy(msg.chaddr, clientMac, DHCP_HWADDR_LEN);
     msg.cookie = htonl(DHCP_MAGIC_COOKIE);
 
     // Build options
@@ -827,35 +859,35 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     *opt++ = DHCP_OFFER;
 
     *opt++ = DHCP_OPT_SERVER_ID;
-    *opt++ = 4;
-    memcpy(opt, &serverIp_, 4); opt += 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
+    memcpy(opt, &serverIp_, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_SUBNET_MASK;
-    *opt++ = 4;
-    memcpy(opt, &serverNetmask_, 4); opt += 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
+    memcpy(opt, &serverNetmask_, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     // Router (gateway) — per-client override from the static binding
     bool sendRouter = true;
     uint32_t routerIp = resolveRouter(clientMac, sendRouter);
     if (sendRouter) {
         *opt++ = DHCP_OPT_ROUTER;
-        *opt++ = 4;
-        memcpy(opt, &routerIp, 4); opt += 4;
+        *opt++ = DHCP_OPTVAL_IP4_LEN;
+        memcpy(opt, &routerIp, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
     }
 
     *opt++ = DHCP_OPT_DNS_SERVER;
-    *opt++ = 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
     uint32_t dnsIp = resolveDnsServer(clientMac);
-    memcpy(opt, &dnsIp, 4); opt += 4;
+    memcpy(opt, &dnsIp, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_LEASE_TIME;
-    *opt++ = 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
     uint32_t leaseN = htonl(leaseTimeSec_);
-    memcpy(opt, &leaseN, 4); opt += 4;
+    memcpy(opt, &leaseN, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_END;
 
-    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(0xFFFFFFFF); // broadcast
+    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(DHCP_BROADCAST_IP); // broadcast
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
@@ -878,18 +910,18 @@ void DhcpServer::sendDhcpAck(const uint8_t* clientMac, uint32_t transactionId,
 {
     DhcpMessage msg;
     memset(&msg, 0, sizeof(msg));
-    msg.op = 2;
+    msg.op = DHCP_BOOTREPLY;
     msg.htype = 1;
-    msg.hlen = 6;
+    msg.hlen = DHCP_HWADDR_LEN;
     msg.hops = 0;
     msg.xid = transactionId;
     msg.secs = 0;
-    msg.flags = htons(0x8000);
+    msg.flags = htons(DHCP_FLAG_BROADCAST);
     msg.ciaddr = 0;
     msg.yiaddr = assignedIp;
     msg.siaddr = serverIp_;
     msg.giaddr = relayIp;
-    memcpy(msg.chaddr, clientMac, 6);
+    memcpy(msg.chaddr, clientMac, DHCP_HWADDR_LEN);
     msg.cookie = htonl(DHCP_MAGIC_COOKIE);
 
     uint8_t* opt = msg.options;
@@ -899,35 +931,35 @@ void DhcpServer::sendDhcpAck(const uint8_t* clientMac, uint32_t transactionId,
     *opt++ = DHCP_ACK;
 
     *opt++ = DHCP_OPT_SERVER_ID;
-    *opt++ = 4;
-    memcpy(opt, &serverIp_, 4); opt += 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
+    memcpy(opt, &serverIp_, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_SUBNET_MASK;
-    *opt++ = 4;
-    memcpy(opt, &serverNetmask_, 4); opt += 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
+    memcpy(opt, &serverNetmask_, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     // Router (gateway) — per-client override from the static binding
     bool sendRouter = true;
     uint32_t routerIp = resolveRouter(clientMac, sendRouter);
     if (sendRouter) {
         *opt++ = DHCP_OPT_ROUTER;
-        *opt++ = 4;
-        memcpy(opt, &routerIp, 4); opt += 4;
+        *opt++ = DHCP_OPTVAL_IP4_LEN;
+        memcpy(opt, &routerIp, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
     }
 
     *opt++ = DHCP_OPT_DNS_SERVER;
-    *opt++ = 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
     uint32_t dnsIp = resolveDnsServer(clientMac);
-    memcpy(opt, &dnsIp, 4); opt += 4;
+    memcpy(opt, &dnsIp, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_LEASE_TIME;
-    *opt++ = 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
     uint32_t leaseN = htonl(leaseTimeSec_);
-    memcpy(opt, &leaseN, 4); opt += 4;
+    memcpy(opt, &leaseN, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_END;
 
-    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(0xFFFFFFFF);
+    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(DHCP_BROADCAST_IP);
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
@@ -950,13 +982,13 @@ void DhcpServer::sendDhcpNak(const uint8_t* clientMac, uint32_t transactionId,
 {
     DhcpMessage msg;
     memset(&msg, 0, sizeof(msg));
-    msg.op = 2;
+    msg.op = DHCP_BOOTREPLY;
     msg.htype = 1;
-    msg.hlen = 6;
+    msg.hlen = DHCP_HWADDR_LEN;
     msg.xid = transactionId;
-    msg.flags = htons(0x8000);
+    msg.flags = htons(DHCP_FLAG_BROADCAST);
     msg.giaddr = relayIp;
-    memcpy(msg.chaddr, clientMac, 6);
+    memcpy(msg.chaddr, clientMac, DHCP_HWADDR_LEN);
     msg.cookie = htonl(DHCP_MAGIC_COOKIE);
 
     uint8_t* opt = msg.options;
@@ -965,12 +997,12 @@ void DhcpServer::sendDhcpNak(const uint8_t* clientMac, uint32_t transactionId,
     *opt++ = DHCP_NAK;
 
     *opt++ = DHCP_OPT_SERVER_ID;
-    *opt++ = 4;
-    memcpy(opt, &serverIp_, 4); opt += 4;
+    *opt++ = DHCP_OPTVAL_IP4_LEN;
+    memcpy(opt, &serverIp_, DHCP_OPTVAL_IP4_LEN); opt += DHCP_OPTVAL_IP4_LEN;
 
     *opt++ = DHCP_OPT_END;
 
-    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(0xFFFFFFFF);
+    uint32_t destIp = (relayIp != 0) ? relayIp : htonl(DHCP_BROADCAST_IP);
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
@@ -1114,12 +1146,13 @@ void DhcpServer::applyLeaseLimit()
         const uint32_t end = ipStrToU32(cfg.endIp);
         const uint32_t pool = (end > start) ? (ntohl(end) - ntohl(start) + 1) : 0;
         limit = pool * 2;
-        if (limit < 8) limit = 8;
-    } else {
+        } else {
         limit = cfg.maxLeaseEntries;
     }
-    if (limit < 8) limit = 8;
-    if (limit > 512) limit = 512;
+    if (limit < DHCP_MIN_LEASE_ENTRIES)
+        limit = DHCP_MIN_LEASE_ENTRIES;
+    if (limit > DHCP_MAX_LEASE_ENTRIES)
+        limit = DHCP_MAX_LEASE_ENTRIES;
     maxLeaseEntriesEffective_ = limit;
 
     ESP_LOGI(TAG, "Lease table cap: %u entries%s (%u in the table now)",
@@ -1148,7 +1181,7 @@ bool DhcpServer::canAddLeaseEntry(uint32_t ip)
 void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const std::string& hostname)
 {
     DhcpLease lease;
-    memcpy(lease.mac, mac, 6);
+    memcpy(lease.mac, mac, DHCP_HWADDR_LEN);
     lease.ip = ip;
     lease.expiry = getCurrentTimeSec() + leaseTimeSec_;
     lease.hostname = hostname;
@@ -1185,7 +1218,7 @@ bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const std::string
     if (!canAddLeaseEntry(ip)) return false;
 
     DhcpLease lease;
-    memcpy(lease.mac, mac, 6);
+    memcpy(lease.mac, mac, DHCP_HWADDR_LEN);
     lease.ip = ip;
     lease.expiry = getCurrentTimeSec() + kOfferHoldSec;
     lease.hostname = hostname;
@@ -1369,7 +1402,7 @@ bool DhcpServer::getMacByIp(uint32_t ip, uint8_t mac[6]) const
 {
     auto it = leases_.find(ip);
     if (it == leases_.end()) return false;
-    memcpy(mac, it->second.mac, 6);
+    memcpy(mac, it->second.mac, DHCP_HWADDR_LEN);
     return true;
 }
 
@@ -1388,7 +1421,7 @@ void DhcpServer::setRestLogging(bool enabled, const std::string& url,
 
 std::string DhcpServer::macToStr(const uint8_t* mac)
 {
-    char buf[24];
+    char buf[kMacTextBytes];
     std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return std::string(buf);
@@ -1400,7 +1433,7 @@ std::string DhcpServer::ipToStr(uint32_t ipNet)
     // memory are already in the correct dotted order. Reading them by index
     // (like lwIP's ip4_addr1_16) prints them correctly; big-endian shifts
     // would reverse the octets (e.g. 101.1.168.192 instead of 192.168.1.101).
-    char buf[16];
+    char buf[kIp4TextLen];
     const uint8_t* b = reinterpret_cast<const uint8_t*>(&ipNet);
     std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
                   (unsigned)b[0], (unsigned)b[1],

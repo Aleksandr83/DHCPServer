@@ -244,17 +244,17 @@ DhcpConfig Config::getDhcp() const
 {
     DhcpConfig cfg;
     cfg.enabled = readI32(KEY_DHCP_ENABLED, 0) != 0;
-    cfg.startIp = readStr(KEY_DHCP_START, "192.168.1.100");
-    cfg.endIp = readStr(KEY_DHCP_END, "192.168.1.200");
-    cfg.subnet = readStr(KEY_DHCP_SUBNET, "255.255.255.0");
-    cfg.gateway = readStr(KEY_DHCP_GW, "192.168.1.1");
-    cfg.serverIp = readStr(KEY_DHCP_SERVER_IP, "192.168.1.201");
-    cfg.leaseTimeSec = static_cast<uint32_t>(readI32(KEY_DHCP_LEASE, 86400));
+    cfg.startIp = readStr(KEY_DHCP_START, core::kDefaultPoolStart);
+    cfg.endIp = readStr(KEY_DHCP_END, core::kDefaultPoolEnd);
+    cfg.subnet = readStr(KEY_DHCP_SUBNET, core::kDefaultSubnetMask);
+    cfg.gateway = readStr(KEY_DHCP_GW, core::kDefaultGateway);
+    cfg.serverIp = readStr(KEY_DHCP_SERVER_IP, core::kDefaultServerIp);
+    cfg.leaseTimeSec = static_cast<uint32_t>(readI32(KEY_DHCP_LEASE, static_cast<int32_t>(core::kDefaultLeaseSec)));
     {
         int32_t maxEntries = readI32(KEY_DHCP_MAX_LEASES, 0);
         if (maxEntries != 0) {           // 0 = auto (2x pool size)
-            if (maxEntries < 8) maxEntries = 8;
-            if (maxEntries > 512) maxEntries = 512;
+            if (maxEntries < core::kMinLeaseEntries) maxEntries = core::kMinLeaseEntries;
+            if (maxEntries > core::kMaxLeaseEntries) maxEntries = core::kMaxLeaseEntries;
         }
         cfg.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
     }
@@ -403,7 +403,7 @@ DnsConfig Config::getDns() const
 {
     DnsConfig cfg;
     cfg.enabled = readI32(KEY_DNS_ENABLED, 1) != 0;
-    cfg.externalDns = readStr(KEY_DNS_EXTERNAL, "192.168.1.1");
+    cfg.externalDns = readStr(KEY_DNS_EXTERNAL, core::kDefaultExternalDns);
     cfg.logTerminal = readI32(KEY_DNS_LOG_TERM, 0) != 0;
     cfg.logForwarded = readI32(KEY_DNS_LOG_FWD, 1) != 0;
     cfg.logLocal = readI32(KEY_DNS_LOG_LOCAL, 1) != 0;
@@ -566,8 +566,8 @@ SecurityConfig Config::getSecurity() const
     SecurityConfig cfg;
     cfg.username = readStr(KEY_SEC_USER, "admin");
     cfg.password = readStr(KEY_SEC_PASS, "admin");
-    cfg.maxAttempts = static_cast<uint32_t>(readI32(KEY_SEC_MAX_ATT, 5));
-    cfg.lockoutPeriodSec = static_cast<uint32_t>(readI32(KEY_SEC_LOCKOUT, 300));
+    cfg.maxAttempts = static_cast<uint32_t>(readI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(SecurityConfig::kDefaultMaxAttempts)));
+    cfg.lockoutPeriodSec = static_cast<uint32_t>(readI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(SecurityConfig::kDefaultLockoutSec)));
     return cfg;
 }
 
@@ -593,9 +593,13 @@ TimeConfig Config::getTime() const
         static_cast<uint32_t>(readI32(KEY_TIME_SYNC_S, 86400));
     cfg.allowOwnSubnet = readI32(KEY_TIME_ALLOW_LAN, 1) != 0;   // default ON
     {
+        // Rule 39: the NTP rate limit is a count per second, so its scale is
+        // the same 1..100 the percentage uses.
+        static constexpr int32_t kTimeRateMin = 1;
+        static constexpr int32_t kTimeRateMax = 100;
         int32_t rate = readI32(KEY_TIME_RATE, 5);
-        if (rate < 1) rate = 1;
-        if (rate > 100) rate = 100;
+        if (rate < kTimeRateMin) rate = kTimeRateMin;
+        if (rate > kTimeRateMax) rate = kTimeRateMax;
         cfg.rateLimitPerSec = static_cast<uint32_t>(rate);
     }
     cfg.logTerminal = readI32(KEY_TIME_LOG_TERM, 0) != 0;
