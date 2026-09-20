@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 
+using namespace std;
+
 namespace dhcp::core {
 
 namespace {
@@ -146,7 +148,7 @@ void Md5::update(const void* data, size_t len)
     }
 }
 
-std::string Md5::hex()
+string Md5::hex()
 {
     // Finish on a copy: hex() must not disturb this object — a second call has
     // to return the same digest, and the caller may still want to keep the
@@ -171,7 +173,7 @@ std::string Md5::hex()
     for (int i = 0; i < 4; i++) putU32le(out + i * 4, tail.state_[i]);
 
     static const char* kHexDigits = "0123456789abcdef";
-    std::string s;
+    string s;
     s.reserve(32);
     for (int i = 0; i < 16; i++) {
         s.push_back(kHexDigits[out[i] >> 4]);
@@ -180,7 +182,7 @@ std::string Md5::hex()
     return s;
 }
 
-std::string Md5::file(const char* path, std::string* err)
+string Md5::file(const char* path, string* err)
 {
     if (err) err->clear();
     if (!path || !*path) {

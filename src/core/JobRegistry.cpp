@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace core {
 
@@ -39,13 +41,13 @@ JobRegistry& JobRegistry::instance()
     return registry;
 }
 
-std::chrono::milliseconds JobRegistry::now()
+chrono::milliseconds JobRegistry::now()
 {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch());
+    return chrono::duration_cast<chrono::milliseconds>(
+        chrono::steady_clock::now().time_since_epoch());
 }
 
-size_t JobRegistry::slotFor(const std::string& id)
+size_t JobRegistry::slotFor(const string& id)
 {
     // The same id is one operation, not two: an upload that resumes, or a second
     // run of the same kind, takes its own entry over.
@@ -58,7 +60,7 @@ size_t JobRegistry::slotFor(const std::string& id)
     // Full: reuse the oldest record that is not running (a finished one is only
     // still there because it repeats, and another operation matters more).
     size_t oldest = kMaxJobs;
-    std::chrono::milliseconds oldestTime = now();
+    chrono::milliseconds oldestTime = now();
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (jobs_[i].state == JobState::Running) continue;
         if (started_[i] <= oldestTime) {
@@ -69,12 +71,12 @@ size_t JobRegistry::slotFor(const std::string& id)
     return oldest;
 }
 
-bool JobRegistry::begin(const std::string& id, const std::string& titleKey,
-                        const std::string& arg, uint32_t total, uint32_t repeatSec)
+bool JobRegistry::begin(const string& id, const string& titleKey,
+                        const string& arg, uint32_t total, uint32_t repeatSec)
 {
     if (id.empty()) return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     const size_t slot = slotFor(id);
     if (slot >= kMaxJobs) {
@@ -93,16 +95,16 @@ bool JobRegistry::begin(const std::string& id, const std::string& titleKey,
     job.repeatSec = repeatSec;
     used_[slot] = true;
     started_[slot] = now();
-    finished_[slot] = std::chrono::milliseconds{0};
+    finished_[slot] = chrono::milliseconds{0};
 
     ESP_LOGI(TAG, "job started: %s %s", id.c_str(), arg.c_str());
     return true;
 }
 
-void JobRegistry::progress(const std::string& id, uint32_t done, uint32_t total,
-                           const std::string& detail)
+void JobRegistry::progress(const string& id, uint32_t done, uint32_t total,
+                           const string& detail)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i] || jobs_[i].id != id) continue;
@@ -117,9 +119,9 @@ void JobRegistry::progress(const std::string& id, uint32_t done, uint32_t total,
     // record here would invent a name and a start time, so it is ignored.
 }
 
-void JobRegistry::pause(const std::string& id, const std::string& detail)
+void JobRegistry::pause(const string& id, const string& detail)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i] || jobs_[i].id != id) continue;
@@ -130,9 +132,9 @@ void JobRegistry::pause(const std::string& id, const std::string& detail)
     }
 }
 
-void JobRegistry::finish(const std::string& id, JobState state, const std::string& detail)
+void JobRegistry::finish(const string& id, JobState state, const string& detail)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i] || jobs_[i].id != id) continue;
@@ -150,8 +152,8 @@ void JobRegistry::finish(const std::string& id, JobState state, const std::strin
         if (jobs_[i].repeatSec == 0) {
             used_[i] = false;
             jobs_[i] = JobInfo{};
-            started_[i] = std::chrono::milliseconds{0};
-            finished_[i] = std::chrono::milliseconds{0};
+            started_[i] = chrono::milliseconds{0};
+            finished_[i] = chrono::milliseconds{0};
         }
 
         ESP_LOGI(TAG, "job finished: %s (%s)", id.c_str(), jobStateText(state));
@@ -159,9 +161,9 @@ void JobRegistry::finish(const std::string& id, JobState state, const std::strin
     }
 }
 
-bool JobRegistry::requestCancel(const std::string& id)
+bool JobRegistry::requestCancel(const string& id)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i] || jobs_[i].id != id) continue;
@@ -178,9 +180,9 @@ bool JobRegistry::requestCancel(const std::string& id)
     return false;
 }
 
-bool JobRegistry::cancelRequested(const std::string& id) const
+bool JobRegistry::cancelRequested(const string& id) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (used_[i] && jobs_[i].id == id) return jobs_[i].cancelRequested;
@@ -188,9 +190,9 @@ bool JobRegistry::cancelRequested(const std::string& id) const
     return false;
 }
 
-bool JobRegistry::contains(const std::string& id) const
+bool JobRegistry::contains(const string& id) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (used_[i] && jobs_[i].id == id) return true;
@@ -198,27 +200,27 @@ bool JobRegistry::contains(const std::string& id) const
     return false;
 }
 
-std::vector<JobInfo> JobRegistry::snapshot() const
+vector<JobInfo> JobRegistry::snapshot() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
-    const std::chrono::milliseconds current = now();
-    std::vector<JobInfo> out;
+    const chrono::milliseconds current = now();
+    vector<JobInfo> out;
     out.reserve(kMaxJobs);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i]) continue;
         JobInfo job = jobs_[i];
-        const std::chrono::milliseconds end =
+        const chrono::milliseconds end =
             (job.state == JobState::Running || job.state == JobState::Paused)
                 ? current : finished_[i];
         const auto ms = end - started_[i];
         job.durationMs = ms.count() > 0 ? static_cast<uint32_t>(ms.count()) : 0;
-        out.push_back(std::move(job));
+        out.push_back(move(job));
     }
 
     // Newest first: the operation that just started is the one to watch.
-    std::sort(out.begin(), out.end(), [](const JobInfo& a, const JobInfo& b) {
+    sort(out.begin(), out.end(), [](const JobInfo& a, const JobInfo& b) {
         return a.durationMs < b.durationMs;
     });
     return out;
@@ -226,13 +228,13 @@ std::vector<JobInfo> JobRegistry::snapshot() const
 
 void JobRegistry::clear()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         used_[i] = false;
         jobs_[i] = JobInfo{};
-        started_[i] = std::chrono::milliseconds{0};
-        finished_[i] = std::chrono::milliseconds{0};
+        started_[i] = chrono::milliseconds{0};
+        finished_[i] = chrono::milliseconds{0};
     }
 }
 

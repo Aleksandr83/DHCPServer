@@ -3,6 +3,7 @@
 
 #include "core/NetworkDefaults.h"
 #include "core/AutosavePeriod.h"
+#include "security/CertStore.h"
 
 #include <string>
 #include <vector>
@@ -153,6 +154,32 @@ struct SecurityConfig {
     static constexpr uint32_t kDefaultLockoutSec = 300;
     uint32_t maxAttempts = kDefaultMaxAttempts;
     uint32_t lockoutPeriodSec = kDefaultLockoutSec; // 5 min
+    /**
+     * @brief Serve the web interface over HTTPS as well as HTTP.
+     *
+     * Off by default, and it cannot be turned on while no certificate is stored:
+     * an HTTPS server without a certificate does not start at all, so the switch
+     * would only make the interface look broken.
+     */
+    bool httpsEnabled = false;
+    /**
+     * @brief Volume that holds the certificate pair.
+     *
+     * The internal flash volume by default; the card is the other option the
+     * operator can pick, and it is read back through @ref
+     * security::certStorageFromIndex so a value this build does not know still
+     * lands somewhere sensible.
+     */
+    security::CertStorage certStorage = security::CertStorage::Internal;
+    /**
+     * @brief Name the next generated certificate is issued for (CN and DNS SAN).
+     *
+     * Typed by the operator on the certificates page and kept by the device, so
+     * the field comes back filled instead of asking for the same name again. It is
+     * a setting and not a report of the stored pair: a certificate issued under
+     * another name keeps its own CN until it is generated again.
+     */
+    std::string certName = security::kDefaultCommonName;
 };
 
 /**

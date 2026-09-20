@@ -19,7 +19,9 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
+
+using namespace std;
 
 using dhcp::files::UploadRange;
 
@@ -90,16 +92,16 @@ static int test_resumable_chunks()
 static int test_offset_mismatch()
 {
     UploadRange r;
-    std::string err;
+    string err;
 
     // Device has less than the client claims.
     err = UploadRange::check(0, 100, 10, true, 250, r);
-    TEST_ASSERT_TRUE(err.find("100") != std::string::npos);
-    TEST_ASSERT_TRUE(err.find("0 bytes") != std::string::npos);
+    TEST_ASSERT_TRUE(err.find("100") != string::npos);
+    TEST_ASSERT_TRUE(err.find("0 bytes") != string::npos);
 
     // Device has more (e.g. a repeated chunk after a lost reply).
     err = UploadRange::check(150, 100, 10, true, 250, r);
-    TEST_ASSERT_TRUE(err.find("150 bytes") != std::string::npos);
+    TEST_ASSERT_TRUE(err.find("150 bytes") != string::npos);
     return 0;
 }
 
@@ -107,19 +109,19 @@ static int test_offset_mismatch()
 static int test_out_of_range()
 {
     UploadRange r;
-    std::string err;
+    string err;
 
     // Body runs past the end.
     err = UploadRange::check(200, 200, 100, true, 250, r);
-    TEST_ASSERT_TRUE(err.find("runs past the end") != std::string::npos);
+    TEST_ASSERT_TRUE(err.find("runs past the end") != string::npos);
 
     // Offset at the end with bytes still to send.
     err = UploadRange::check(250, 250, 10, true, 250, r);
-    TEST_ASSERT_TRUE(err.find("at or past the end") != std::string::npos);
+    TEST_ASSERT_TRUE(err.find("at or past the end") != string::npos);
 
     // Offset beyond the end.
     err = UploadRange::check(300, 300, 10, true, 250, r);
-    TEST_ASSERT_TRUE(err.find("at or past the end") != std::string::npos);
+    TEST_ASSERT_TRUE(err.find("at or past the end") != string::npos);
 
     // A file of zero bytes is not an upload: use /api/files/text for that.
     err = UploadRange::check(0, 0, 10, true, 0, r);

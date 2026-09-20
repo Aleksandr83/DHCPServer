@@ -4,6 +4,8 @@
 #include "esp_partition.h"
 #include "esp_vfs_fat.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace storage {
 
@@ -11,11 +13,11 @@ namespace {
 const char* TAG = "FatFileSystem";
 }
 
-FatFileSystem::FatFileSystem(std::string id, std::string partitionLabel,
-                             std::string mountPoint)
-    : id_(std::move(id))
-    , partitionLabel_(std::move(partitionLabel))
-    , mountPoint_(std::move(mountPoint))
+FatFileSystem::FatFileSystem(string id, string partitionLabel,
+                             string mountPoint)
+    : id_(move(id))
+    , partitionLabel_(move(partitionLabel))
+    , mountPoint_(move(mountPoint))
 {
 }
 
@@ -49,7 +51,7 @@ bool FatFileSystem::mount()
     esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(
         mountPoint_.c_str(), partitionLabel_.c_str(), &cfg, &wlHandle_);
     if (err != ESP_OK) {
-        error_ = std::string("mount failed: ") + esp_err_to_name(err);
+        error_ = string("mount failed: ") + esp_err_to_name(err);
         ESP_LOGE(TAG, "%s: mount of '%s' failed (%s)", id_.c_str(),
                  partitionLabel_.c_str(), esp_err_to_name(err));
         return false;

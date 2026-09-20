@@ -1,5 +1,7 @@
 #include "DnsMessage.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace dhcp {
 
@@ -43,22 +45,22 @@ size_t DnsMessage::skipName(const uint8_t* buf, size_t len, size_t off)
     return len + 1;
 }
 
-std::string DnsMessage::decodeName(const uint8_t* buf, size_t len, size_t off)
+string DnsMessage::decodeName(const uint8_t* buf, size_t len, size_t off)
 {
-    std::string out;
+    string out;
     size_t jumps = 0;
     while (off < len) {
         const uint8_t label = buf[off];
         if (label == 0) break;                       // end of the name
         if ((label & kMaskLabelType) == kLabelPointer) {   // compression pointer
-            if (off + 1 >= len) return std::string();
-            if (++jumps > kMaxNameJumps) return std::string();
+            if (off + 1 >= len) return string();
+            if (++jumps > kMaxNameJumps) return string();
             const size_t target = ((label & kMaskPointerOffset) << 8) | buf[off + 1];
-            if (target >= off) return std::string(); // must point backwards
+            if (target >= off) return string(); // must point backwards
             off = target;
             continue;
         }
-        if (label > kMaxLabelBytes || off + 1 + label > len) return std::string();
+        if (label > kMaxLabelBytes || off + 1 + label > len) return string();
         if (!out.empty()) out += '.';
         out.append(reinterpret_cast<const char*>(buf + off + 1), label);
         off += 1 + label;

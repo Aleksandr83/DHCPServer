@@ -3,6 +3,8 @@
 
 #include <cstring>
 
+using namespace std;
+
 namespace dhcp {
 namespace dhcp {
 
@@ -19,17 +21,17 @@ constexpr uint8_t kFlagRecursionDesired = 0x01;   // RD bit of the query flags
 
 } // namespace
 
-std::vector<uint8_t> PtrProbe::buildQuery(uint32_t ipNet, uint16_t id)
+vector<uint8_t> PtrProbe::buildQuery(uint32_t ipNet, uint16_t id)
 {
     // A PTR question for "no address" or for the broadcast address is not a
     // question anybody can answer: refuse instead of sending noise.
-    if (ipNet == kNoAddress || ipNet == kBroadcastAddress) return std::vector<uint8_t>();
+    if (ipNet == kNoAddress || ipNet == kBroadcastAddress) return vector<uint8_t>();
 
     // The address is kept in network byte order, so its bytes in memory are the
     // wire order (the same assumption every IP_FMT_ARGS in this project makes).
     const uint8_t* octets = reinterpret_cast<const uint8_t*>(&ipNet);
 
-    std::vector<uint8_t> q;
+    vector<uint8_t> q;
     q.reserve(kMaxQueryBytes);
     q.push_back(static_cast<uint8_t>(id >> 8));
     q.push_back(static_cast<uint8_t>(id & 0xFF));
@@ -44,17 +46,17 @@ std::vector<uint8_t> PtrProbe::buildQuery(uint32_t ipNet, uint16_t id)
     // octet first, which is why this walks the bytes backwards.
     for (size_t i = kOctets; i-- > 0; ) {
         char label[kMaxOctetDigits + 1];
-        const int n = std::snprintf(label, sizeof(label), "%u", octets[i]);
+        const int n = snprintf(label, sizeof(label), "%u", octets[i]);
         if (n <= 0 || static_cast<size_t>(n) > kMaxOctetDigits ||
             q.size() + 1 + n >= kMaxQueryBytes) {
-            return std::vector<uint8_t>();
+            return vector<uint8_t>();
         }
         q.push_back(static_cast<uint8_t>(n));
         q.insert(q.end(), label, label + n);
     }
     for (const char* part : { "in-addr", "arpa" }) {
-        const size_t n = std::strlen(part);
-        if (q.size() + 1 + n >= kMaxQueryBytes) return std::vector<uint8_t>();
+        const size_t n = strlen(part);
+        if (q.size() + 1 + n >= kMaxQueryBytes) return vector<uint8_t>();
         q.push_back(static_cast<uint8_t>(n));
         q.insert(q.end(), part, part + n);
     }
@@ -66,33 +68,33 @@ std::vector<uint8_t> PtrProbe::buildQuery(uint32_t ipNet, uint16_t id)
     return q;
 }
 
-std::string PtrProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t id)
+string PtrProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t id)
 {
     uint16_t questions = 0;
     uint16_t answers = 0;
     // The envelope (id, QR, rcode, counts) is DNS itself and belongs to
     // DnsMessage, which the NetBIOS probe uses as well.
-    if (!DnsMessage::readHeader(buf, len, id, questions, answers)) return std::string();
-    if (answers == 0) return std::string();
+    if (!DnsMessage::readHeader(buf, len, id, questions, answers)) return string();
+    if (answers == 0) return string();
 
     size_t off = DnsMessage::kHeaderBytes;
     for (uint16_t i = 0; i < questions; i++) {
         off = DnsMessage::skipName(buf, len, off);
-        if (off + DnsMessage::kQuestionTailBytes > len) return std::string();
+        if (off + DnsMessage::kQuestionTailBytes > len) return string();
         off += DnsMessage::kQuestionTailBytes;           // QTYPE + QCLASS
     }
 
     for (uint16_t i = 0; i < answers; i++) {
         off = DnsMessage::skipName(buf, len, off);       // owner name
-        if (off + DnsMessage::kRecordFixedBytes > len) return std::string();
+        if (off + DnsMessage::kRecordFixedBytes > len) return string();
         const uint16_t type = static_cast<uint16_t>((buf[off] << 8) | buf[off + 1]);
         const uint16_t rdLength = static_cast<uint16_t>((buf[off + DnsMessage::kRdLengthOffset] << 8) |
                                                         buf[off + DnsMessage::kRdLengthOffset + 1]);
-        if (off + DnsMessage::kRecordFixedBytes + rdLength > len) return std::string();
+        if (off + DnsMessage::kRecordFixedBytes + rdLength > len) return string();
         if (type == kTypePtr) return DnsMessage::decodeName(buf, len, off + DnsMessage::kRdataOffset);
         off += DnsMessage::kRecordFixedBytes + rdLength;  // CNAME, A, … : skip
     }
-    return std::string();
+    return string();
 }
 
 #ifndef DHCP_TEST_HOST
@@ -112,18 +114,18 @@ uint16_t PtrProbe::nextId()
     return (id == kNoId) ? kFirstUsableId : id;
 }
 
-std::string PtrProbe::query(uint32_t ipNet, uint32_t serverNet)
+string PtrProbe::query(uint32_t ipNet, uint32_t serverNet)
 {
     constexpr uint16_t kPortDns = 53;        // the name server we ask (UDP)
-    if (serverNet == kNoAddress) return std::string();
+    if (serverNet == kNoAddress) return string();
 
-    const std::vector<uint8_t> request = buildQuery(ipNet, nextId());
-    if (request.empty()) return std::string();
+    const vector<uint8_t> request = buildQuery(ipNet, nextId());
+    if (request.empty()) return string();
     const uint16_t id = static_cast<uint16_t>((request[DnsMessage::kIdOffset] << 8) |
                                               request[DnsMessage::kIdOffset + 1]);
 
     const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) return std::string();
+    if (fd < 0) return string();
 
     struct sockaddr_in to;
     memset(&to, 0, sizeof(to));
@@ -131,7 +133,7 @@ std::string PtrProbe::query(uint32_t ipNet, uint32_t serverNet)
     to.sin_port = htons(kPortDns);
     to.sin_addr.s_addr = serverNet;
 
-    std::string name;
+    string name;
     if (sendto(fd, request.data(), request.size(), 0,
                reinterpret_cast<struct sockaddr*>(&to), sizeof(to)) > 0) {
         fd_set readSet;

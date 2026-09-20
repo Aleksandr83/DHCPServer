@@ -20,6 +20,8 @@
  *
  * The harness always exits with 0 — the proof is the printed text.
  */
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <algorithm>
@@ -38,12 +40,12 @@ using dhcp::core::LogLevel;
 
 static int g_fail = 0;
 
-static void check(bool ok, const std::string& what)
+static void check(bool ok, const string& what)
 {
     if (ok) {
-        std::printf("  ok   %s\n", what.c_str());
+        printf("  ok   %s\n", what.c_str());
     } else {
-        std::printf("  FAIL %s\n", what.c_str());
+        printf("  FAIL %s\n", what.c_str());
         ++g_fail;
     }
 }
@@ -52,7 +54,7 @@ static void check(bool ok, const std::string& what)
 class StubQueue : public IErrorQueue {
 public:
     size_t capacity = 64;
-    std::vector<ErrorLogEntry> items;
+    vector<ErrorLogEntry> items;
 
     bool push(const ErrorLogEntry& entry) override
     {
@@ -73,12 +75,12 @@ public:
 /** A target that keeps the lines in memory (and can be told to refuse them). */
 class StubTarget : public IErrorLogTarget {
 public:
-    std::vector<std::string> lines;
-    std::vector<LogLevel> levels;
+    vector<string> lines;
+    vector<LogLevel> levels;
     size_t failFrom = static_cast<size_t>(-1);   // refuse once this many lines are in
-    std::string name = "stub";
+    string name = "stub";
 
-    bool append(LogLevel level, const std::string& line) override
+    bool append(LogLevel level, const string& line) override
     {
         if (lines.size() >= failFrom) return false;
         levels.push_back(level);
@@ -86,10 +88,10 @@ public:
         return true;
     }
 
-    const std::string& description() const override { return name; }
+    const string& description() const override { return name; }
 };
 
-static bool looksLikeDateStamp(const std::string& stamp)
+static bool looksLikeDateStamp(const string& stamp)
 {
     if (stamp.size() != 19) return false;
     if (stamp[4] != '-' || stamp[7] != '-' || stamp[10] != ' ' ||
@@ -103,59 +105,59 @@ static bool looksLikeDateStamp(const std::string& stamp)
     return true;
 }
 
-static size_t countChar(const std::string& text, char c)
+static size_t countChar(const string& text, char c)
 {
-    return static_cast<size_t>(std::count(text.begin(), text.end(), c));
+    return static_cast<size_t>(count(text.begin(), text.end(), c));
 }
 
 static void test_a_line_says_when_it_happened()
 {
-    std::printf("test_a_line_says_when_it_happened\n");
+    printf("test_a_line_says_when_it_happened\n");
 
-    const std::string withClock =
+    const string withClock =
         ErrorLogCore::formatLine(LogLevel::Error, "dns", "boom", 1758000000ULL, 12);
-    check(withClock.find(" [E] dns: boom") != std::string::npos,
+    check(withClock.find(" [E] dns: boom") != string::npos,
           "level, tag and message are there");
     check(looksLikeDateStamp(withClock.substr(0, 19)),
           "and the stamp is a real date/time: " + withClock.substr(0, 19));
-    check(withClock.find("t+") == std::string::npos,
+    check(withClock.find("t+") == string::npos,
           "the uptime form is not used when the clock is set");
 
-    const std::string noClock =
+    const string noClock =
         ErrorLogCore::formatLine(LogLevel::Error, "dns", "boom", 100ULL, 152);
     check(noClock == "t+152s [E] dns: boom",
           "a device whose clock is not set gets an uptime stamp, not 1970: " + noClock);
     check(!ErrorLogCore::clockIsSet(1577836799ULL), "one second before 2020 is 'no clock'");
     check(ErrorLogCore::clockIsSet(1577836800ULL), "2020-01-01 is a settable clock");
 
-    check(std::string(ErrorLogCore::levelTag(LogLevel::Error)) == "[E]", "[E] for errors");
-    check(std::string(ErrorLogCore::levelTag(LogLevel::Warn)) == "[W]", "[W] for warnings");
+    check(string(ErrorLogCore::levelTag(LogLevel::Error)) == "[E]", "[E] for errors");
+    check(string(ErrorLogCore::levelTag(LogLevel::Warn)) == "[W]", "[W] for warnings");
 }
 
 static void test_a_long_message_is_marked_as_truncated()
 {
-    std::printf("test_a_long_message_is_marked_as_truncated\n");
+    printf("test_a_long_message_is_marked_as_truncated\n");
 
-    const std::string shortMessage = "short";
+    const string shortMessage = "short";
     check(ErrorLogCore::clampMessage(shortMessage) == shortMessage,
           "a message that fits is left alone");
 
-    const std::string longMessage(500, 'x');
-    const std::string clamped = ErrorLogCore::clampMessage(longMessage);
+    const string longMessage(500, 'x');
+    const string clamped = ErrorLogCore::clampMessage(longMessage);
     check(countChar(clamped, 'x') == ErrorLogCore::kMaxMessage,
           "a long message is cut exactly at the limit");
-    check(clamped.find("...(truncated)") != std::string::npos,
+    check(clamped.find("...(truncated)") != string::npos,
           "and carries the marker, so a cut is never mistaken for an end");
 
-    const std::string line =
+    const string line =
         ErrorLogCore::formatLine(LogLevel::Warn, "log", longMessage, 100ULL, 1);
-    check(line.find("...(truncated)") != std::string::npos,
+    check(line.find("...(truncated)") != string::npos,
           "the marker survives the formatting too");
 }
 
 static void test_submit_then_drain_writes_every_line()
 {
-    std::printf("test_submit_then_drain_writes_every_line\n");
+    printf("test_submit_then_drain_writes_every_line\n");
 
     StubQueue queue;
     StubTarget target;
@@ -169,15 +171,15 @@ static void test_submit_then_drain_writes_every_line()
     const uint32_t written = log.drain(0);
     check(written == 2, "the drain wrote both lines");
     check(target.lines.size() == 2, "and the target has them");
-    check(target.lines[0].find("first") != std::string::npos, "in order (1)");
-    check(target.lines[1].find("second") != std::string::npos, "in order (2)");
+    check(target.lines[0].find("first") != string::npos, "in order (1)");
+    check(target.lines[1].find("second") != string::npos, "in order (2)");
     check(target.levels[1] == LogLevel::Warn, "with their levels");
     check(log.drain(0) == 0, "draining an empty queue writes nothing");
 }
 
 static void test_a_full_queue_is_reported_inside_the_log()
 {
-    std::printf("test_a_full_queue_is_reported_inside_the_log\n");
+    printf("test_a_full_queue_is_reported_inside_the_log\n");
 
     StubQueue queue;
     queue.capacity = 2;
@@ -192,7 +194,7 @@ static void test_a_full_queue_is_reported_inside_the_log()
 
     const uint32_t written = log.drain(0);
     check(written == 3, "the drain wrote the notice plus the two surviving messages");
-    check(target.lines[0].find("2 message(s) lost") != std::string::npos,
+    check(target.lines[0].find("2 message(s) lost") != string::npos,
           "the loss is the first thing the log says: " + target.lines[0]);
     check(target.levels[0] == LogLevel::Warn, "and it is a warning, not an error");
     check(log.dropped() == 0, "once written, the count starts over");
@@ -200,7 +202,7 @@ static void test_a_full_queue_is_reported_inside_the_log()
 
 static void test_a_target_that_refuses_lines_is_counted_too()
 {
-    std::printf("test_a_target_that_refuses_lines_is_counted_too\n");
+    printf("test_a_target_that_refuses_lines_is_counted_too\n");
 
     StubQueue queue;
     StubTarget target;
@@ -216,9 +218,9 @@ static void test_a_target_that_refuses_lines_is_counted_too()
     log.submit(LogLevel::Error, "dns", "kept");
     log.drain(0);
     check(target.lines.size() == 2, "the next drain writes the notice and the message");
-    check(target.lines[0].find("1 message(s) lost") != std::string::npos,
+    check(target.lines[0].find("1 message(s) lost") != string::npos,
           "the device's own failure is admitted too: " + target.lines[0]);
-    check(target.lines[1].find("kept") != std::string::npos, "then the message itself");
+    check(target.lines[1].find("kept") != string::npos, "then the message itself");
 }
 
 int main()
@@ -230,10 +232,10 @@ int main()
     test_a_target_that_refuses_lines_is_counted_too();
 
     if (g_fail == 0) {
-        std::printf("\nPASSED!\n");
+        printf("\nPASSED!\n");
         return 0;
     }
-    std::printf("\nFAILED (%d)\n", g_fail);
+    printf("\nFAILED (%d)\n", g_fail);
     return 1;
 }
 

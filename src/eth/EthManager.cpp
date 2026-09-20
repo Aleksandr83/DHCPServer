@@ -13,6 +13,8 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
+using namespace std;
+
 #if CONFIG_IDF_TARGET_ESP32P4
 /* ESP32-P4 internal EMAC (RMII) driver */
 #include "esp_eth_mac_esp.h"
@@ -62,10 +64,10 @@ namespace eth {
 // Construction / Destruction
 // ─────────────────────────────────────────────────────
 
-EthManager::EthManager(const std::string& ip4,
-                       const std::string& gateway,
-                       const std::string& netmask,
-                       const std::string& ip6)
+EthManager::EthManager(const string& ip4,
+                       const string& gateway,
+                       const string& netmask,
+                       const string& ip6)
     : staticIp4_(ip4)
     , gateway_(gateway)
     , netmask_(netmask)
@@ -314,8 +316,8 @@ void EthManager::init()
 // Static IP
 // ─────────────────────────────────────────────────────
 
-void EthManager::setStaticIp(const std::string& ip4, const std::string& gateway,
-                              const std::string& netmask)
+void EthManager::setStaticIp(const string& ip4, const string& gateway,
+                              const string& netmask)
 {
     staticIp4_ = ip4;
     gateway_ = gateway;

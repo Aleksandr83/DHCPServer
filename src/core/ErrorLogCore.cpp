@@ -2,6 +2,8 @@
 
 #include <ctime>
 
+using namespace std;
+
 namespace dhcp {
 namespace core {
 
@@ -20,7 +22,7 @@ constexpr const char* kTruncatedMark = " ...(truncated)";
  * argument order. Keeping the difference here means the rest of the file — the
  * part the host test covers — is one implementation, not two.
  */
-bool localTime(std::time_t t, std::tm& out)
+bool localTime(time_t t, tm& out)
 {
 #if defined(_WIN32)
     return ::localtime_s(&out, &t) == 0;
@@ -32,10 +34,10 @@ bool localTime(std::time_t t, std::tm& out)
 } // namespace
 
 ErrorLogCore::ErrorLogCore(IErrorQueue& queue, IErrorLogTarget& target,
-                           std::function<uint32_t()> uptimeSec)
+                           function<uint32_t()> uptimeSec)
     : queue_(queue)
     , target_(target)
-    , uptimeSec_(std::move(uptimeSec))
+    , uptimeSec_(move(uptimeSec))
 {
 }
 
@@ -49,25 +51,25 @@ const char* ErrorLogCore::levelTag(LogLevel level)
     return level == LogLevel::Warn ? "[W]" : "[E]";
 }
 
-std::string ErrorLogCore::clampMessage(const std::string& message)
+string ErrorLogCore::clampMessage(const string& message)
 {
     if (message.size() <= kMaxMessage) return message;
     return message.substr(0, kMaxMessage) + kTruncatedMark;
 }
 
-std::string ErrorLogCore::formatLine(LogLevel level, const char* tag,
-                                     const std::string& message,
+string ErrorLogCore::formatLine(LogLevel level, const char* tag,
+                                     const string& message,
                                      uint64_t nowEpochSec, uint32_t uptimeSec)
 {
-    std::string stamp;
+    string stamp;
     if (clockIsSet(nowEpochSec)) {
-        const std::time_t t = static_cast<std::time_t>(nowEpochSec);
-        std::tm tmv{};
+        const time_t t = static_cast<time_t>(nowEpochSec);
+        tm tmv{};
         // Local time rather than UTC: the operator reads this next to the
         // device's own pages, which show the same clock.
         if (localTime(t, tmv)) {
             char buf[32];
-            std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
             stamp = buf;
         }
     }
@@ -75,7 +77,7 @@ std::string ErrorLogCore::formatLine(LogLevel level, const char* tag,
         // No clock yet (a device that has not synced): an uptime stamp is a true
         // statement, "1970-01-01" is not.
         char buf[24];
-        std::snprintf(buf, sizeof(buf), "t+%us", static_cast<unsigned>(uptimeSec));
+        snprintf(buf, sizeof(buf), "t+%us", static_cast<unsigned>(uptimeSec));
         stamp = buf;
     }
 
@@ -83,7 +85,7 @@ std::string ErrorLogCore::formatLine(LogLevel level, const char* tag,
            clampMessage(message);
 }
 
-bool ErrorLogCore::submit(LogLevel level, const char* tag, const std::string& message)
+bool ErrorLogCore::submit(LogLevel level, const char* tag, const string& message)
 {
     uint32_t uptime = 0;
     if (uptimeSec_) uptime = uptimeSec_();
@@ -115,7 +117,7 @@ uint32_t ErrorLogCore::drain(uint32_t timeoutMs)
 
     for (;;) {
         if (dropNoticePending_ && dropped_ > 0) {
-            const std::string notice = std::to_string(dropped_) +
+            const string notice = to_string(dropped_) +
                                        " message(s) lost (queue full or the target refused them)";
             ErrorLogEntry note;
             note.level = LogLevel::Warn;

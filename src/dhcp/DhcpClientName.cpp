@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+using namespace std;
+
 namespace dhcp {
 namespace dhcp {
 
@@ -54,14 +56,14 @@ const uint8_t* DhcpClientName::findOption(const uint8_t* options, size_t len,
     return nullptr;
 }
 
-std::string DhcpClientName::decodeDnsName(const uint8_t* data, size_t len)
+string DhcpClientName::decodeDnsName(const uint8_t* data, size_t len)
 {
-    std::string out;
+    string out;
     size_t i = 0;
     while (i < len) {
         const size_t labelLen = data[i];
         if (labelLen == 0) break;                  // root: end of the name
-        if (labelLen > 63 || i + 1 + labelLen > len) return std::string();
+        if (labelLen > 63 || i + 1 + labelLen > len) return string();
         if (!out.empty()) out += '.';
         out.append(reinterpret_cast<const char*>(data + i + 1), labelLen);
         i += 1 + labelLen;
@@ -69,30 +71,30 @@ std::string DhcpClientName::decodeDnsName(const uint8_t* data, size_t len)
     return out;
 }
 
-std::string DhcpClientName::hostNameOption(const uint8_t* options, size_t len)
+string DhcpClientName::hostNameOption(const uint8_t* options, size_t len)
 {
     size_t optLen = 0;
     const uint8_t* data = findOption(options, len, kOptHostName, &optLen);
-    if (!data || optLen == 0) return std::string();
+    if (!data || optLen == 0) return string();
 
     // The value is a NUL-terminated string that may be padded with NULs; take
     // everything up to the first NUL.
     size_t n = 0;
     while (n < optLen && data[n] != 0) n++;
-    return sanitize(std::string(reinterpret_cast<const char*>(data), n));
+    return sanitize(string(reinterpret_cast<const char*>(data), n));
 }
 
-std::string DhcpClientName::fqdnOption(const uint8_t* options, size_t len)
+string DhcpClientName::fqdnOption(const uint8_t* options, size_t len)
 {
     size_t optLen = 0;
     const uint8_t* data = findOption(options, len, kOptFqdn, &optLen);
-    if (!data || optLen < 3) return std::string();   // flags + rcode1 + rcode2
+    if (!data || optLen < 3) return string();   // flags + rcode1 + rcode2
 
     const uint8_t flags = data[0];
     const uint8_t* name = data + 3;
     const size_t nameLen = optLen - 3;
 
-    std::string value;
+    string value;
     if (flags & kFqdnFlagE) {
         value = decodeDnsName(name, nameLen);
     } else {
@@ -108,15 +110,15 @@ std::string DhcpClientName::fqdnOption(const uint8_t* options, size_t len)
     return value;
 }
 
-std::string DhcpClientName::shortLabel(const std::string& name)
+string DhcpClientName::shortLabel(const string& name)
 {
     const size_t dot = name.find('.');
-    return (dot == std::string::npos) ? name : name.substr(0, dot);
+    return (dot == string::npos) ? name : name.substr(0, dot);
 }
 
-std::string DhcpClientName::fromOptions(const uint8_t* options, size_t len)
+string DhcpClientName::fromOptions(const uint8_t* options, size_t len)
 {
-    const std::string host = hostNameOption(options, len);
+    const string host = hostNameOption(options, len);
     if (!host.empty()) return host;      // option 12 is the name itself
 
     // Option 81 may be "pc1.lan" (use the host part) or just "lan" when the
@@ -126,9 +128,9 @@ std::string DhcpClientName::fromOptions(const uint8_t* options, size_t len)
     return shortLabel(fqdnOption(options, len));
 }
 
-std::string DhcpClientName::sanitize(const std::string& name)
+string DhcpClientName::sanitize(const string& name)
 {
-    std::string out;
+    string out;
     size_t i = 0;
     while (i < name.size()) {
         const unsigned char c = static_cast<unsigned char>(name[i]);

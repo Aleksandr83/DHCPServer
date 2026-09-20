@@ -18,6 +18,8 @@
  * list size, which the on-device build cannot offer.
  */
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -30,7 +32,7 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, #b, (long long)(a), (long long)(b)); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
 
 using dhcp::dhcp::AllowedComputer;
 using dhcp::dhcp::DhcpAllowedList;
@@ -49,7 +51,7 @@ struct Storage {
         return true;
     }
     static constexpr size_t kCanary = 16;
-    std::vector<unsigned char> buf;
+    vector<unsigned char> buf;
 };
 
 AllowedComputer entry(const char* mac, const char* name = "")
@@ -67,7 +69,7 @@ bool macOf(const char* text, unsigned char out[6])
 
 /** A table built from a list, ready to be queried. */
 struct Built {
-    explicit Built(const std::vector<AllowedComputer>& list)
+    explicit Built(const vector<AllowedComputer>& list)
     {
         ok = list_.init(storage.data());
         ok = ok && list_.rebuild(list);
@@ -111,12 +113,12 @@ static int test_mac_codec()
 /** Round trip through the NVS text format, including a damaged line. */
 static int test_codec_roundtrip()
 {
-    std::vector<AllowedComputer> list{
+    vector<AllowedComputer> list{
         entry("24:0A:C4:01:23:45", "office-pc"),
         entry("AA-BB-CC-DD-EE-FF", ""),           // no name
         entry("001122334455", "tablet"),
     };
-    const std::string text = DhcpAllowedList::serialize(list);
+    const string text = DhcpAllowedList::serialize(list);
     TEST_ASSERT_STR_EQ(text,
                        "24:0a:c4:01:23:45|office-pc|1\n"
                        "aa:bb:cc:dd:ee:ff||1\n"
@@ -153,7 +155,7 @@ static int test_codec_enable_flag()
     off.enabled = false;
     AllowedComputer on = entry("24:0a:c4:01:23:46", "new-pc");
 
-    const std::string text = DhcpAllowedList::serialize({off, on});
+    const string text = DhcpAllowedList::serialize({off, on});
     TEST_ASSERT_STR_EQ(text,
                        "24:0a:c4:01:23:45|old-pc|0\n"
                        "24:0a:c4:01:23:46|new-pc|1");
@@ -177,18 +179,18 @@ static int test_codec_enable_flag()
 /** The list is bounded: kMaxEntries entries, and 20 characters per name. */
 static int test_codec_limits()
 {
-    std::vector<AllowedComputer> many;
+    vector<AllowedComputer> many;
     const int over = static_cast<int>(DhcpAllowedList::kMaxEntries) + 3;
     for (int i = 0; i < over; i++) {
         char mac[18];
-        std::snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", i);
+        snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", i);
         many.push_back(entry(mac, "entry"));
     }
     auto text = DhcpAllowedList::serialize(many);
     TEST_ASSERT_EQ(DhcpAllowedList::parse(text).size(), DhcpAllowedList::kMaxEntries);
 
-    std::string longName(40, 'x');
-    std::vector<AllowedComputer> one{entry("24:0a:c4:01:23:45", longName.c_str())};
+    string longName(40, 'x');
+    vector<AllowedComputer> one{entry("24:0a:c4:01:23:45", longName.c_str())};
     auto trimmed = DhcpAllowedList::parse(DhcpAllowedList::serialize(one));
     TEST_ASSERT_EQ(trimmed.size(), 1u);
     TEST_ASSERT_EQ(trimmed[0].name.size(), DhcpAllowedList::kMaxNameLen);
@@ -218,14 +220,14 @@ static int test_blob_budget_matches_the_format()
 
     // The codec agrees with that arithmetic: a full list of the longest names
     // serializes to exactly the budget — not one byte more, not one less.
-    std::string longName(DhcpAllowedList::kMaxNameLen + 5, 'x');
-    std::vector<AllowedComputer> full;
+    string longName(DhcpAllowedList::kMaxNameLen + 5, 'x');
+    vector<AllowedComputer> full;
     for (size_t i = 0; i < DhcpAllowedList::kMaxEntries; i++) {
         char mac[18];
-        std::snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", static_cast<unsigned>(i));
+        snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", static_cast<unsigned>(i));
         full.push_back(entry(mac, longName.c_str()));
     }
-    const std::string text = DhcpAllowedList::serialize(full);
+    const string text = DhcpAllowedList::serialize(full);
     TEST_ASSERT_EQ(text.size(), DhcpAllowedList::kMaxBytes);
     TEST_ASSERT_EQ(DhcpAllowedList::parse(text).size(), DhcpAllowedList::kMaxEntries);
     return 0;
@@ -256,7 +258,7 @@ static int test_table_lookup()
 static int test_table_limits_and_duplicates()
 {
     // 1. The same MAC twice (in different spellings) is one entry.
-    std::vector<AllowedComputer> dup{
+    vector<AllowedComputer> dup{
         entry("24:0a:c4:01:23:00", "one"),
         entry("24:0A:C4:01:23:00", "again"),
         entry("24:0a:c4:01:23:01", "two"),
@@ -269,11 +271,11 @@ static int test_table_limits_and_duplicates()
 
     // 2. More MACs than the table holds: it keeps kMaxEntries and says how many
     //    it dropped.
-    std::vector<AllowedComputer> many;
+    vector<AllowedComputer> many;
     const int over = static_cast<int>(DhcpAllowedList::kMaxEntries) + 5;
     for (int i = 0; i < over; i++) {
         char mac[18];
-        std::snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", i);
+        snprintf(mac, sizeof(mac), "24:0a:c4:01:23:%02x", i);
         many.push_back(entry(mac, "e"));
     }
     skipped = 0;
@@ -364,10 +366,10 @@ static int test_policy_switch_on()
     TEST_ASSERT_TRUE(macOf("aa:bb:cc:dd:ee:02", disabled));
     TEST_ASSERT_TRUE(macOf("aa:bb:cc:dd:ee:03", stranger));
 
-    std::vector<DhcpAllowedList::StaticRef> bindings(2);
-    std::memcpy(bindings[0].mac, bound, 6);
+    vector<DhcpAllowedList::StaticRef> bindings(2);
+    memcpy(bindings[0].mac, bound, 6);
     bindings[0].enabled = true;
-    std::memcpy(bindings[1].mac, disabled, 6);
+    memcpy(bindings[1].mac, disabled, 6);
     bindings[1].enabled = false;   // the per-binding Enable checkbox is off
 
     TEST_ASSERT_TRUE(DhcpAllowedList::isClientAllowed(listed, true, built.list_, bindings));

@@ -9,6 +9,8 @@
 #include "lwip/dns.h"
 #include "lwip/netdb.h"
 
+using namespace std;
+
 static const char* TAG = "WiFiManager";
 
 // Default external DNS server
@@ -17,10 +19,10 @@ static const char* TAG = "WiFiManager";
 namespace dhcp {
 namespace wifi {
 
-WiFiManager::WiFiManager(const std::string& ip4,
-                         const std::string& gateway,
-                         const std::string& netmask,
-                         const std::string& ip6)
+WiFiManager::WiFiManager(const string& ip4,
+                         const string& gateway,
+                         const string& netmask,
+                         const string& ip6)
     : staticIp4_(ip4)
     , gateway_(gateway)
     , netmask_(netmask)
@@ -33,8 +35,8 @@ WiFiManager::~WiFiManager()
     deinit();
 }
 
-void WiFiManager::setStaticIp(const std::string& ip4, const std::string& gateway,
-                               const std::string& netmask)
+void WiFiManager::setStaticIp(const string& ip4, const string& gateway,
+                               const string& netmask)
 {
     staticIp4_ = ip4;
     gateway_ = gateway;
@@ -104,7 +106,7 @@ void WiFiManager::deinit()
     ESP_LOGI(TAG, "WiFi deinitialized");
 }
 
-void WiFiManager::connect(const std::string& ssid, const std::string& password)
+void WiFiManager::connect(const string& ssid, const string& password)
 {
     if (!initialized_) {
         ESP_LOGE(TAG, "WiFi not initialized, call init() first");
@@ -115,8 +117,8 @@ void WiFiManager::connect(const std::string& ssid, const std::string& password)
     status_ = WiFiStatus::CONNECTING;
 
     wifi_config_t wifiCfg = {};
-    std::strncpy(reinterpret_cast<char*>(wifiCfg.sta.ssid), ssid.c_str(), sizeof(wifiCfg.sta.ssid) - 1);
-    std::strncpy(reinterpret_cast<char*>(wifiCfg.sta.password), password.c_str(), sizeof(wifiCfg.sta.password) - 1);
+    strncpy(reinterpret_cast<char*>(wifiCfg.sta.ssid), ssid.c_str(), sizeof(wifiCfg.sta.ssid) - 1);
+    strncpy(reinterpret_cast<char*>(wifiCfg.sta.password), password.c_str(), sizeof(wifiCfg.sta.password) - 1);
 
     ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", ssid.c_str());
 

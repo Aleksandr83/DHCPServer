@@ -15,6 +15,7 @@
 #include "../dns/DnsServer.h"
 #include "../files/IFileManager.h"
 #include "../storage/PathUtil.h"
+#include "../security/CertStore.h"
 #include "../time/TimeServer.h"
 #include "../time/TimeMath.h"
 
@@ -38,6 +39,8 @@
 #include "freertos/semphr.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+
+using namespace std;
 
 static const char* TAG = "RestApi";
 
@@ -67,6 +70,20 @@ constexpr int kRestartPollMs = 500;          // polling for the device to come b
 constexpr int kConnectionTestWaitMs = 7000;  // waiting for "test connection"
 constexpr size_t kMaxRelPathLen = 64;        // a path inside the data volume
 constexpr size_t kMaxUint64Digits = 20;      // decimal digits of a uint64_t
+
+// Rule 39: the task that re-applies the HTTPS switch once the answer of the
+// certificate request has left the device (stage 160).
+constexpr uint32_t kHttpsSwitchStackBytes = 4096;
+constexpr int kHttpsSwitchDelayMs = 400;
+
+// Rule 39: making a certificate pair is mbedTLS X.509 and the PSA key store over
+// an 8 KB stack — several kilobytes too many (stage 164). It is a rare,
+// operator-triggered action, so it gets a task of its own with room to spare
+// rather than the httpd task being asked to carry it. The wait is the point
+// after which the handler answers "did not finish" instead of holding the web
+// server: a key pair takes tens of milliseconds.
+constexpr uint32_t kCertGenTaskStackBytes = 16384;
+constexpr int kCertGenWaitMs = 10000;
 
 // ASCII and hex вЂ” the same limits JsonWriter and PathUtil apply to a file name.
 constexpr uint8_t kHexNibbleMask = 0x0F;
@@ -106,13 +123,16 @@ namespace web {
 ::dhcp::time::TimeServer*    RestApi::s_time = nullptr;
 ::dhcp::web::AuthManager*    RestApi::s_auth = nullptr;
 ::dhcp::files::IFileManager* RestApi::s_files = nullptr;
+::dhcp::web::IWebServer*     RestApi::s_web = nullptr;
+::dhcp::security::CertStore* RestApi::s_certs = nullptr;
 
 void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
                     ::dhcp::dhcp::IDhcpServer* dhcpSrv,
                     ::dhcp::dns::DnsServer* dnsSrv,
                     ::dhcp::time::TimeServer* timeSrv,
                     ::dhcp::web::AuthManager* auth,
-                    ::dhcp::files::IFileManager* fileMgr)
+                    ::dhcp::files::IFileManager* fileMgr,
+                    ::dhcp::web::IWebServer* web)
 {
     s_wifi = wifi;
     s_dhcp = dhcpSrv;
@@ -120,7 +140,13 @@ void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
     s_time = timeSrv;
     s_auth = auth;
     s_files = fileMgr;
+    s_web = web;
     ESP_LOGI(TAG, "RestApi initialized");
+}
+
+void RestApi::setCertificateStore(::dhcp::security::CertStore* store)
+{
+    s_certs = store;
 }
 
 // ─────────────────────────────────────────────────────
@@ -132,13 +158,13 @@ bool RestApi::checkAuth(httpd_req* req)
     if (!s_auth) return false;
 
     size_t hdrLen = httpd_req_get_hdr_value_len(req, "Authorization");
-    std::string authHeader;
+    string authHeader;
     if (hdrLen > 0) {
         authHeader.resize(hdrLen);
         httpd_req_get_hdr_value_str(req, "Authorization", &authHeader[0], hdrLen + 1);
     }
 
-    std::string clientIp = getClientIp(req);
+    string clientIp = getClientIp(req);
 
     if (!s_auth->authenticate(authHeader, clientIp)) {
         respondUnauthorized(req);
@@ -190,12 +216,12 @@ bool RestApi::checkFileAccess(httpd_req* req)
     return false;
 }
 
-std::string RestApi::getClientIp(httpd_req* req)
+string RestApi::getClientIp(httpd_req* req)
 {
     // Try X-Forwarded-For first
     size_t hdrLen = httpd_req_get_hdr_value_len(req, "X-Forwarded-For");
     if (hdrLen > 0) {
-        std::string ip;
+        string ip;
         ip.resize(hdrLen);
         httpd_req_get_hdr_value_str(req, "X-Forwarded-For", &ip[0], hdrLen + 1);
         return ip;
@@ -209,26 +235,26 @@ std::string RestApi::getClientIp(httpd_req* req)
 // JSON helpers
 // ─────────────────────────────────────────────────────
 
-void RestApi::addJsonString(std::string& json, const std::string& key,
-                             const std::string& val, bool addComma)
+void RestApi::addJsonString(string& json, const string& key,
+                             const string& val, bool addComma)
 {
     if (addComma) json += ",";
     json += "\"" + key + "\":\"" + val + "\"";
 }
 
-void RestApi::addJsonBool(std::string& json, const std::string& key,
+void RestApi::addJsonBool(string& json, const string& key,
                            bool val, bool addComma)
 {
     if (addComma) json += ",";
     json += "\"" + key + "\":" + (val ? "true" : "false");
 }
 
-void RestApi::addJsonInt(std::string& json, const std::string& key,
+void RestApi::addJsonInt(string& json, const string& key,
                           int64_t val, bool addComma)
 {
     if (addComma) json += ",";
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%lld", (long long)val);
+    snprintf(buf, sizeof(buf), "%lld", (long long)val);
     json += "\"" + key + "\":" + buf;
 }
 
@@ -236,7 +262,7 @@ void RestApi::addJsonInt(std::string& json, const std::string& key,
 // Body reader
 // ─────────────────────────────────────────────────────
 
-std::string RestApi::readBody(httpd_req* req, size_t maxLen)
+string RestApi::readBody(httpd_req* req, size_t maxLen)
 {
     size_t totalLen = req->content_len;
     if (totalLen == 0) return "";
@@ -245,7 +271,7 @@ std::string RestApi::readBody(httpd_req* req, size_t maxLen)
     // the settings-import endpoint passes a larger cap (~16 KB).
     if (totalLen > maxLen) totalLen = maxLen;
 
-    std::string body(totalLen, '\0');
+    string body(totalLen, '\0');
     size_t offset = 0;
     int retries = 0;
     while (offset < totalLen) {
@@ -271,43 +297,43 @@ std::string RestApi::readBody(httpd_req* req, size_t maxLen)
 }
 
 // ─── Simple JSON parser helper ──────────────────────
-static std::string jsonGetStr(const std::string& json, const std::string& key)
+static string jsonGetStr(const string& json, const string& key)
 {
     auto pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return "";
+    if (pos == string::npos) return "";
     pos = json.find(':', pos);
-    if (pos == std::string::npos) return "";
+    if (pos == string::npos) return "";
     pos++;
     while (pos < json.length() && json[pos] == ' ') pos++;
     if (pos >= json.length() || json[pos] != '"') return "";
     pos++;
     auto end = json.find('"', pos);
-    if (end == std::string::npos) return "";
+    if (end == string::npos) return "";
     return json.substr(pos, end - pos);
 }
 
-static bool jsonGetBool(const std::string& json, const std::string& key, bool def)
+static bool jsonGetBool(const string& json, const string& key, bool def)
 {
     auto pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return def;
+    if (pos == string::npos) return def;
     pos = json.find(':', pos);
-    if (pos == std::string::npos) return def;
+    if (pos == string::npos) return def;
     pos++;
     while (pos < json.length() && json[pos] == ' ') pos++;
     if (pos >= json.length()) return def;
     return (json[pos] == 't' || json[pos] == 'T');
 }
 
-static int jsonGetInt(const std::string& json, const std::string& key, int def)
+static int jsonGetInt(const string& json, const string& key, int def)
 {
     auto pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return def;
+    if (pos == string::npos) return def;
     pos = json.find(':', pos);
-    if (pos == std::string::npos) return def;
+    if (pos == string::npos) return def;
     pos++;
     while (pos < json.length() && json[pos] == ' ') pos++;
     if (pos >= json.length()) return def;
-    return std::atoi(&json[pos]);
+    return atoi(&json[pos]);
 }
 
 /**
@@ -318,25 +344,25 @@ static int jsonGetInt(const std::string& json, const std::string& key, int def)
  * would need an escape (quotes, backslashes), so a plain scan between quotes is
  * enough here — and it keeps the parser as small as the rest of this file.
  */
-static std::vector<std::string> jsonGetStrArray(const std::string& json,
-                                                const std::string& key,
+static vector<string> jsonGetStrArray(const string& json,
+                                                const string& key,
                                                 size_t maxItems = 512)
 {
-    std::vector<std::string> out;
+    vector<string> out;
 
     auto pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return out;
+    if (pos == string::npos) return out;
     pos = json.find('[', pos);
-    if (pos == std::string::npos) return out;
+    if (pos == string::npos) return out;
     const auto end = json.find(']', pos);
-    if (end == std::string::npos) return out;
+    if (end == string::npos) return out;
 
     size_t i = pos + 1;
     while (i < end && out.size() < maxItems) {
         const auto open = json.find('"', i);
-        if (open == std::string::npos || open >= end) break;
+        if (open == string::npos || open >= end) break;
         const auto close = json.find('"', open + 1);
-        if (close == std::string::npos || close > end) break;
+        if (close == string::npos || close > end) break;
         out.push_back(json.substr(open + 1, close - open - 1));
         i = close + 1;
     }
@@ -352,7 +378,7 @@ static std::vector<std::string> jsonGetStrArray(const std::string& json,
  * somebody else's entries. Quoted text is skipped so a name containing ']'
  * cannot unbalance the count.
  */
-static size_t jsonFindArrayEnd(const std::string& json, size_t open)
+static size_t jsonFindArrayEnd(const string& json, size_t open)
 {
     int depth = 0;
     bool inStr = false;
@@ -374,7 +400,7 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "wifi_connected",
                 s_wifi ? s_wifi->isConnected() : false, false);
     addJsonString(json, "wifi_ssid",
@@ -407,7 +433,7 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
     // sees the capacities even though `/api/files/*` answers it with 403.
     json += ",\"volumes\":" + FileJson::volumeArray(
         s_files ? s_files->volumes()
-                : std::vector<::dhcp::storage::VolumeInfo>{});
+                : vector<::dhcp::storage::VolumeInfo>{});
     addJsonInt(json, "cpu_load0", ::dhcp::core::CpuMonitor::loadCore0(), true);
     addJsonInt(json, "cpu_load1", ::dhcp::core::CpuMonitor::loadCore1(), true);
     addJsonInt(json, "heap_free",
@@ -513,7 +539,7 @@ esp_err_t RestApi::handleGetVersion(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string json = "{\"firmware_version\":\"";
+    string json = "{\"firmware_version\":\"";
     json += ::dhcp::core::Version::instance().toString();
     json += "\"}";
 
@@ -531,7 +557,7 @@ esp_err_t RestApi::handleGetDhcpSettings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto cfg = ::dhcp::core::Config::instance().getDhcp();
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "enabled", cfg.enabled, false);
     addJsonString(json, "server_state",
                   s_dhcp ? s_dhcp->stateString() : "unknown", true);
@@ -583,7 +609,7 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -688,16 +714,16 @@ esp_err_t RestApi::handleGetStaticBindings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto bindings = ::dhcp::core::Config::instance().getStaticBindings();
-    std::string json = "{\"bindings\":[";
+    string json = "{\"bindings\":[";
     for (size_t i = 0; i < bindings.size(); i++) {
         if (i > 0) json += ",";
         json += "{\"mac\":\"" + bindings[i].mac + "\",";
         json += "\"ip\":\"" + bindings[i].ip + "\",";
         json += "\"name\":\"" + bindings[i].name + "\",";
         json += "\"gateway\":\"" + bindings[i].gateway + "\",";
-        json += std::string("\"use_gateway\":") + (bindings[i].useGateway ? "true" : "false") + ",";
-        json += std::string("\"enabled\":") + (bindings[i].enabled ? "true" : "false") + ",";
-        json += std::string("\"use_dns\":") + (bindings[i].useDns ? "true" : "false") + "}";
+        json += string("\"use_gateway\":") + (bindings[i].useGateway ? "true" : "false") + ",";
+        json += string("\"enabled\":") + (bindings[i].enabled ? "true" : "false") + ",";
+        json += string("\"use_dns\":") + (bindings[i].useDns ? "true" : "false") + "}";
     }
     json += "]}";
 
@@ -714,17 +740,17 @@ esp_err_t RestApi::handlePostStaticBindings(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
     }
 
     // Parse JSON array of bindings
-    std::vector<::dhcp::core::StaticBinding> bindings;
+    vector<::dhcp::core::StaticBinding> bindings;
     // Simple parser: find "mac":"...","ip":"...","name":"..." patterns
     size_t pos = 0;
-    while ((pos = body.find("\"mac\"", pos)) != std::string::npos) {
+    while ((pos = body.find("\"mac\"", pos)) != string::npos) {
         ::dhcp::core::StaticBinding b;
         b.mac = jsonGetStr(body.substr(pos), "mac");
         b.ip = jsonGetStr(body.substr(pos), "ip");
@@ -762,10 +788,10 @@ esp_err_t RestApi::handleGetAllowedComputers(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto cfg = ::dhcp::core::Config::instance().getDhcp();
-    const std::string text = ::dhcp::core::Config::instance().getAllowedComputers();
+    const string text = ::dhcp::core::Config::instance().getAllowedComputers();
     auto list = ::dhcp::dhcp::DhcpAllowedList::parse(text);
 
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "allow_only", cfg.allowOnly, false);
     addJsonBool(json, "available",
                 s_dhcp ? s_dhcp->allowedListAvailable() : false, true);
@@ -780,7 +806,7 @@ esp_err_t RestApi::handleGetAllowedComputers(httpd_req* req)
         if (i > 0) json += ",";
         json += "{\"mac\":\"" + list[i].mac + "\",";
         json += "\"name\":\"" + list[i].name + "\",";
-        json += std::string("\"enabled\":") +
+        json += string("\"enabled\":") +
                 (list[i].enabled ? "true" : "false") + "}";
     }
     json += "]}";
@@ -798,7 +824,7 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req, 8192);
+    string body = readBody(req, 8192);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -808,14 +834,14 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
     // the very text that will be written to NVS: an entry the codec would drop
     // is an entry the operator asked for and would not get — say so instead of
     // saving a list that quietly differs from what the page shows.
-    std::vector<::dhcp::dhcp::AllowedComputer> list;
+    vector<::dhcp::dhcp::AllowedComputer> list;
     const size_t kParseCap = 64;   // readBody() is already bounded; this keeps
                                    // the vector bounded with it
     size_t pos = 0;
-    while ((pos = body.find("\"mac\"", pos)) != std::string::npos &&
+    while ((pos = body.find("\"mac\"", pos)) != string::npos &&
            list.size() < kParseCap) {
         ::dhcp::dhcp::AllowedComputer entry;
-        std::string seg = body.substr(pos);
+        string seg = body.substr(pos);
         entry.mac = jsonGetStr(seg, "mac");
         entry.name = jsonGetStr(seg, "name");
         // The Enable checkbox of the row; absent means enabled.
@@ -823,7 +849,7 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
         pos++;
         if (entry.mac.empty() && entry.name.empty()) continue;
         if (::dhcp::dhcp::DhcpAllowedList::normalizeMac(entry.mac).empty()) {
-            std::string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
+            string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
                               entry.mac + "\"}";
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req, msg.c_str());
@@ -836,7 +862,7 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
         // The number in the message is read from the constant, so it cannot
         // drift away from the limit the code actually enforces.
         char msg[96];
-        std::snprintf(msg, sizeof(msg),
+        snprintf(msg, sizeof(msg),
                       "{\"status\":\"error\",\"message\":\"too many "
                       "entries (max %u)\"}",
                       static_cast<unsigned>(::dhcp::dhcp::DhcpAllowedList::kMaxEntries));
@@ -845,10 +871,10 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
         return ESP_OK;
     }
 
-    const std::string text = ::dhcp::dhcp::DhcpAllowedList::serialize(list);
+    const string text = ::dhcp::dhcp::DhcpAllowedList::serialize(list);
     if (text.size() > ::dhcp::core::Config::kMaxAllowedBytes) {
         char msg[128];
-        std::snprintf(msg, sizeof(msg),
+        snprintf(msg, sizeof(msg),
                       "{\"status\":\"error\",\"message\":\"list too "
                       "large for NVS (max %u bytes)\"}",
                       static_cast<unsigned>(::dhcp::core::Config::kMaxAllowedBytes));
@@ -878,8 +904,8 @@ esp_err_t RestApi::handlePostAllowedComputers(httpd_req* req)
     ESP_LOGI(TAG, "Allowed computers updated (%zu entries, %zu bytes, allow-only=%d)",
              list.size(), text.size(), allowOnly ? 1 : 0);
 
-    std::string json = "{\"status\":\"ok\",\"count\":" +
-                       std::to_string(list.size()) + ",\"allow_only\":" +
+    string json = "{\"status\":\"ok\",\"count\":" +
+                       to_string(list.size()) + ",\"allow_only\":" +
                        (allowOnly ? "true" : "false") + "}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
@@ -894,16 +920,16 @@ esp_err_t RestApi::handlePostLookupClientName(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req, 512);
+    string body = readBody(req, 512);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
     }
 
-    const std::string macText = jsonGetStr(body, "mac");
+    const string macText = jsonGetStr(body, "mac");
     uint8_t mac[6];
     if (!::dhcp::dhcp::DhcpAllowedList::parseMac(macText, mac)) {
-        std::string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
+        string msg = "{\"status\":\"error\",\"message\":\"invalid MAC: " +
                           macText + "\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, msg.c_str());
@@ -920,7 +946,7 @@ esp_err_t RestApi::handlePostLookupClientName(httpd_req* req)
     char foundIp[kIp4TextLen] = "";
     if (found.ipNet != 0) inet_ntop(AF_INET, &found.ipNet, foundIp, sizeof(foundIp));
 
-    std::string json = "{";
+    string json = "{";
     addJsonString(json, "status", "ok", false);
     addJsonString(json, "mac",
                   ::dhcp::dhcp::DhcpAllowedList::formatMac(mac), true);
@@ -948,13 +974,13 @@ esp_err_t RestApi::handleGetLeases(httpd_req* req)
 
     // Try to get leases from DhcpServer
     auto* dhcpFull = static_cast<::dhcp::dhcp::DhcpServer*>(s_dhcp);
-    std::string json = "{\"leases\":[";
+    string json = "{\"leases\":[";
     if (dhcpFull) {
         auto leases = dhcpFull->getLeases();
         for (size_t i = 0; i < leases.size(); i++) {
             if (i > 0) json += ",";
             char macStr[kMacTextLen];
-            std::snprintf(macStr, sizeof(macStr),
+            snprintf(macStr, sizeof(macStr),
                           "%02x:%02x:%02x:%02x:%02x:%02x",
                           leases[i].mac[0], leases[i].mac[1],
                           leases[i].mac[2], leases[i].mac[3],
@@ -988,7 +1014,7 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto cfg = ::dhcp::core::Config::instance().getDns();
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "enabled", cfg.enabled, false);
     addJsonString(json, "server_state",
                   s_dns ? s_dns->stateString() : "unknown", true);
@@ -1041,7 +1067,7 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -1177,13 +1203,13 @@ esp_err_t RestApi::handleGetLocalHosts(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto hosts = ::dhcp::core::Config::instance().getLocalHosts();
-    std::string json = "{\"hosts\":[";
+    string json = "{\"hosts\":[";
     for (size_t i = 0; i < hosts.size(); i++) {
         if (i > 0) json += ",";
         json += "{\"name\":\"" + hosts[i].name + "\",";
         json += "\"ip4\":\"" + hosts[i].ip4 + "\",";
         json += "\"ip6\":\"" + hosts[i].ip6 + "\",";
-        json += std::string("\"enabled\":") + (hosts[i].enabled ? "true" : "false") + "}";
+        json += string("\"enabled\":") + (hosts[i].enabled ? "true" : "false") + "}";
     }
     json += "]}";
 
@@ -1200,16 +1226,16 @@ esp_err_t RestApi::handlePostLocalHosts(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
     }
 
     // Parse JSON array of hosts: find "name":"..." patterns
-    std::vector<::dhcp::core::LocalHostEntry> hosts;
+    vector<::dhcp::core::LocalHostEntry> hosts;
     size_t pos = 0;
-    while ((pos = body.find("\"name\"", pos)) != std::string::npos) {
+    while ((pos = body.find("\"name\"", pos)) != string::npos) {
         ::dhcp::core::LocalHostEntry e;
         e.name = jsonGetStr(body.substr(pos), "name");
         e.ip4 = jsonGetStr(body.substr(pos), "ip4");
@@ -1251,10 +1277,29 @@ esp_err_t RestApi::handleGetSecuritySettings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto cfg = ::dhcp::core::Config::instance().getSecurity();
-    std::string json = "{";
+
+    // The state of the certificate is reported next to the switch: the page needs
+    // to know whether turning HTTPS on is even possible, and a switch that looks
+    // available but is refused teaches the operator nothing (stage 158).
+    bool httpsAvailable = false;
+    string httpsStatus = "no_store";
+    bool httpsServing = false;
+    if (s_web != nullptr) {
+        httpsAvailable = s_web->httpsAvailable(&httpsStatus);
+        // "Enabled" is what listens, not what is stored: at boot the request for
+        // HTTPS may still be waiting for the clock (stage 165), and the page that
+        // showed the stored wish called the interface ready while nothing was on
+        // port 443.
+        httpsServing = s_web->httpsEnabled();
+    }
+
+    string json = "{";
     addJsonString(json, "username", cfg.username, false);
     addJsonInt(json, "max_attempts", cfg.maxAttempts, true);
     addJsonInt(json, "lockout_period", cfg.lockoutPeriodSec, true);
+    addJsonBool(json, "https_enabled", httpsServing, true);
+    addJsonBool(json, "https_available", httpsAvailable, true);
+    addJsonString(json, "https_status", httpsStatus, true);
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -1270,7 +1315,7 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -1287,6 +1332,33 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
     cfg.maxAttempts = jsonGetInt(body, "max_attempts", 5);
     cfg.lockoutPeriodSec = jsonGetInt(body, "lockout_period", 300);
 
+    const auto current = ::dhcp::core::Config::instance().getSecurity();
+    cfg.httpsEnabled = current.httpsEnabled;
+    cfg.certStorage = current.certStorage;
+    // The name of the certificate belongs to the certificates page and is not
+    // edited here, so it is carried over: a default-constructed field would
+    // silently undo the operator's name on every save of this page.
+    cfg.certName = current.certName;
+
+    // The HTTPS server is switched first, and the request is refused if it cannot
+    // work: a stored "HTTPS is on" with no server behind it is exactly the kind
+    // of setting the operator would only notice when the interface is gone.
+    const bool httpsRequested = jsonGetBool(body, "https_enabled", current.httpsEnabled);
+    if (s_web != nullptr && httpsRequested != s_web->httpsEnabled()) {
+        string reason;
+        if (!s_web->setHttpsEnabled(httpsRequested, &reason)) {
+            string json = "{\"status\":\"error\",\"message\":\"";
+            json += reason;
+            json += "\"}";
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, json.c_str());
+            ESP_LOGW(TAG, "HTTPS switch refused: %s", reason.c_str());
+            return ESP_OK;
+        }
+        cfg.httpsEnabled = httpsRequested;
+    }
+
     ::dhcp::core::Config::instance().setSecurity(cfg);
     // Reload auth config
     if (s_auth) s_auth->reloadConfig();
@@ -1294,6 +1366,412 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// Certificates (Settings → Security → Certificates, stage 160)
+// ─────────────────────────────────────────────────────
+// The page needs what no other endpoint can tell it: which volume holds the
+// HTTPS pair, whether that pair can still serve, and how long it will. The
+// private key is in none of the answers — the only reader of `server.key` is the
+// TLS server itself through `CertStore::load`.
+
+namespace {
+
+/** @brief What the deferred HTTPS switch has to do. */
+struct HttpsSwitch {
+    bool enable = false;
+};
+
+/**
+ * @brief Answer a refused certificate action with the reason.
+ *
+ * The text is the one of the store ("the volume /sdcard is not available", "the
+ * device clock is not set yet"), and it reaches the page unchanged: a bare
+ * "failed" would leave the operator guessing which of the two volumes to fix.
+ */
+esp_err_t answerCertificateError(httpd_req* req, const string& message)
+{
+    const string json = "{\"status\":\"error\",\"message\":\"" +
+                        JsonWriter::escape(message) + "\"}";
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+/**
+ * @brief The one certificate generation that can be in progress (stage 164).
+ *
+ * The work runs in a task of its own, so the result cannot live in the frame of
+ * the handler: a handler that gives up waiting and returns must not leave the
+ * running task writing into a dead stack frame. The slot is file-static, the
+ * gate semaphore is free exactly while no task is filling it, and a second
+ * request that arrives during a generation is refused instead of overlapping.
+ */
+struct CertGenJob {
+    ::dhcp::security::CertStore* store = nullptr;
+    string name;
+    string ip;
+    int years = ::dhcp::security::kValidityYears;
+    bool ok = false;
+    string detail;
+};
+
+CertGenJob s_certGenJob;                     // the slot, owned while the gate is taken
+SemaphoreHandle_t s_certGenGate = nullptr;   // free = no generation is running
+SemaphoreHandle_t s_certGenDone = nullptr;   // given once the slot is filled
+
+/**
+ * @brief Generate the pair out of the httpd task.
+ *
+ * `CertStore::generate` goes through mbedTLS X.509 writing and the PSA key store,
+ * and that chain does not fit the stack of the httpd task (8192 bytes): the
+ * request asked for it, the stack overflowed, the device panicked and never
+ * answered. The `certs` folder was created before the pair was built, so what
+ * the operator found afterwards was an empty folder and a request still hanging.
+ */
+void certificateGenerateTask(void*)
+{
+    CertGenJob& job = s_certGenJob;
+    job.ok = job.store->generate(job.name, job.ip, &job.detail, job.years);
+    xSemaphoreGive(s_certGenDone);
+    // The slot stays filled until the handler has read it (which may be never, if
+    // it gave up on the clock); the gate is what says the next run may start.
+    xSemaphoreGive(s_certGenGate);
+    vTaskDelete(nullptr);
+}
+
+/**
+ * @brief Run one certificate generation in its own task and wait for it.
+ *
+ * @return true when the pair was made. On false `detail` carries the reason: the
+ *         refusal of the store, or the failure of the run itself.
+ */
+bool runCertificateGeneration(::dhcp::security::CertStore* store, const string& name,
+                              const string& ip, int years, string& detail)
+{
+    if (s_certGenGate == nullptr) {
+        s_certGenGate = xSemaphoreCreateBinary();
+        if (s_certGenGate != nullptr) xSemaphoreGive(s_certGenGate);   // free at start
+    }
+    if (s_certGenDone == nullptr) s_certGenDone = xSemaphoreCreateBinary();
+    if (s_certGenGate == nullptr || s_certGenDone == nullptr) {
+        detail = "cannot allocate the certificate generator";
+        return false;
+    }
+    if (xSemaphoreTake(s_certGenGate, 0) != pdTRUE) {
+        detail = "a certificate generation is already running";
+        return false;
+    }
+
+    s_certGenJob.store = store;
+    s_certGenJob.name = name;
+    s_certGenJob.ip = ip;
+    s_certGenJob.years = years;
+    s_certGenJob.ok = false;
+    s_certGenJob.detail.clear();
+    // A previous run that gave up on the clock may have left its signal behind;
+    // a fresh wait must not read it as the answer of this one.
+    while (xSemaphoreTake(s_certGenDone, 0) == pdTRUE) { }
+
+    if (xTaskCreate(&certificateGenerateTask, "cert_gen", kCertGenTaskStackBytes,
+                    nullptr, 5, nullptr) != pdPASS) {
+        xSemaphoreGive(s_certGenGate);
+        detail = "cannot start the certificate generator";
+        return false;
+    }
+
+    if (xSemaphoreTake(s_certGenDone, pdMS_TO_TICKS(kCertGenWaitMs)) != pdTRUE) {
+        // The task is still working into the slot and still holds the gate, so
+        // nothing here is freed, restarted or reused: it releases both itself.
+        ESP_LOGE(TAG, "certificate generation did not finish in %d ms", kCertGenWaitMs);
+        detail = "the certificate generation did not finish";
+        return false;
+    }
+
+    const bool ok = s_certGenJob.ok;
+    detail = s_certGenJob.detail;
+    return ok;
+}
+
+} // namespace
+
+void RestApi::scheduleHttpsSwitch(bool enable)
+{
+    if (s_web == nullptr) return;
+
+    auto* work = new HttpsSwitch{enable};
+    if (xTaskCreate(&RestApi::httpsSwitchTask, "https_switch", kHttpsSwitchStackBytes,
+                    work, tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        // The answer of the request is on its way; the log line is all that is
+        // left to say that the switch did not happen.
+        ESP_LOGE(TAG, "cannot start the HTTPS switch task");
+        delete work;
+        return;
+    }
+    ESP_LOGI(TAG, "HTTPS will be %s after the certificate change",
+             enable ? "restarted" : "stopped");
+}
+
+void RestApi::httpsSwitchTask(void* arg)
+{
+    auto* work = static_cast<HttpsSwitch*>(arg);
+    const bool enable = work->enable;
+    delete work;
+
+    // Wait for the answer of the request to leave: the listener that is about to
+    // be stopped may be the one serving that very request.
+    vTaskDelay(pdMS_TO_TICKS(kHttpsSwitchDelayMs));
+
+    if (s_web != nullptr) {
+        string reason;
+        if (!s_web->setHttpsEnabled(enable, &reason)) {
+            // Only the failure to come back needs a word: a refused "stop" has no
+            // state left to report, and the page reads the state anyway.
+            ESP_LOGW(TAG, "HTTPS was not switched %s: %s", enable ? "on" : "off",
+                     reason.c_str());
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+string RestApi::certificatesJson(const ::dhcp::security::CertStore* store)
+{
+    string json = "{";
+    if (store == nullptr) {
+        // A build without a volume for the pair (the classic ESP32 has neither
+        // the internal FAT nor a card slot): the page has to say that, not offer
+        // a picker with nothing behind it.
+        addJsonString(json, "storage", "none", false);
+        addJsonString(json, "state",
+                      ::dhcp::security::certStatusName(::dhcp::security::CertStatus::NoStore),
+                      true);
+        addJsonBool(json, "available", false, true);
+        addJsonBool(json, "https_enabled",
+                    s_web != nullptr && s_web->httpsEnabled(), true);
+        json += ",\"volumes\":[],\"cert\":{}}";
+        return json;
+    }
+
+    const ::dhcp::security::CertInfo info = store->info();
+    const ::dhcp::security::CertStorage volumes[] = {::dhcp::security::CertStorage::Internal,
+                                                     ::dhcp::security::CertStorage::SdCard};
+
+    addJsonString(json, "storage",
+                  ::dhcp::security::certStorageName(store->storage()), false);
+    addJsonString(json, "state",
+                  ::dhcp::security::certStatusName(::dhcp::security::certStatus(info)), true);
+    addJsonBool(json, "available", info.available, true);
+    addJsonBool(json, "https_enabled", s_web != nullptr && s_web->httpsEnabled(), true);
+    addJsonBool(json, "https_available",
+                s_web != nullptr && s_web->httpsAvailable(nullptr), true);
+
+    // ── both volumes, so the picker can show where a pair is waiting ──
+    json += ",\"volumes\":[";
+    for (size_t i = 0; i < sizeof(volumes) / sizeof(volumes[0]); i++) {
+        if (i > 0) json += ",";
+        json += "{\"id\":\"";
+        json += ::dhcp::security::certStorageName(volumes[i]);
+        json += "\",\"mount\":\"";
+        json += ::dhcp::security::certMountPoint(volumes[i]);
+        json += string("\",\"current\":") + (volumes[i] == store->storage() ? "true" : "false");
+        json += string(",\"present\":") + (store->pairPresentIn(volumes[i]) ? "true" : "false");
+        json += "}";
+    }
+    json += "]";
+
+    // ── the pair on the chosen volume ──
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    json += ",\"cert\":{";
+    addJsonBool(json, "present", info.present, false);
+    addJsonBool(json, "valid", info.valid, true);
+    addJsonBool(json, "expired", info.expired, true);
+    addJsonBool(json, "not_yet_valid", info.notYetValid, true);
+    addJsonBool(json, "expiring_soon", info.expiringSoon, true);
+    // The days are counted only for a pair that parsed: "0 days left" next to a
+    // file that could not be read would be read as "expired", which it is not.
+    addJsonInt(json, "days_left", info.valid ? ::dhcp::security::certDaysLeft(info.notAfterEpoch, now) : 0,
+               true);
+    addJsonInt(json, "not_before", info.notBeforeEpoch, true);
+    addJsonInt(json, "not_after", info.notAfterEpoch, true);
+    addJsonString(json, "subject", info.subject, true);
+    addJsonString(json, "sans", info.sans, true);
+    addJsonInt(json, "cert_bytes", info.certBytes, true);
+    addJsonInt(json, "key_bytes", info.keyBytes, true);
+    addJsonString(json, "path", info.path, true);
+    // What a new certificate would get: the period it is made with when the page
+    // does not choose one, and the periods it may choose instead. The page builds
+    // its picker from this table, so what it offers and what the store accepts
+    // cannot drift apart (stage 160).
+    addJsonInt(json, "validity_years", ::dhcp::security::kValidityYears, true);
+    json += ",\"validity_options\":[";
+    for (size_t i = 0; i < ::dhcp::security::kValidityYearChoiceCount; i++) {
+        if (i > 0) json += ",";
+        json += std::to_string(::dhcp::security::kValidityYearChoices[i]);
+    }
+    json += "]";
+    addJsonInt(json, "warning_days", ::dhcp::security::kDaysWarningWindow, true);
+    // What a new certificate would be made of, and the reason it cannot be made
+    // if the clock is not set yet — the page shows the values before the click.
+    // The name is the operator's setting (`certName`), not a constant: it is the
+    // field the page pre-fills the input with.
+    addJsonString(json, "name",
+                  ::dhcp::core::Config::instance().getSecurity().certName, true);
+    // What an empty name field means: the default of the security module, not the
+    // stored setting. The page reads it from here so it does not have to carry a
+    // second copy of the constant (stage 163).
+    addJsonString(json, "default_name", ::dhcp::security::kDefaultCommonName, true);
+    addJsonString(json, "ip", ::dhcp::core::Config::instance().getDhcp().serverIp, true);
+    addJsonString(json, "error", info.error, true);
+    json += "}}";
+    return json;
+}
+
+esp_err_t RestApi::handleGetCertificates(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const string json = certificatesJson(s_certs);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostCertificates(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const string body = readBody(req);
+    const string action = jsonGetStr(body, "action");
+    if (action.empty()) {
+        return answerCertificateError(req, "no action given");
+    }
+    if (s_certs == nullptr) {
+        return answerCertificateError(req, "this build has no volume for certificates");
+    }
+
+    // Whether HTTPS has to be re-applied once the pair changed. Read before the
+    // action, because the answer depends on the state the operator had.
+    const bool httpsWasOn = s_web != nullptr && s_web->httpsEnabled();
+    string detail;
+
+    if (action == "generate") {
+        // The name and the period are the two fields the operator owns; the
+        // address in the SAN is not one of them, because it is the address this
+        // device answers on. A name the X.509 subject rules cannot carry is
+        // refused by the store, which names the value it did not accept, and a
+        // period outside the offered list is refused there as well. The name is
+        // kept only after the pair was actually written: a refused generation
+        // must not leave the setting describing a certificate that does not
+        // exist (same rule as the volume above).
+        //
+        // The generation itself runs in a task of its own: it does not fit the
+        // stack of the httpd task (stage 164), so this frame only asks for it and
+        // waits for the answer.
+        const auto security = ::dhcp::core::Config::instance().getSecurity();
+        string name = jsonGetStr(body, "name");
+        if (name.empty()) name = security.certName;    // an empty field means "as is"
+        const string ip = ::dhcp::core::Config::instance().getDhcp().serverIp;
+        const int years = jsonGetInt(body, "years", ::dhcp::security::kValidityYears);
+        if (!runCertificateGeneration(s_certs, name, ip, years, detail)) {
+            ESP_LOGW(TAG, "certificate generation refused: %s", detail.c_str());
+            return answerCertificateError(req, detail);
+        }
+        if (name != security.certName) {
+            auto updated = security;
+            updated.certName = name;
+            ::dhcp::core::Config::instance().setSecurity(updated);
+        }
+        ESP_LOGI(TAG, "certificate generated for %s / %s, %d years", name.c_str(), ip.c_str(),
+                 years);
+
+    } else if (action == "delete") {
+        if (!s_certs->erase(&detail)) {
+            ESP_LOGW(TAG, "certificate deletion refused: %s", detail.c_str());
+            return answerCertificateError(req, detail);
+        }
+        ESP_LOGI(TAG, "certificate pair deleted");
+
+    } else if (action == "storage") {
+        ::dhcp::security::CertStorage target = ::dhcp::security::CertStorage::Internal;
+        if (!::dhcp::security::certStorageFromName(jsonGetStr(body, "storage"), target)) {
+            // An unknown name is refused instead of being read as "internal": a
+            // typo must not move the pair to another volume (stage 160).
+            return answerCertificateError(req, "unknown storage volume");
+        }
+
+        const ::dhcp::security::CertStorage from = s_certs->storage();
+        if (target != from) {
+            // The pair is copied only when the operator asked for it and only when
+            // there is something to copy: an empty folder on the new volume would
+            // look like a certificate the device cannot serve.
+            const bool copy = jsonGetBool(body, "copy", false);
+            if (copy && s_certs->pairPresentIn(from) && !s_certs->pairPresentIn(target)) {
+                if (!s_certs->copyTo(target, &detail)) {
+                    ESP_LOGW(TAG, "certificate not copied: %s", detail.c_str());
+                    return answerCertificateError(req, detail);
+                }
+                ESP_LOGI(TAG, "certificate pair copied to %s", ::dhcp::security::certMountPoint(target));
+            }
+            s_certs->setStorage(target);
+
+            // The store follows the setting from now on, so a reboot has to land
+            // on the same volume as this request.
+            auto security = ::dhcp::core::Config::instance().getSecurity();
+            security.certStorage = target;
+            ::dhcp::core::Config::instance().setSecurity(security);
+            ESP_LOGI(TAG, "certificate storage set to %s", ::dhcp::security::certMountPoint(target));
+        }
+
+    } else {
+        return answerCertificateError(req, "unknown action");
+    }
+
+    // HTTPS should follow the pair: a new certificate has to be picked up by the
+    // TLS server, and a deleted one cannot be served (stage 160). The switch runs
+    // after this answer, and the page reads the state again — a listener must not
+    // be closed from inside the request it is serving.
+    bool restart = false;
+    if (httpsWasOn) {
+        const ::dhcp::security::CertInfo info = s_certs->info();
+        const bool canServe = ::dhcp::security::certUsable(::dhcp::security::certStatus(info));
+        if (!canServe) {
+            ESP_LOGW(TAG, "HTTPS will be switched off: %s",
+                     ::dhcp::security::certStatusName(::dhcp::security::certStatus(info)));
+        }
+        scheduleHttpsSwitch(canServe);
+        restart = true;
+    }
+
+    string json = "{\"status\":\"ok\"";
+    json += string(",\"https_restart\":") + (restart ? "true" : "false") + "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handleGetCertificateDownload(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    string certPem;
+    string detail;
+    if (s_certs == nullptr || !s_certs->readCertificate(certPem, &detail)) {
+        // The store reads the certificate file and nothing else, so what goes out
+        // here is the public half of the pair only ever.
+        if (detail.empty()) detail = "this build has no volume for certificates";
+        ESP_LOGW(TAG, "certificate download refused: %s", detail.c_str());
+        return answerCertificateError(req, detail);
+    }
+
+    // The name is fixed (not taken from the request) and the key is never part of
+    // the answer: `server.crt` is the file a browser or a client is asked for.
+    httpd_resp_set_type(req, "application/x-pem-file");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"server.crt\"");
+    httpd_resp_send(req, certPem.c_str(), certPem.size());
+    ESP_LOGI(TAG, "certificate downloaded (%u bytes)", static_cast<unsigned>(certPem.size()));
     return ESP_OK;
 }
 
@@ -1316,7 +1794,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     auto hosts    = cfgMgr.getLocalHosts();
     auto allowed  = ::dhcp::dhcp::DhcpAllowedList::parse(cfgMgr.getAllowedComputers());
 
-    std::string json = "{";
+    string json = "{";
     addJsonString(json, "format", "dhcpserver-settings", false);
     addJsonInt(json, "schema", 1, true);
     addJsonString(json, "firmware_version",
@@ -1351,11 +1829,11 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         json += "\"ip\":\"" + bindings[i].ip + "\",";
         json += "\"name\":\"" + bindings[i].name + "\",";
         json += "\"gateway\":\"" + bindings[i].gateway + "\",";
-        json += std::string("\"use_gateway\":") +
+        json += string("\"use_gateway\":") +
                 (bindings[i].useGateway ? "true" : "false") + ",";
-        json += std::string("\"enabled\":") +
+        json += string("\"enabled\":") +
                 (bindings[i].enabled ? "true" : "false") + ",";
-        json += std::string("\"use_dns\":") +
+        json += string("\"use_dns\":") +
                 (bindings[i].useDns ? "true" : "false") + "}";
     }
     json += "]";
@@ -1366,7 +1844,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         if (i > 0) json += ",";
         json += "{\"mac\":\"" + allowed[i].mac + "\",";
         json += "\"name\":\"" + allowed[i].name + "\",";
-        json += std::string("\"enabled\":") +
+        json += string("\"enabled\":") +
                 (allowed[i].enabled ? "true" : "false") + "}";
     }
     json += "]";
@@ -1428,7 +1906,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         json += "{\"name\":\"" + hosts[i].name + "\",";
         json += "\"ip4\":\"" + hosts[i].ip4 + "\",";
         json += "\"ip6\":\"" + hosts[i].ip6 + "\",";
-        json += std::string("\"enabled\":") +
+        json += string("\"enabled\":") +
                 (hosts[i].enabled ? "true" : "false") + "}";
     }
     json += "]";
@@ -1464,14 +1942,14 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req, 16384);
+    string body = readBody(req, 16384);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
     }
 
     // ─── 1. Validate format / version marker ───
-    const std::string fmt = jsonGetStr(body, "format");
+    const string fmt = jsonGetStr(body, "format");
     if (fmt != "dhcpserver-settings") {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
@@ -1480,13 +1958,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     }
 
     // ─── 2. Compare firmware version by release (xxx) ───
-    const std::string fileVerStr = jsonGetStr(body, "firmware_version");
+    const string fileVerStr = jsonGetStr(body, "firmware_version");
     const auto& curVer = ::dhcp::core::Version::instance();
     bool versionMismatch = false;
     bool fileNewer = false;
     if (!fileVerStr.empty()) {
         int g = -1, d = -1, rel = -1;
-        if (std::sscanf(fileVerStr.c_str(), "%d.%d.%d", &g, &d, &rel) >= 3) {
+        if (sscanf(fileVerStr.c_str(), "%d.%d.%d", &g, &d, &rel) >= 3) {
             versionMismatch = (rel != curVer.release());
             fileNewer = (rel > curVer.release());
         }
@@ -1494,17 +1972,17 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     // ─── 3. Collect unknown top-level keys (cannot be imported) ───
     // We only know these section keys; anything else is reported as skipped.
-    std::string skipped;
+    string skipped;
     const char* known[] = { "format", "schema", "firmware_version",
                             "dhcp", "static_bindings", "allowed_computers",
                             "dns", "time",
                             "local_hosts", "security", "files" };
     size_t pos = 0;
-    while ((pos = body.find('"', pos)) != std::string::npos) {
+    while ((pos = body.find('"', pos)) != string::npos) {
         size_t keyStart = pos + 1;
         size_t keyEnd = body.find('"', keyStart);
-        if (keyEnd == std::string::npos) break;
-        std::string key = body.substr(keyStart, keyEnd - keyStart);
+        if (keyEnd == string::npos) break;
+        string key = body.substr(keyStart, keyEnd - keyStart);
         // A key is a candidate object key if followed by ':' (not part of a
         // nested value). Keys at top level are followed by ':' and are not
         // within the known sections (we accept the whole file as flat scan).
@@ -1563,13 +2041,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // DHCP section (object nested under "dhcp")
     {
         size_t s = body.find("\"dhcp\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('{', s);
-            if (open != std::string::npos) {
-                std::string seg = body.substr(open);
+            if (open != string::npos) {
+                string seg = body.substr(open);
                 auto cur = cfgMgr.getDhcp();
                 cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
-                std::string v = jsonGetStr(seg, "server_ip"); if (!v.empty()) cur.serverIp = v;
+                string v = jsonGetStr(seg, "server_ip"); if (!v.empty()) cur.serverIp = v;
                 v = jsonGetStr(seg, "start_ip"); if (!v.empty()) cur.startIp = v;
                 v = jsonGetStr(seg, "end_ip"); if (!v.empty()) cur.endIp = v;
                 v = jsonGetStr(seg, "subnet"); if (!v.empty()) cur.subnet = v;
@@ -1577,7 +2055,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 v = jsonGetStr(seg, "dns_address"); cur.dnsAddress = v;
-                std::string m = jsonGetStr(seg, "dns_mode"); if (m == "manual" || m == "auto") cur.dnsMode = m;
+                string m = jsonGetStr(seg, "dns_mode"); if (m == "manual" || m == "auto") cur.dnsMode = m;
                 cur.allowOnly = jsonGetBool(seg, "allow_only", cur.allowOnly);
                 cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
@@ -1602,15 +2080,15 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // Static bindings (array; we rebuild from recognized entries)
     {
         size_t s = body.find("\"static_bindings\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('[', s);
-            if (open != std::string::npos) {
-                std::vector<::dhcp::core::StaticBinding> out;
+            if (open != string::npos) {
+                vector<::dhcp::core::StaticBinding> out;
                 size_t p = open;
-                while ((p = body.find("\"mac\"", p)) != std::string::npos &&
+                while ((p = body.find("\"mac\"", p)) != string::npos &&
                        p < body.size()) {
                     ::dhcp::core::StaticBinding b;
-                    std::string seg = body.substr(p);
+                    string seg = body.substr(p);
                     b.mac = jsonGetStr(seg, "mac");
                     b.ip = jsonGetStr(seg, "ip");
                     b.name = jsonGetStr(seg, "name");
@@ -1634,16 +2112,16 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // not picked up by their identical "mac"/"name" keys.
     {
         size_t s = body.find("\"allowed_computers\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('[', s);
-            if (open != std::string::npos) {
+            if (open != string::npos) {
                 const size_t end = jsonFindArrayEnd(body, open);
-                std::vector<::dhcp::dhcp::AllowedComputer> out;
+                vector<::dhcp::dhcp::AllowedComputer> out;
                 size_t p = open;
                 while (p < end) {
                     p = body.find("\"mac\"", p);
-                    if (p == std::string::npos || p >= end) break;
-                    std::string seg = body.substr(p, end - p);
+                    if (p == string::npos || p >= end) break;
+                    string seg = body.substr(p, end - p);
                     ::dhcp::dhcp::AllowedComputer e;
                     e.mac = jsonGetStr(seg, "mac");
                     e.name = jsonGetStr(seg, "name");
@@ -1656,7 +2134,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                     }
                     out.push_back(e);
                 }
-                const std::string text =
+                const string text =
                     ::dhcp::dhcp::DhcpAllowedList::serialize(out);
                 if (text.size() > ::dhcp::core::Config::kMaxAllowedBytes) {
                     ESP_LOGW(TAG, "Import: allowed computers too large (%zu > %zu)",
@@ -1672,13 +2150,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // DNS section
     {
         size_t s = body.find("\"dns\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('{', s);
-            if (open != std::string::npos) {
-                std::string seg = body.substr(open);
+            if (open != string::npos) {
+                string seg = body.substr(open);
                 auto cur = cfgMgr.getDns();
                 cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
-                std::string v = jsonGetStr(seg, "external_dns"); if (!v.empty()) cur.externalDns = v;
+                string v = jsonGetStr(seg, "external_dns"); if (!v.empty()) cur.externalDns = v;
                 v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 v = jsonGetStr(seg, "cache_url"); cur.cacheUrl = v;
@@ -1723,14 +2201,14 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // Time (NTP) server section
     {
         size_t s = body.find("\"time\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('{', s);
-            if (open != std::string::npos) {
-                std::string seg = body.substr(open);
+            if (open != string::npos) {
+                string seg = body.substr(open);
                 auto cur = cfgMgr.getTime();
                 cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
                 cur.syncEnabled = jsonGetBool(seg, "sync_enabled", cur.syncEnabled);
-                std::string v = jsonGetStr(seg, "external_ntp");
+                string v = jsonGetStr(seg, "external_ntp");
                 if (!v.empty()) cur.externalNtp = v;
                 v = jsonGetStr(seg, "timezone");
                 if (v.size() > 40) v.resize(40);
@@ -1767,15 +2245,15 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // Local hosts
     {
         size_t s = body.find("\"local_hosts\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('[', s);
-            if (open != std::string::npos) {
-                std::vector<::dhcp::core::LocalHostEntry> out;
+            if (open != string::npos) {
+                vector<::dhcp::core::LocalHostEntry> out;
                 size_t p = open;
-                while ((p = body.find("\"name\"", p)) != std::string::npos &&
+                while ((p = body.find("\"name\"", p)) != string::npos &&
                        p < body.size()) {
                     ::dhcp::core::LocalHostEntry e;
-                    std::string seg = body.substr(p);
+                    string seg = body.substr(p);
                     e.name = jsonGetStr(seg, "name");
                     e.ip4 = jsonGetStr(seg, "ip4");
                     e.ip6 = jsonGetStr(seg, "ip6");
@@ -1801,12 +2279,12 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     // Security (username + limits only; password never imported)
     {
         size_t s = body.find("\"security\"");
-        if (s != std::string::npos) {
+        if (s != string::npos) {
             size_t open = body.find('{', s);
-            if (open != std::string::npos) {
-                std::string seg = body.substr(open);
+            if (open != string::npos) {
+                string seg = body.substr(open);
                 auto cur = cfgMgr.getSecurity();
-                std::string v = jsonGetStr(seg, "username"); if (!v.empty()) cur.username = v;
+                string v = jsonGetStr(seg, "username"); if (!v.empty()) cur.username = v;
                 cur.maxAttempts = jsonGetInt(seg, "max_attempts", cur.maxAttempts);
                 cur.lockoutPeriodSec = jsonGetInt(seg, "lockout_period", cur.lockoutPeriodSec);
                 cfgMgr.setSecurity(cur);
@@ -1817,11 +2295,11 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     }
 
     // Files (file explorer access policy)
-    if (body.find("\"files\"") != std::string::npos) {
+    if (body.find("\"files\"") != string::npos) {
         size_t s = body.find("\"files\"");
         size_t open = body.find('{', s);
-        if (open != std::string::npos) {
-            std::string seg = body.substr(open);
+        if (open != string::npos) {
+            string seg = body.substr(open);
             auto cur = cfgMgr.getFiles();
             cur.allowOwnSubnet =
                 jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
@@ -1889,7 +2367,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     }
 
     // ─── 6. Build response ───
-    std::string json = "{";
+    string json = "{";
     addJsonString(json, "status", "ok", false);
     addJsonString(json, "firmware_version", curVer.toString(), true);
     if (!fileVerStr.empty()) addJsonString(json, "file_version", fileVerStr, true);
@@ -1964,7 +2442,7 @@ esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
     // `{"saved": true}` and there is nothing left to do here. A client that
     // just calls reboot keeps the old behaviour: the device writes whatever the
     // "before reboot" switches ask for.
-    const std::string body = readBody(req, 256);
+    const string body = readBody(req, 256);
     const bool alreadySaved = jsonGetBool(body, "saved", false);
 
     ESP_LOGW(TAG, "Reboot requested from web UI (pre-saved=%d)", alreadySaved ? 1 : 0);
@@ -2026,7 +2504,7 @@ esp_err_t RestApi::handlePostDeviceRebootPrepare(httpd_req* req)
         }
     }
 
-    const std::string json = std::string("{\"status\":\"ok\",\"stats\":\"") + stats +
+    const string json = string("{\"status\":\"ok\",\"stats\":\"") + stats +
                              "\",\"cache\":\"" + cache + "\"}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
@@ -2120,7 +2598,7 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
 
     // ── Body layout ────────────────────────────────────
     size_t ctLen = httpd_req_get_hdr_value_len(req, "Content-Type");
-    std::string contentType;
+    string contentType;
     if (ctLen > 0) {
         contentType.resize(ctLen);
         httpd_req_get_hdr_value_str(req, "Content-Type", &contentType[0], ctLen + 1);
@@ -2130,10 +2608,10 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
     // the host): writing the raw multipart body into the OTA partition produced
     // an image without the 0xE9 magic, which esp_ota_end() then rejected.
     const bool multipart = contentType.rfind("multipart/form-data", 0) == 0;
-    std::string boundary;
+    string boundary;
     if (multipart) {
         const size_t b = contentType.find("boundary=");
-        if (b == std::string::npos) {
+        if (b == string::npos) {
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req,
@@ -2143,9 +2621,9 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
         boundary = contentType.substr(b + 9);
         boundary.erase(0, boundary.find_first_not_of(" \t\""));
         const size_t lastOk = boundary.find_last_not_of(" \t\"");
-        boundary.erase(lastOk == std::string::npos ? 0 : lastOk + 1);
+        boundary.erase(lastOk == string::npos ? 0 : lastOk + 1);
         const size_t semi = boundary.find(';');
-        if (semi != std::string::npos) boundary.erase(semi);
+        if (semi != string::npos) boundary.erase(semi);
         if (boundary.empty()) {
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
@@ -2171,7 +2649,7 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
     esp_err_t err = esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &otaHandle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(err));
-        std::string body = "{\"status\":\"error\",\"message\":\"OTA begin failed\",\"detail\":\"";
+        string body = "{\"status\":\"error\",\"message\":\"OTA begin failed\",\"detail\":\"";
         body += esp_err_to_name(err);
         body += "\"}";
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -2258,10 +2736,10 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
         // (esp_ota_end() already invalidated the handle).
         if (!otaEnded) esp_ota_abort(otaHandle);
 
-        std::string body = "{\"status\":\"error\",\"message\":\"OTA update failed\",\"detail\":\"";
+        string body = "{\"status\":\"error\",\"message\":\"OTA update failed\",\"detail\":\"";
         body += esp_err_to_name(failErr);
         body += "\",\"received\":";
-        body += std::to_string((unsigned long long)writer.written);
+        body += to_string((unsigned long long)writer.written);
         body += "}";
         ESP_LOGE(TAG, "OTA update failed: %s", esp_err_to_name(failErr));
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -2272,8 +2750,8 @@ esp_err_t RestApi::handlePostOtaUpload(httpd_req* req)
 
     ESP_LOGI(TAG, "OTA update successful (%llu bytes) — rebooting",
              (unsigned long long)writer.written);
-    std::string body = "{\"status\":\"ok\",\"message\":\"Update successful. Rebooting...\",\"bytes\":";
-    body += std::to_string((unsigned long long)writer.written);
+    string body = "{\"status\":\"ok\",\"message\":\"Update successful. Rebooting...\",\"bytes\":";
+    body += to_string((unsigned long long)writer.written);
     body += "}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, body.c_str());
@@ -2317,7 +2795,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
     auto sendJsonError = [req](const char* status, const char* msg) {
         httpd_resp_set_status(req, status);
         httpd_resp_set_type(req, "application/json");
-        std::string j = "{\"status\":\"error\",\"message\":\"";
+        string j = "{\"status\":\"error\",\"message\":\"";
         j += msg;
         j += "\"}";
         httpd_resp_sendstr(req, j.c_str());
@@ -2335,7 +2813,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
         sendJsonError("400 Bad Request", "Missing path parameter");
         return ESP_OK;
     }
-    std::string relPath;
+    string relPath;
     {
         const char* p = rawPath;
         while (*p) {
@@ -2378,8 +2856,8 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
         size_t segStart = 0;
         while (segStart <= relPath.size()) {
             size_t slash = relPath.find('/', segStart);
-            std::string seg = relPath.substr(
-                segStart, slash == std::string::npos ? std::string::npos : slash - segStart);
+            string seg = relPath.substr(
+                segStart, slash == string::npos ? string::npos : slash - segStart);
             if (seg.empty() || seg == "." || seg == "..") {
                 valid = false;
                 break;
@@ -2391,7 +2869,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
                 }
             }
             if (!valid) break;
-            if (slash == std::string::npos) break;
+            if (slash == string::npos) break;
             segStart = slash + 1;
         }
     }
@@ -2400,7 +2878,7 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
         return ESP_OK;
     }
 
-    std::string fullPath = "/spiffs/" + relPath;
+    string fullPath = "/spiffs/" + relPath;
 
     if (req->content_len > kMaxFileBytes) {
         sendJsonError("413 Payload Too Large", "File too large");
@@ -2456,10 +2934,10 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
     ESP_LOGI(TAG, "Web file uploaded: %s (%u bytes)", fullPath.c_str(), (unsigned)written);
 
     httpd_resp_set_type(req, "application/json");
-    std::string j = "{\"status\":\"ok\",\"path\":\"";
+    string j = "{\"status\":\"ok\",\"path\":\"";
     j += relPath;
     j += "\",\"bytes\":";
-    j += std::to_string(written);
+    j += to_string(written);
     j += "}";
     httpd_resp_sendstr(req, j.c_str());
     return ESP_OK;
@@ -2484,15 +2962,15 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
 
 namespace {
 struct TestConnCtx {
-    std::string url;
+    string url;
     bool useAuth;
-    std::string user;
-    std::string pass;
-    std::string method;   // "GET" (default) or "POST" — must match what the
+    string user;
+    string pass;
+    string method;   // "GET" (default) or "POST" — must match what the
                           // real sender does so the request actually hits the
                           // auth-protected route (GET on a POST-only base URL
                           // returns 405/404 BEFORE auth is checked).
-    std::string body;     // optional POST body
+    string body;     // optional POST body
     int http = 0;
     int64_t elapsedMs = 0;
     esp_err_t err = ESP_FAIL;
@@ -2542,7 +3020,7 @@ void testConnectionTask(void* arg)
     esp_http_client_set_header(client, "Accept", "application/json");
     if (cfg.method == HTTP_METHOD_POST) {
         esp_http_client_set_header(client, "Content-Type", "application/json");
-        const std::string& p = ctx->body.empty() ? std::string("{}") : ctx->body;
+        const string& p = ctx->body.empty() ? string("{}") : ctx->body;
         esp_http_client_set_post_field(client, p.c_str(),
                                        static_cast<int>(p.size()));
     }
@@ -2570,7 +3048,7 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -2582,7 +3060,7 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
     //   "dns_log"   -> DnsConfig.logUrl + logAuth*   (POST {} on a protected route)
     //   "dns_cache" -> DnsConfig.cacheUrl + cacheAuth* (GET {url}/probe)
     //   "dhcp_log"  -> DhcpConfig.logUrl + logAuth*  (POST {} on a protected route)
-    const std::string target = jsonGetStr(body, "target");
+    const string target = jsonGetStr(body, "target");
     if (target != "dns_log" && target != "dns_cache" && target != "dhcp_log") {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req,
@@ -2652,10 +3130,10 @@ esp_err_t RestApi::handlePostTestConnection(httpd_req* req)
     // the credentials (401/403 = auth problem, not a healthy endpoint).
     const bool ok = (ctx.err == ESP_OK) && ctx.http != 401 && ctx.http != 403;
 
-    std::string json = "{\"ok\":";
+    string json = "{\"ok\":";
     json += ok ? "true" : "false";
-    json += ",\"http\":" + std::to_string(ctx.http);
-    json += ",\"elapsed_ms\":" + std::to_string(static_cast<long long>(ctx.elapsedMs));
+    json += ",\"http\":" + to_string(ctx.http);
+    json += ",\"elapsed_ms\":" + to_string(static_cast<long long>(ctx.elapsedMs));
     json += ",\"error\":\"";
     if (ctx.err != ESP_OK) {
         json += esp_err_to_name(ctx.err);
@@ -2689,7 +3167,7 @@ esp_err_t RestApi::handleGetInternalCacheFile(httpd_req* req)
     ::dhcp::dns::InternalDnsCache::FileInfo info;
     if (s_dns) info = s_dns->internalCacheFileInfo();
 
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "exists", info.exists, false);
     addJsonString(json, "path",
                   s_dns ? s_dns->kCacheDatPath : "/fat/cache.dat", true);
@@ -2726,7 +3204,7 @@ esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
         default:                                                 result = "";        break;
     }
 
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "busy", p.busy, false);
     addJsonString(json, "last_result", result, true);
     // The device's own words about the last failure ("cannot publish the file").
@@ -2761,7 +3239,7 @@ esp_err_t RestApi::handleGetInternalCacheProgress(httpd_req* req)
                                        p.total)
                                  : 0;
 
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "busy", p.busy, false);
     addJsonBool(json, "save", p.isSave, true);
     // "busy went false" cannot tell a written file from a failed write, and a
@@ -2887,7 +3365,7 @@ esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
     // and lets the page ask the operator; `{"force": true}` is that answer.
     // Hashing costs one read pass over the file, and the caller is waiting for
     // an answer anyway.
-    const std::string body = readBody(req, 512);
+    const string body = readBody(req, 512);
     const bool force = jsonGetBool(body, "force", false);
     if (!force) {
         const ::dhcp::dns::DnsServer::CacheFileMd5 st = s_dns->checkCacheFileMd5();
@@ -2896,7 +3374,7 @@ esp_err_t RestApi::handlePostInternalCacheLoad(httpd_req* req)
                                  : !st.readable  ? "unreadable"
                                  : !st.hasStored ? "unknown"
                                                  : "mismatch";
-            std::string json = "{\"status\":\"error\",\"code\":\"md5_mismatch\",\"reason\":\"";
+            string json = "{\"status\":\"error\",\"code\":\"md5_mismatch\",\"reason\":\"";
             json += reason;
             json += "\",\"file_md5\":\"";
             json += st.fileMd5;
@@ -2930,7 +3408,7 @@ esp_err_t RestApi::handleGetTimeSettings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
 
     auto cfg = ::dhcp::core::Config::instance().getTime();
-    std::string json = "{";
+    string json = "{";
     addJsonBool(json, "enabled", cfg.enabled, false);
     addJsonBool(json, "sync_enabled", cfg.syncEnabled, true);
     addJsonString(json, "server_state",
@@ -2973,7 +3451,7 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -2989,7 +3467,7 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     cfg.timezone = jsonGetStr(body, "timezone");
     if (cfg.timezone.size() > 40) cfg.timezone.resize(40);
     {
-        std::string clean;
+        string clean;
         for (char ch : cfg.timezone) {
             const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
                             (ch >= '0' && ch <= '9') ||
@@ -3075,7 +3553,7 @@ esp_err_t RestApi::handleGetTimeNow(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string json = "{";
+    string json = "{";
     addJsonString(json, "now_utc",
                   s_time ? s_time->nowUtcString() : "", false);
     addJsonString(json, "now_local",
@@ -3098,14 +3576,14 @@ esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    std::string body = readBody(req);
+    string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
     }
 
     auto sendError = [&req](const char* status, const char* message) {
-        std::string json = "{\"status\":\"error\",\"message\":\"";
+        string json = "{\"status\":\"error\",\"message\":\"";
         json += message;
         json += "\"}";
         httpd_resp_set_status(req, status);
@@ -3119,7 +3597,7 @@ esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
     // The operator types LOCAL time; the offset is taken from the request (the
     // page sends it, since the zone may not have been saved yet) and falls back
     // to the configured offset.
-    const std::string datetime = jsonGetStr(body, "datetime");
+    const string datetime = jsonGetStr(body, "datetime");
     ::dhcp::time::DateTime dt;
     if (!::dhcp::time::TimeMath::parseDateTime(datetime, dt)) {
         return sendError("400 Bad Request",
@@ -3144,7 +3622,7 @@ esp_err_t RestApi::handlePostTimeSet(httpd_req* req)
         return sendError("500 Internal Server Error", "failed to set the clock");
     }
 
-    std::string json = "{\"status\":\"ok\"";
+    string json = "{\"status\":\"ok\"";
     addJsonInt(json, "unix_sec", static_cast<int64_t>(s_time->nowUtcSec()), true);
     addJsonString(json, "now_utc", s_time->nowUtcString(), true);
     addJsonString(json, "now_local", s_time->nowLocalString(), true);
@@ -3176,9 +3654,9 @@ esp_err_t RestApi::handleGetFileVolumes(httpd_req* req)
     // The body itself is built by `FileJson` (host-tested): the previous
     // hand-written version started with a stray comma (`{,"enabled"…`) and
     // the page failed in JSON.parse() although the status was 200.
-    const std::string json = FileJson::volumes(
+    const string json = FileJson::volumes(
         s_files ? s_files->supported() : false,
-        s_files ? s_files->volumes() : std::vector<::dhcp::storage::VolumeInfo>{});
+        s_files ? s_files->volumes() : vector<::dhcp::storage::VolumeInfo>{});
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
@@ -3213,8 +3691,8 @@ const char* fileStatusLine(::dhcp::files::FileStatus st)
  * from the enum — handlers never invent status codes or messages.
  */
 esp_err_t sendFileResult(httpd_req* req, ::dhcp::files::FileStatus st,
-                         const std::string& okJson,
-                         const std::string* detail = nullptr)
+                         const string& okJson,
+                         const string* detail = nullptr)
 {
     if (st == ::dhcp::files::FileStatus::Ok) {
         httpd_resp_set_type(req, "application/json");
@@ -3251,7 +3729,7 @@ esp_err_t sendNoFileManager(httpd_req* req)
  *
  * @return false when the parameter is missing or the escape sequence is broken.
  */
-bool queryParam(httpd_req* req, const char* key, std::string& out)
+bool queryParam(httpd_req* req, const char* key, string& out)
 {
     char query[1024];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
@@ -3363,15 +3841,15 @@ esp_err_t RestApi::handleGetFileList(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}",
                               nullptr);
     }
     if (!queryParam(req, "path", path)) path = "/";   // root by default
 
-    std::vector<::dhcp::files::FileEntry> entries;
-    std::string detail;
+    vector<::dhcp::files::FileEntry> entries;
+    string detail;
     ::dhcp::files::FileStatus st =
         s_files->list(volume, path, entries, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
@@ -3379,7 +3857,7 @@ esp_err_t RestApi::handleGetFileList(httpd_req* req)
     }
 
     // Normalized path + capacity for the breadcrumb/free-space display.
-    std::string norm = path;
+    string norm = path;
     if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = "/";
     ::dhcp::storage::IFileSystem* vol = s_files->find(volume);
     uint64_t total = 0, free = 0;
@@ -3423,11 +3901,11 @@ esp_err_t RestApi::handlePostFileMkdir(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req);
-    const std::string volume = jsonGetStr(body, "volume");
-    const std::string path = jsonGetStr(body, "path");
+    const string body = readBody(req);
+    const string volume = jsonGetStr(body, "volume");
+    const string path = jsonGetStr(body, "path");
 
-    std::string detail;
+    string detail;
     const auto st = s_files->mkdir(volume, path, &detail);
     return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
 }
@@ -3438,12 +3916,12 @@ esp_err_t RestApi::handlePostFileRename(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req);
-    const std::string volume = jsonGetStr(body, "volume");
-    const std::string from = jsonGetStr(body, "path");
-    const std::string to = jsonGetStr(body, "to");
+    const string body = readBody(req);
+    const string volume = jsonGetStr(body, "volume");
+    const string from = jsonGetStr(body, "path");
+    const string to = jsonGetStr(body, "to");
 
-    std::string detail;
+    string detail;
     const auto st = s_files->rename(volume, from, to, &detail);
     return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
 }
@@ -3454,12 +3932,12 @@ esp_err_t RestApi::handlePostFileDelete(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req);
-    const std::string volume = jsonGetStr(body, "volume");
-    const std::string path = jsonGetStr(body, "path");
+    const string body = readBody(req);
+    const string volume = jsonGetStr(body, "volume");
+    const string path = jsonGetStr(body, "path");
     const bool recursive = jsonGetBool(body, "recursive", false);
 
-    std::string detail;
+    string detail;
     const auto st = s_files->remove(volume, path, recursive, &detail);
     return sendFileResult(req, st, "{\"status\":\"ok\"}", &detail);
 }
@@ -3473,7 +3951,7 @@ esp_err_t RestApi::handleGetFileTransfer(httpd_req* req)
     ::dhcp::files::TransferReport report;
     s_files->transferReport(report);
 
-    const std::string body = FileJson::transfer(report);
+    const string body = FileJson::transfer(report);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, body.c_str(), body.size());
 }
@@ -3498,7 +3976,7 @@ esp_err_t RestApi::handlePostFileTransfer(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req);
+    const string body = readBody(req);
 
     ::dhcp::files::TransferRequest transfer;
     transfer.srcVolume = jsonGetStr(body, "src_volume");
@@ -3506,11 +3984,11 @@ esp_err_t RestApi::handlePostFileTransfer(httpd_req* req)
     transfer.dstPath = jsonGetStr(body, "dst_path");
     transfer.paths = jsonGetStrArray(body, "paths");
 
-    const std::string op = jsonGetStr(body, "op");
+    const string op = jsonGetStr(body, "op");
     transfer.op = (op == "move") ? ::dhcp::files::TransferOp::Move
                                 : ::dhcp::files::TransferOp::Copy;
 
-    const std::string conflict = jsonGetStr(body, "conflict");
+    const string conflict = jsonGetStr(body, "conflict");
     if (conflict == "overwrite") {
         transfer.conflict = ::dhcp::files::TransferConflict::Overwrite;
     } else if (conflict == "skip") {
@@ -3522,15 +4000,15 @@ esp_err_t RestApi::handlePostFileTransfer(httpd_req* req)
     // Validate and ask about taken names *before* the job starts. The engine does
     // the path policy (PathUtil), so a bad request is a 400 here and not a job
     // that fails in the background.
-    std::string detail;
-    std::vector<std::string> names;
+    string detail;
+    vector<string> names;
     const ::dhcp::files::FileStatus checked = s_files->transferConflicts(transfer, names, &detail);
     if (checked != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, checked, "", &detail);
     }
 
     if (!names.empty() && transfer.conflict == ::dhcp::files::TransferConflict::Ask) {
-        const std::string payload = FileJson::transferConflicts(names);
+        const string payload = FileJson::transferConflicts(names);
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, payload.c_str(), payload.size());
@@ -3576,7 +4054,7 @@ namespace {
 /** @brief Work item of an asynchronous format. */
 struct FormatWork : AsyncRequest {
     ::dhcp::files::IFileManager* files = nullptr;
-    std::string volume;
+    string volume;
 };
 
 /**
@@ -3596,7 +4074,7 @@ struct FormatWork : AsyncRequest {
  * a second one, and `FileManager::formatting_` keeps every file operation off
  * the volume meanwhile).
  */
-std::atomic<bool> g_formatAbandoned{false};
+atomic<bool> g_formatAbandoned{false};
 
 /**
  * @brief True once the destructive call of the running format has returned.
@@ -3606,7 +4084,7 @@ std::atomic<bool> g_formatAbandoned{false};
  * format on a healthy card is over in a moment, and cutting the power of a card
  * nobody is writing to would only leave the volume unmounted for five seconds.
  */
-std::atomic<bool> g_formatCallDone{false};
+atomic<bool> g_formatCallDone{false};
 
 /** @brief Grace before the supply is cut (see @ref powerCutTask). */
 constexpr uint32_t kPowerCutGraceMs = 1000;
@@ -3617,7 +4095,7 @@ constexpr uint32_t kPowerCutMs = 5000;
 /** @brief Work item of the power cut that breaks a stopped format. */
 struct PowerCutWork {
     ::dhcp::files::IFileManager* files = nullptr;
-    std::string volume;
+    string volume;
 };
 
 /**
@@ -3641,7 +4119,7 @@ void powerCutTask(void* arg)
         ESP_LOGI(TAG, "the stopped format of '%s' had already returned — the "
                       "card supply is left alone", work->volume.c_str());
     } else {
-        std::string detail;
+        string detail;
         const auto st = work->files->powerCycle(work->volume, kPowerCutMs, &detail);
         if (st == ::dhcp::files::FileStatus::Ok) {
             ESP_LOGW(TAG, "card supply cut for %u ms to break the format of '%s'",
@@ -3658,7 +4136,7 @@ void powerCutTask(void* arg)
 }
 
 /** @brief Start the escape hatch for a format that was stopped. */
-void startPowerCut(::dhcp::files::IFileManager* files, const std::string& volume)
+void startPowerCut(::dhcp::files::IFileManager* files, const string& volume)
 {
     auto* work = new PowerCutWork{files, volume};
     if (xTaskCreate(powerCutTask, "sd_power_cut", kPowerCutTaskStackBytes, work,
@@ -3670,7 +4148,7 @@ void startPowerCut(::dhcp::files::IFileManager* files, const std::string& volume
 
 /** @brief Answer the format request on its async handle and release the socket. */
 void formatAnswer(httpd_req_t* req, bool cancelled, ::dhcp::files::FileStatus st,
-                  const std::string& detail)
+                  const string& detail)
 {
     if (cancelled) {
         answerError(req,
@@ -3687,7 +4165,7 @@ void formatTask(void* arg)
     auto* work = static_cast<FormatWork*>(arg);
     auto& jobs = ::dhcp::core::JobRegistry::instance();
 
-    std::string detail;
+    string detail;
     auto st = ::dhcp::files::FileStatus::Ok;
     // A stop that arrived before the erase started prevents it altogether — the
     // only case in which the card is left untouched.
@@ -3748,8 +4226,8 @@ esp_err_t RestApi::handlePostFileFormat(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req);
-    const std::string volume = jsonGetStr(body, "volume");
+    const string body = readBody(req);
+    const string volume = jsonGetStr(body, "volume");
     if (!jsonGetBool(body, "confirm", false)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}",
                               nullptr);
@@ -3809,7 +4287,7 @@ constexpr uint32_t kTransferStack = 8192;
 constexpr int kMaxTransfers = 4;
 
 /** @brief Transfers running right now (see @ref kMaxTransfers). */
-std::atomic<int> g_transfers{0};
+atomic<int> g_transfers{0};
 
 /**
  * @brief RAII slot in the transfer budget.
@@ -3937,10 +4415,10 @@ namespace {
  * Everything outside the `attr-char` set is escaped; the result is ASCII, so
  * it is safe in an HTTP header even for a UTF-8 name.
  */
-std::string rfc5987Encode(const std::string& in)
+string rfc5987Encode(const string& in)
 {
     static const char* kHex = "0123456789ABCDEF";
-    std::string out;
+    string out;
     out.reserve(in.size() * 3);
     for (unsigned char c : in) {
         const bool attrChar =
@@ -3961,9 +4439,9 @@ std::string rfc5987Encode(const std::string& in)
 }
 
 /** @brief ASCII-safe replacement for the quoted `filename=` parameter. */
-std::string asciiName(const std::string& in)
+string asciiName(const string& in)
 {
-    std::string out;
+    string out;
     out.reserve(in.size());
     for (char c : in) {
         const unsigned char u = static_cast<unsigned char>(c);
@@ -3981,8 +4459,8 @@ namespace {
 /** @brief Work item of one download (see @ref AsyncRequest). */
 struct DownloadWork : AsyncRequest {
     ::dhcp::files::IFileManager* files = nullptr;
-    std::string volume;
-    std::string path;
+    string volume;
+    string path;
     TransferSlot slot;            ///< Holds a place in the transfer budget
 };
 
@@ -3992,8 +4470,8 @@ void downloadTask(void* arg)
     auto* work = static_cast<DownloadWork*>(arg);
     auto* req = work->req;
 
-    std::unique_ptr<::dhcp::files::IFileSource> src;
-    std::string detail;
+    unique_ptr<::dhcp::files::IFileSource> src;
+    string detail;
     const auto st = work->files->openRead(work->volume, work->path, src, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         sendFileResult(req, st, "{}", &detail);
@@ -4003,12 +4481,12 @@ void downloadTask(void* arg)
         return;
     }
 
-    std::string norm;
+    string norm;
     if (!::dhcp::storage::PathUtil::normalize(work->path, norm)) norm = work->path;
-    const std::string name = ::dhcp::storage::PathUtil::basename(norm);
+    const string name = ::dhcp::storage::PathUtil::basename(norm);
 
     httpd_resp_set_type(req, "application/octet-stream");
-    const std::string disposition = "attachment; filename=\"" + asciiName(name) +
+    const string disposition = "attachment; filename=\"" + asciiName(name) +
                                     "\"; filename*=UTF-8''" + rfc5987Encode(name);
     httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
 
@@ -4055,7 +4533,7 @@ esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
     }
@@ -4109,7 +4587,7 @@ esp_err_t RestApi::handleGetFileDownload(httpd_req* req)
  */
 static bool queryParamU64(httpd_req* req, const char* key, uint64_t& out)
 {
-    std::string raw;
+    string raw;
     if (!queryParam(req, key, raw)) return false;
     if (raw.empty() || raw.size() > kMaxUint64Digits) return false;
 
@@ -4132,7 +4610,7 @@ namespace {
  * a pause in the other). The path is what makes the id unique — and what makes a
  * *resumed* upload find its own row again.
  */
-std::string uploadJobId(const std::string& path)
+string uploadJobId(const string& path)
 {
     return "upload:" + path;
 }
@@ -4148,13 +4626,16 @@ std::string uploadJobId(const std::string& path)
  * not in the class: the work now happens in tasks, so it is guarded.
  */
 struct PausedUpload {
+    // Rule 40: the member wears the name of the type, so inside this struct an
+    // unqualified `mutex` means the member and not the type. The directive is
+    // therefore narrowed here and the type keeps its prefix.
     std::mutex mutex;
-    std::string id;
-    std::string volume;
-    std::string path;
+    string id;
+    string volume;
+    string path;
 
     /** @brief Remember the transfer that just paused. */
-    void remember(const std::string& jobId, const std::string& vol, const std::string& p)
+    void remember(const string& jobId, const string& vol, const string& p)
     {
         std::lock_guard<std::mutex> lock(mutex);
         id = jobId;
@@ -4163,7 +4644,7 @@ struct PausedUpload {
     }
 
     /** @brief Forget @p jobId — it started again or was published. */
-    void forget(const std::string& jobId)
+    void forget(const string& jobId)
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (id != jobId) return;   // another transfer is the remembered one
@@ -4176,7 +4657,7 @@ struct PausedUpload {
      * @brief Take the record of @p jobId out, if that is the paused one.
      * @return false when nothing is paused or it is a different transfer.
      */
-    bool take(const std::string& jobId, std::string& vol, std::string& p)
+    bool take(const string& jobId, string& vol, string& p)
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (id.empty() || id != jobId) return false;
@@ -4192,14 +4673,14 @@ struct PausedUpload {
 PausedUpload g_pausedUpload;
 
 /** @brief Remember the transfer that just paused (see @ref PausedUpload). */
-void rememberPausedUpload(const std::string& jobId, const std::string& volume,
-                          const std::string& path)
+void rememberPausedUpload(const string& jobId, const string& volume,
+                          const string& path)
 {
     g_pausedUpload.remember(jobId, volume, path);
 }
 
 /** @brief Forget @p jobId — it started again or was published. */
-void forgetPausedUpload(const std::string& jobId)
+void forgetPausedUpload(const string& jobId)
 {
     g_pausedUpload.forget(jobId);
 }
@@ -4208,7 +4689,7 @@ void forgetPausedUpload(const std::string& jobId)
  * @brief Take the record of the paused upload @p jobId, if that is the one.
  * @return false when nothing is paused or it is a different transfer.
  */
-bool takePausedUpload(const std::string& jobId, std::string& volume, std::string& path)
+bool takePausedUpload(const string& jobId, string& volume, string& path)
 {
     return g_pausedUpload.take(jobId, volume, path);
 }
@@ -4216,8 +4697,8 @@ bool takePausedUpload(const std::string& jobId, std::string& volume, std::string
 /** @brief Work item of one upload (see @ref AsyncRequest). */
 struct UploadWork : AsyncRequest {
     ::dhcp::files::IFileManager* files = nullptr;
-    std::string volume;
-    std::string path;
+    string volume;
+    string path;
     uint64_t offset = 0;
     uint64_t total = 0;
     uint64_t chunk = 0;           ///< Bytes of this request (Content-Length)
@@ -4229,13 +4710,13 @@ void uploadTask(void* arg)
 {
     auto* work = static_cast<UploadWork*>(arg);
     auto* req = work->req;
-    const std::string& volume = work->volume;
-    const std::string& path = work->path;
+    const string& volume = work->volume;
+    const string& path = work->path;
     const uint64_t chunk = work->chunk;
 
     ::dhcp::files::UploadRange range;
-    std::unique_ptr<::dhcp::files::IFileSink> sink;
-    std::string detail;
+    unique_ptr<::dhcp::files::IFileSink> sink;
+    string detail;
     auto st = work->files->openWrite(volume, path, work->offset, work->total,
                                      chunk, sink, range, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
@@ -4251,7 +4732,7 @@ void uploadTask(void* arg)
     // page looks. Cancelling it there aborts the request and drops the `.part`
     // (see the read loop), exactly like the Files page's own button does.
     auto& jobs = ::dhcp::core::JobRegistry::instance();
-    const std::string jobId = uploadJobId(path);
+    const string jobId = uploadJobId(path);
     jobs.begin(jobId, "jobs.upload", path, static_cast<uint32_t>(range.total));
     // A new request for this file replaces whatever was paused before (the
     // registry is single-flight per id), so the remembered pause goes with it.
@@ -4378,7 +4859,7 @@ void uploadTask(void* arg)
         return;
     }
 
-    std::string norm;
+    string norm;
     if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
     jobs.finish(jobId, ::dhcp::core::JobState::Done, norm);
     forgetPausedUpload(jobId);
@@ -4403,7 +4884,7 @@ esp_err_t RestApi::handlePostFileUpload(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
     }
@@ -4468,7 +4949,7 @@ esp_err_t RestApi::handleGetFileUploadOffset(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
     }
@@ -4477,13 +4958,13 @@ esp_err_t RestApi::handleGetFileUploadOffset(httpd_req* req)
     }
 
     uint64_t offset = 0;
-    std::string detail;
+    string detail;
     auto st = s_files->uploadOffset(volume, path, offset, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
     }
 
-    std::string json = "{";
+    string json = "{";
     addJsonInt(json, "offset", static_cast<int64_t>(offset), false);
     json += "}";
     httpd_resp_set_type(req, "application/json");
@@ -4501,7 +4982,7 @@ esp_err_t RestApi::handlePostFileUploadCancel(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
     }
@@ -4509,7 +4990,7 @@ esp_err_t RestApi::handlePostFileUploadCancel(httpd_req* req)
         return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
     }
 
-    std::string detail;
+    string detail;
     auto st = s_files->discardUpload(volume, path, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
@@ -4559,8 +5040,8 @@ esp_err_t RestApi::handlePostJobCancel(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    const std::string body = readBody(req);
-    const std::string id = jsonGetStr(body, "id");
+    const string body = readBody(req);
+    const string id = jsonGetStr(body, "id");
     if (id.empty()) {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
@@ -4611,7 +5092,7 @@ esp_err_t RestApi::handlePostJobCancel(httpd_req* req)
     // fail and lets the volume come back through the normal mount path.
     if (id == "format") {
         // The record carries the volume id, and it is about to go.
-        std::string volume;
+        string volume;
         for (const auto& job : jobs.snapshot()) {
             if (job.id == id) volume = job.arg;
         }
@@ -4628,9 +5109,9 @@ esp_err_t RestApi::handlePostJobCancel(httpd_req* req)
     // that transfer. Only one transfer can be paused at a time, and this is where
     // it was remembered when its request ended.
     {
-        std::string volume, path;
+        string volume, path;
         if (takePausedUpload(id, volume, path)) {
-            std::string detail;
+            string detail;
             const auto st = s_files ? s_files->discardUpload(volume, path, &detail)
                                     : ::dhcp::files::FileStatus::NotMounted;
             ESP_LOGW(TAG, "paused upload of '%s' dropped on request: %s",
@@ -4679,12 +5160,12 @@ constexpr size_t kBinaryRatioPercent = 10;
  *
  * @return false when the key is missing or the value is not a valid string.
  */
-bool jsonDecodeStr(const std::string& json, const std::string& key, std::string& out)
+bool jsonDecodeStr(const string& json, const string& key, string& out)
 {
     size_t pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return false;
+    if (pos == string::npos) return false;
     pos = json.find(':', pos);
-    if (pos == std::string::npos) return false;
+    if (pos == string::npos) return false;
     ++pos;
     while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
     if (pos >= json.size() || json[pos] != '"') return false;
@@ -4779,9 +5260,9 @@ bool jsonDecodeStr(const std::string& json, const std::string& key, std::string&
  * of bytes outside tab/CR/LF/printable/UTF-8 is measured — a UTF-8 text file
  * with a few odd bytes in a comment still passes, a JPEG or a `.dat` does not.
  */
-bool looksLikeText(const std::string& data)
+bool looksLikeText(const string& data)
 {
-    if (data.find('\0') != std::string::npos) return false;
+    if (data.find('\0') != string::npos) return false;
 
     size_t suspicious = 0;
     for (unsigned char c : data) {
@@ -4800,7 +5281,7 @@ esp_err_t RestApi::handleGetFileText(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    std::string volume, path;
+    string volume, path;
     if (!queryParam(req, "volume", volume)) {
         return sendFileResult(req, ::dhcp::files::FileStatus::NotFound, "{}");
     }
@@ -4809,7 +5290,7 @@ esp_err_t RestApi::handleGetFileText(httpd_req* req)
     }
 
     ::dhcp::files::FileEntry info;
-    std::string detail;
+    string detail;
     auto st = s_files->stat(volume, path, info, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
@@ -4821,13 +5302,13 @@ esp_err_t RestApi::handleGetFileText(httpd_req* req)
         return sendFileResult(req, ::dhcp::files::FileStatus::TooLarge, "{}");
     }
 
-    std::unique_ptr<::dhcp::files::IFileSource> src;
+    unique_ptr<::dhcp::files::IFileSource> src;
     st = s_files->openRead(volume, path, src, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);
     }
 
-    std::string text;
+    string text;
     text.reserve(static_cast<size_t>(info.size));
     {
         uint8_t buf[2048];
@@ -4847,7 +5328,7 @@ esp_err_t RestApi::handleGetFileText(httpd_req* req)
         return sendFileResult(req, ::dhcp::files::FileStatus::NotText, "{}");
     }
 
-    std::string norm;
+    string norm;
     if (!::dhcp::storage::PathUtil::normalize(path, norm)) norm = path;
 
     FileJson::TextPayload payload;
@@ -4871,7 +5352,7 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
     // The body carries the whole text, and JSON escaping can double its size
     // (a file made of newlines/quotes), so the read cap is twice the editor
     // limit plus the small envelope; anything longer is refused after parsing.
-    const std::string body =
+    const string body =
         readBody(req, ::dhcp::files::IFileManager::kMaxTextBytes * 2 + 4096);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
@@ -4882,16 +5363,16 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
     // part of the body before it, so a file whose content happens to contain
     // `"mtime":0` (documentation, JSON samples, …) cannot hijack the parsing.
     const size_t textKey = body.find("\"text\"");
-    if (textKey == std::string::npos) {
+    if (textKey == string::npos) {
         return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
     }
-    const std::string envelope = body.substr(0, textKey);
+    const string envelope = body.substr(0, textKey);
 
-    const std::string volume = jsonGetStr(envelope, "volume");
-    const std::string path = jsonGetStr(envelope, "path");
+    const string volume = jsonGetStr(envelope, "volume");
+    const string path = jsonGetStr(envelope, "path");
     const int64_t clientMtime = jsonGetInt(envelope, "mtime", -1);
 
-    std::string text;
+    string text;
     if (!jsonDecodeStr(body, "text", text)) {
         // A missing or malformed `text` member: report it as a bad request the
         // same way every other file endpoint does.
@@ -4907,7 +5388,7 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
 
     // Optimistic-locking: only when the client sends the mtime it read.
     ::dhcp::files::FileEntry info;
-    std::string detail;
+    string detail;
     const auto statSt = s_files->stat(volume, path, info, &detail);
     const bool existed = (statSt == ::dhcp::files::FileStatus::Ok);
     if (existed && info.isDir) {
@@ -4919,7 +5400,7 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
         return sendFileResult(req, ::dhcp::files::FileStatus::Conflict, "{}");
     }
 
-    std::unique_ptr<::dhcp::files::IFileSink> sink;
+    unique_ptr<::dhcp::files::IFileSink> sink;
     // The editor saves a whole file in one go, so there is nothing to resume:
     // no `total`, and an empty text is a valid empty file (the same meaning the
     // upload endpoint always had for one request).
@@ -4943,7 +5424,7 @@ esp_err_t RestApi::handlePostFileText(httpd_req* req)
         (s_files->stat(volume, path, after) == ::dhcp::files::FileStatus::Ok)
             ? after.mtime : 0;
 
-    std::string json = "{\"status\":\"ok\"";
+    string json = "{\"status\":\"ok\"";
     addJsonInt(json, "size", static_cast<int64_t>(text.size()), true);
     addJsonInt(json, "mtime", static_cast<int64_t>(mtime), true);
     json += "}";
@@ -4986,7 +5467,7 @@ esp_err_t RestApi::handlePostFileSettings(httpd_req* req)
     if (!checkAuth(req)) return ESP_OK;
     if (!checkFileAccess(req)) return ESP_OK;
 
-    const std::string body = readBody(req);
+    const string body = readBody(req);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -5020,13 +5501,13 @@ esp_err_t RestApi::handlePostFileCheck(httpd_req* req)
     if (!checkFileAccess(req)) return ESP_OK;
     if (!s_files) return sendNoFileManager(req);
 
-    const std::string body = readBody(req, 512);
-    const std::string volume = jsonGetStr(body, "volume");
+    const string body = readBody(req, 512);
+    const string volume = jsonGetStr(body, "volume");
     if (volume.empty()) {
         return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
     }
 
-    std::string detail;
+    string detail;
     const auto st = s_files->checkStart(volume, &detail);
     if (st != ::dhcp::files::FileStatus::Ok) {
         return sendFileResult(req, st, "{}", &detail);

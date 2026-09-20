@@ -18,6 +18,8 @@
 // exactly 146097 days, so the era, the year inside it and the day inside it can
 // be divided out one after another, in both directions.
 
+using namespace std;
+
 namespace dhcp {
 namespace time {
 
@@ -209,7 +211,7 @@ bool TimeMath::parseDigits(const char* text, int count, int& out)
     return true;
 }
 
-bool TimeMath::parseDateTime(const std::string& text, DateTime& out)
+bool TimeMath::parseDateTime(const string& text, DateTime& out)
 {
     // Accepted forms: "YYYY-MM-DD HH:MM" (16) and "YYYY-MM-DD HH:MM:SS" (19),
     // with a space or 'T' between the date and the time (ISO-8601 writes the
@@ -287,14 +289,14 @@ DateTime TimeMath::fromUnixSec(uint32_t unixSec)
     return dt;
 }
 
-std::string TimeMath::format(const DateTime& dt)
+string TimeMath::format(const DateTime& dt)
 {
     // "YYYY-MM-DD HH:MM:SS" — the form the REST API accepts back and the one
     // the web interface displays.
     char buf[kIsoTextBytes];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
                   dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-    return std::string(buf);
+    return string(buf);
 }
 
 } // namespace time

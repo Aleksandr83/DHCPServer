@@ -20,6 +20,8 @@
  * written here.
  */
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -34,7 +36,7 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
 
 using dhcp::dns::InternalDnsCache;
 
@@ -43,7 +45,7 @@ namespace {
 void resetClock() { testClockUs() = 0; }
 void advanceMs(uint64_t ms) { testClockUs() += static_cast<int64_t>(ms) * 1000; }
 
-std::vector<std::string> ipA(const char* ip) { return std::vector<std::string>{ip}; }
+vector<string> ipA(const char* ip) { return vector<string>{ip}; }
 
 } // namespace
 
@@ -60,7 +62,7 @@ static int test_basic_answer()
 
     c.store("example.com", 1, ipA("93.184.216.34"), 60);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("EXAMPLE.com", 1, out, ttl));   // case-insensitive
     TEST_ASSERT_EQ(out.size(), 1u);
@@ -85,7 +87,7 @@ static int test_usage_counter()
     TEST_ASSERT_EQ(c.stats().usesTotal, 1);   // the store that created it
     TEST_ASSERT_EQ(c.stats().usesMax, 1);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("example.com", 1, out, ttl));
     TEST_ASSERT_EQ(c.stats().usesTotal, 2);
@@ -120,7 +122,7 @@ static int test_expired_is_not_a_use()
 
     advanceMs(11000);   // 11 s later, the 10 s TTL is over
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_FALSE(c.lookup("short.test", 1, out, ttl));
 
@@ -146,11 +148,11 @@ static int test_least_used_is_evicted()
     // first" rule it would be the very first victim.
     c.store("hot.test", 1, ipA("10.2.2.2"), 3600);
     for (size_t i = 0; i + 1 < cap; i++) {
-        c.store("g" + std::to_string(i) + ".test", 1, ipA("10.9.9.9"), 3600);
+        c.store("g" + to_string(i) + ".test", 1, ipA("10.9.9.9"), 3600);
     }
     TEST_ASSERT_EQ(c.stats().entries, cap);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     for (int i = 0; i < 10; i++) {
         TEST_ASSERT_TRUE(c.lookup("hot.test", 1, out, ttl));
@@ -181,7 +183,7 @@ static int test_recycled_node_starts_from_zero()
     const size_t cap = c.stats().capacity;
 
     for (size_t i = 0; i < cap; i++) {
-        c.store("f" + std::to_string(i) + ".test", 1, ipA("10.1.1.1"), 3600);
+        c.store("f" + to_string(i) + ".test", 1, ipA("10.1.1.1"), 3600);
     }
     TEST_ASSERT_EQ(c.stats().entries, cap);
     TEST_ASSERT_EQ(c.stats().usesMax, 1);   // every record has one use exactly
@@ -251,9 +253,9 @@ static int test_save_reports_nothing_to_save()
     TEST_ASSERT_FALSE(nothing);
     TEST_ASSERT_EQ(written, 1u);
 
-    std::remove("test_cache_none.dat");
-    std::remove("test_cache_one.dat");
-    std::remove("test_cache_ignore.dat");
+    remove("test_cache_none.dat");
+    remove("test_cache_one.dat");
+    remove("test_cache_ignore.dat");
     c.disable();
     forever.disable();
     return 0;
@@ -264,14 +266,14 @@ static int test_save_load_keeps_counters()
 {
     resetClock();
     const char* path = "test_cache_v2.dat";
-    std::remove(path);
+    remove(path);
 
     uint64_t saved = 0;
     {
         InternalDnsCache c;
         TEST_ASSERT_TRUE(c.enable(1));
         c.store("keep.test", 1, ipA("1.2.3.4"), 3600);
-        std::vector<std::string> out;
+        vector<string> out;
         uint32_t ttl = 0;
         for (int i = 0; i < 4; i++) {
             TEST_ASSERT_TRUE(c.lookup("keep.test", 1, out, ttl));
@@ -298,7 +300,7 @@ static int test_save_load_keeps_counters()
         TEST_ASSERT_TRUE(c.loadFromFile(path, &loaded));
         TEST_ASSERT_EQ(loaded, 1u);
 
-        std::vector<std::string> out;
+        vector<string> out;
         uint32_t ttl = 0;
         TEST_ASSERT_TRUE(c.lookup("keep.test", 1, out, ttl));
         TEST_ASSERT_EQ(out.size(), 1u);
@@ -308,7 +310,7 @@ static int test_save_load_keeps_counters()
         TEST_ASSERT_EQ(c.stats().usesMax, saved + 1);
         c.disable();
     }
-    std::remove(path);
+    remove(path);
     return 0;
 }
 
@@ -346,23 +348,23 @@ static int test_load_reads_version2_file()
     TEST_ASSERT_EQ(loaded, 1u);
     TEST_ASSERT_EQ(c.stats().usesMax, 4242u);   // the 8 bytes were read as 8 bytes
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("v2.testxx", 1, out, ttl));
     TEST_ASSERT_EQ(out.size(), 1u);
     TEST_ASSERT_STR_EQ(out[0], "5.6.7.8");
 
     // And what this build writes is four bytes shorter per record.
-    const std::string again = std::string(path) + ".saved";
+    const string again = string(path) + ".saved";
     size_t written = 0;
     TEST_ASSERT_TRUE(c.saveToFile(again.c_str(), &written));
     TEST_ASSERT_EQ(written, 1u);
     TEST_ASSERT_EQ(c.fileInfo(again.c_str()).version, 3u);
     // 16 B header + 1 + 9 (name) + 2 + 1 + 1 + 4 (ttl) + 4 (uses) + 4 (IPv4).
     TEST_ASSERT_EQ(c.fileInfo(again.c_str()).size, 42u);
-    std::remove(again.c_str());
+    remove(again.c_str());
 
-    std::remove(path);
+    remove(path);
     return 0;
 }
 
@@ -395,7 +397,7 @@ static int test_load_reads_version1_file()
     TEST_ASSERT_EQ(loaded, 1u);
     TEST_ASSERT_EQ(c.fileInfo(path).version, 1u);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("old.test", 1, out, ttl));
     TEST_ASSERT_EQ(out.size(), 1u);
@@ -409,7 +411,7 @@ static int test_load_reads_version1_file()
     TEST_ASSERT_EQ(s.usesMax, 1);
     TEST_ASSERT_STR_EQ(s.topName, "old.test");
 
-    std::remove(path);
+    remove(path);
     return 0;
 }
 
@@ -450,7 +452,7 @@ static int test_usage_counter_saturates_at_max()
     TEST_ASSERT_EQ(loaded, 1u);
     TEST_ASSERT_EQ(c.stats().usesMax, UINT32_MAX);          // clamped on load
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("max.test", 1, out, ttl));   // one step from Max
     TEST_ASSERT_EQ(c.stats().usesMax, UINT32_MAX);          // … and it stays Max
@@ -459,7 +461,7 @@ static int test_usage_counter_saturates_at_max()
     // would make this record look like the least used one and evict it.
     const size_t cap = c.stats().capacity;
     for (size_t i = 0; i + 1 < cap; i++) {
-        c.store("m" + std::to_string(i) + ".test", 1, ipA("10.4.4.4"), 3600);
+        c.store("m" + to_string(i) + ".test", 1, ipA("10.4.4.4"), 3600);
     }
     TEST_ASSERT_EQ(c.stats().entries, cap);
     c.store("overflow.test", 1, ipA("10.3.3.3"), 3600);
@@ -468,7 +470,7 @@ static int test_usage_counter_saturates_at_max()
     TEST_ASSERT_EQ(out.size(), 1u);
     TEST_ASSERT_STR_EQ(out[0], "8.8.8.8");
 
-    std::remove(path);
+    remove(path);
     return 0;
 }
 
@@ -489,7 +491,7 @@ static int test_age_across_the_32_bit_millisecond_mark()
     c.store("newer.test", 1, ipA("10.6.6.6"), 3600);   // stored after it
     c.store("age.test", 1, ipA("10.7.7.7"), 3600);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     // Just stored: its age is zero, not 49.7 days.
     TEST_ASSERT_TRUE(c.lookup("age.test", 1, out, ttl));
@@ -502,7 +504,7 @@ static int test_age_across_the_32_bit_millisecond_mark()
     // record goes — and the oldest is the one stored *before* the mark, which a
     // truncated (32-bit) timestamp would report as the newest.
     for (size_t i = 0; i + 3 < cap; i++) {
-        c.store("w" + std::to_string(i) + ".test", 1, ipA("10.4.4.4"), 3600);
+        c.store("w" + to_string(i) + ".test", 1, ipA("10.4.4.4"), 3600);
     }
     TEST_ASSERT_EQ(c.stats().entries, cap);
     c.store("overflow.test", 1, ipA("10.3.3.3"), 3600);
@@ -520,7 +522,7 @@ static int test_save_and_load_across_the_mark()
 {
     resetClock();
     const char* path = "test_cache_mark.dat";
-    std::remove(path);
+    remove(path);
 
     // 49.7 days of uptime: a 32-bit millisecond counter would turn over here.
     advanceMs(4294967000ULL);
@@ -549,7 +551,7 @@ static int test_save_and_load_across_the_mark()
         TEST_ASSERT_EQ(loaded, 3u);
         TEST_ASSERT_EQ(c.stats().entries, 3u);
 
-        std::vector<std::string> out;
+        vector<string> out;
         uint32_t ttl = 0;
         TEST_ASSERT_TRUE(c.lookup("before.test", 1, out, ttl));
         TEST_ASSERT_EQ(ttl, 3599u);
@@ -560,7 +562,7 @@ static int test_save_and_load_across_the_mark()
         c.disable();
     }
 
-    std::remove(path);
+    remove(path);
     return 0;
 }
 
@@ -574,7 +576,7 @@ static int test_ignore_ttl()
     c.store("forever.test", 1, ipA("10.4.4.4"), 10);
     advanceMs(600000);
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("forever.test", 1, out, ttl));
     TEST_ASSERT_EQ(ttl, 10u);   // the original TTL, not a remaining one
@@ -600,7 +602,7 @@ static int test_hit_reports_its_time_split()
     c.store("split.test", 1, ipA("10.1.1.1"), 60);
     TEST_ASSERT_EQ(c.stats().stores, 1);            // the store that created it
 
-    std::vector<std::string> out;
+    vector<string> out;
     uint32_t ttl = 0;
     TEST_ASSERT_TRUE(c.lookup("split.test", 1, out, ttl));
     auto s = c.stats();
@@ -636,7 +638,7 @@ static int test_eviction_scan_is_measured()
     const size_t cap = c.stats().capacity;
 
     for (size_t i = 0; i < cap; i++) {
-        c.store("s" + std::to_string(i) + ".test", 1, ipA("10.2.2.2"), 3600);
+        c.store("s" + to_string(i) + ".test", 1, ipA("10.2.2.2"), 3600);
     }
     TEST_ASSERT_EQ(c.stats().entries, cap);
     TEST_ASSERT_EQ(c.stats().evictScans, 0);        // the pool filled without one

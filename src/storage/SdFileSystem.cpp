@@ -13,6 +13,8 @@
 #include "sdmmc_cmd.h"   // sdmmc_get_status — the liveness probe (see verify())
 #endif
 
+using namespace std;
+
 namespace dhcp {
 namespace storage {
 
@@ -160,7 +162,7 @@ bool SdFileSystem::tryMount(int busWidth, bool formatIfNeeded)
             ESP_LOGW(TAG, "%s: mount reported success but the volume is not "
                           "usable — releasing it", id_.c_str());
             esp_vfs_fat_sdcard_unmount(mountPoint_.c_str(), card);
-            attemptError_ = std::string("mount left no usable volume (") +
+            attemptError_ = string("mount left no usable volume (") +
                             (busWidth == 4 ? "4-bit" : "1-bit") + ")";
             return false;
         }
@@ -183,7 +185,7 @@ bool SdFileSystem::tryMount(int busWidth, bool formatIfNeeded)
     // was initialised (`if (host_inited) call_host_deinit(host_config)`), so the
     // peripheral is free for the next attempt — an extra sdmmc_host_deinit()
     // here would deinitialise it a second time.
-    attemptError_ = std::string("mount failed (") + (busWidth == 4 ? "4-bit" : "1-bit") +
+    attemptError_ = string("mount failed (") + (busWidth == 4 ? "4-bit" : "1-bit") +
                     "): " + esp_err_to_name(err);
     ESP_LOGW(TAG, "%s: %s", id_.c_str(), attemptError_.c_str());
     return false;
@@ -245,7 +247,7 @@ bool SdFileSystem::mountAttempts(bool formatIfNeeded)
     // that the driver then rejects (`ESP_ERR_INVALID_RESPONSE`) means something
     // completely different from silence on the CMD line (`ESP_ERR_TIMEOUT`),
     // and with a single line the second attempt used to hide the first.
-    std::string notes;
+    string notes;
 #if CONFIG_FILES_SD_BUS_WIDTH_4
     if (tryMount(4, formatIfNeeded)) return true;
     notes = attemptError_;
@@ -466,7 +468,7 @@ bool SdFileSystem::format()
     // the next mount() rebuilds the host, the card and the VFS from scratch.
     esp_err_t err = esp_vfs_fat_sdcard_format(mountPoint_.c_str(), card_);
     if (err != ESP_OK) {
-        error_ = std::string("format failed: ") + esp_err_to_name(err);
+        error_ = string("format failed: ") + esp_err_to_name(err);
         ESP_LOGE(TAG, "%s: %s", id_.c_str(), error_.c_str());
         // This branch leaves the card handle, the diskio slot, the VFS path and
         // **the SDMMC controller** exactly as they were (the helper returns

@@ -1,11 +1,13 @@
 #include "FileJson.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace web {
 
-std::string FileJson::volumeArray(const std::vector<::dhcp::storage::VolumeInfo>& volumes)
+string FileJson::volumeArray(const vector<::dhcp::storage::VolumeInfo>& volumes)
 {
-    std::string list = "[";
+    string list = "[";
     for (size_t i = 0; i < volumes.size(); ++i) {
         if (i != 0) list += ',';
         const auto& vol = volumes[i];
@@ -24,8 +26,8 @@ std::string FileJson::volumeArray(const std::vector<::dhcp::storage::VolumeInfo>
     return list;
 }
 
-std::string FileJson::volumes(bool enabled,
-                              const std::vector<::dhcp::storage::VolumeInfo>& volumes)
+string FileJson::volumes(bool enabled,
+                              const vector<::dhcp::storage::VolumeInfo>& volumes)
 {
     JsonWriter out;
     out.boolean("enabled", enabled);
@@ -33,7 +35,7 @@ std::string FileJson::volumes(bool enabled,
     return out.toString();
 }
 
-std::string FileJson::entryObject(const ::dhcp::files::FileEntry& entry)
+string FileJson::entryObject(const ::dhcp::files::FileEntry& entry)
 {
     JsonWriter w;
     w.str("name", entry.name);
@@ -43,9 +45,9 @@ std::string FileJson::entryObject(const ::dhcp::files::FileEntry& entry)
     return w.toString();
 }
 
-std::string FileJson::entryArray(const std::vector<::dhcp::files::FileEntry>& entries)
+string FileJson::entryArray(const vector<::dhcp::files::FileEntry>& entries)
 {
-    std::string out = "[";
+    string out = "[";
     for (size_t i = 0; i < entries.size(); ++i) {
         if (i != 0) out += ',';
         out += entryObject(entries[i]);
@@ -54,7 +56,7 @@ std::string FileJson::entryArray(const std::vector<::dhcp::files::FileEntry>& en
     return out;
 }
 
-std::string FileJson::list(const ListPayload& payload)
+string FileJson::list(const ListPayload& payload)
 {
     JsonWriter w;
     w.str("volume", payload.volume);
@@ -67,7 +69,7 @@ std::string FileJson::list(const ListPayload& payload)
     return w.toString();
 }
 
-std::string FileJson::text(const TextPayload& payload)
+string FileJson::text(const TextPayload& payload)
 {
     JsonWriter w;
     w.str("volume", payload.volume);
@@ -79,7 +81,7 @@ std::string FileJson::text(const TextPayload& payload)
     return w.toString();
 }
 
-std::string FileJson::settings(const SettingsPayload& payload)
+string FileJson::settings(const SettingsPayload& payload)
 {
     JsonWriter w;
     w.boolean("enabled", payload.enabled);
@@ -91,7 +93,7 @@ std::string FileJson::settings(const SettingsPayload& payload)
     return w.toString();
 }
 
-std::string FileJson::checkErrorObject(const ::dhcp::files::CheckError& error)
+string FileJson::checkErrorObject(const ::dhcp::files::CheckError& error)
 {
     JsonWriter w;
     w.str("path", error.path);
@@ -99,9 +101,9 @@ std::string FileJson::checkErrorObject(const ::dhcp::files::CheckError& error)
     return w.toString();
 }
 
-std::string FileJson::checkErrorArray(const std::vector<::dhcp::files::CheckError>& errors)
+string FileJson::checkErrorArray(const vector<::dhcp::files::CheckError>& errors)
 {
-    std::string out = "[";
+    string out = "[";
     for (size_t i = 0; i < errors.size(); ++i) {
         if (i != 0) out += ',';
         out += checkErrorObject(errors[i]);
@@ -110,7 +112,7 @@ std::string FileJson::checkErrorArray(const std::vector<::dhcp::files::CheckErro
     return out;
 }
 
-std::string FileJson::transfer(const ::dhcp::files::TransferReport& report)
+string FileJson::transfer(const ::dhcp::files::TransferReport& report)
 {
     JsonWriter out;
     out.str("phase", ::dhcp::files::transferPhaseName(report.phase));
@@ -139,12 +141,12 @@ std::string FileJson::transfer(const ::dhcp::files::TransferReport& report)
     return out.toString();
 }
 
-std::string FileJson::nameArray(const std::vector<std::string>& names)
+string FileJson::nameArray(const vector<string>& names)
 {
     // Objects rather than bare strings: a name may hold any character a FAT
     // volume allows, and JsonWriter is the one place that knows how to escape
     // it — the page reads `conflicts[].name`.
-    std::string list = "[";
+    string list = "[";
     for (size_t i = 0; i < names.size(); ++i) {
         if (i != 0) list += ',';
         JsonWriter w;
@@ -155,7 +157,7 @@ std::string FileJson::nameArray(const std::vector<std::string>& names)
     return list;
 }
 
-std::string FileJson::transferConflicts(const std::vector<std::string>& names)
+string FileJson::transferConflicts(const vector<string>& names)
 {
     JsonWriter out;
     out.str("status", "conflict");
@@ -163,7 +165,7 @@ std::string FileJson::transferConflicts(const std::vector<std::string>& names)
     return out.toString();
 }
 
-std::string FileJson::check(const ::dhcp::files::CheckReport& report)
+string FileJson::check(const ::dhcp::files::CheckReport& report)
 {
     JsonWriter w;
     w.boolean("busy", report.busy);
@@ -181,7 +183,7 @@ std::string FileJson::check(const ::dhcp::files::CheckReport& report)
     return w.toString();
 }
 
-std::string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
+string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
 {
     JsonWriter w;
     w.str("id", job.id);
@@ -198,9 +200,9 @@ std::string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
     return w.toString();
 }
 
-std::string FileJson::jobArray(const std::vector<::dhcp::core::JobInfo>& jobs)
+string FileJson::jobArray(const vector<::dhcp::core::JobInfo>& jobs)
 {
-    std::string out = "[";
+    string out = "[";
     for (size_t i = 0; i < jobs.size(); ++i) {
         if (i != 0) out += ',';
         out += jobObject(jobs[i]);
@@ -209,7 +211,7 @@ std::string FileJson::jobArray(const std::vector<::dhcp::core::JobInfo>& jobs)
     return out;
 }
 
-std::string FileJson::jobs(const std::vector<::dhcp::core::JobInfo>& jobs)
+string FileJson::jobs(const vector<::dhcp::core::JobInfo>& jobs)
 {
     JsonWriter w;
     w.literal("jobs", jobArray(jobs));

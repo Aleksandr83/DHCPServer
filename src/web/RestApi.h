@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdint>
 #include "esp_err.h"
+#include "IWebServer.h"
 
 struct httpd_req;
 
@@ -15,6 +16,7 @@ namespace dns  { class DnsServer; }
 namespace time { class TimeServer; }
 namespace web  { class AuthManager; }
 namespace files { class IFileManager; }
+namespace security { class CertStore; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -30,7 +32,8 @@ public:
                      ::dhcp::dns::DnsServer* dnsSrv,
                      ::dhcp::time::TimeServer* timeSrv,
                      ::dhcp::web::AuthManager* auth,
-                     ::dhcp::files::IFileManager* fileMgr = nullptr);
+                     ::dhcp::files::IFileManager* fileMgr = nullptr,
+                     ::dhcp::web::IWebServer* web = nullptr);
 
     static esp_err_t handleGetStatus(httpd_req* req);
     static esp_err_t handleGetVersion(httpd_req* req);
@@ -56,6 +59,21 @@ public:
     static esp_err_t handlePostLocalHosts(httpd_req* req);
     static esp_err_t handleGetSecuritySettings(httpd_req* req);
     static esp_err_t handlePostSecuritySettings(httpd_req* req);
+    /**
+     * @brief Give the RestApi the store the HTTPS pair lives in (stage 160).
+     *
+     * A setter of its own rather than an argument of @ref init: the store is
+     * built in `main.cpp` where the volumes are, and the order of that call and
+     * `init` (called by `WebServer::begin`) must not decide whether the
+     * certificates page works.
+     */
+    static void setCertificateStore(::dhcp::security::CertStore* store);
+    /** @brief State of the pair, the storage picker and the HTTPS switch. */
+    static esp_err_t handleGetCertificates(httpd_req* req);
+    /** @brief `generate` / `delete` / `storage` on the pair. */
+    static esp_err_t handlePostCertificates(httpd_req* req);
+    /** @brief Download of the certificate file (the key is never sent). */
+    static esp_err_t handleGetCertificateDownload(httpd_req* req);
     static esp_err_t handlePostOtaUpload(httpd_req* req);
     static esp_err_t handlePostWebFile(httpd_req* req);
     static esp_err_t handlePostTestConnection(httpd_req* req);
@@ -129,12 +147,43 @@ private:
                            int64_t val, bool addComma);
     static std::string readBody(httpd_req* req, size_t maxLen = 4096);
 
+    /**
+     * @brief The state of the certificate pair, the storage picker and HTTPS as JSON.
+     *
+     * One payload for the page and for the answer of every action, so a change
+     * never has to be described in prose: the page renders what the device
+     * reports (the volume, the reason of `state`, the dates, the days left).
+     */
+    static std::string certificatesJson(const ::dhcp::security::CertStore* store);
+
+    /**
+     * @brief Re-apply the HTTPS switch after the pair changed (stage 160).
+     *
+     * Deliberately not done inside the request: the switch stops or restarts the
+     * TLS listener, and one of the two listeners may be the one serving this very
+     * request — closing it from here would cut the answer off. The task waits
+     * for the answer to leave, then applies @p enable and logs the outcome; the
+     * page re-reads the state instead of being told what should have happened.
+     */
+    static void scheduleHttpsSwitch(bool enable);
+    /** @brief Body of the task above (waits, then switches HTTPS). */
+    static void httpsSwitchTask(void* arg);
+
     static ::dhcp::wifi::IWiFiManager* s_wifi;
     static ::dhcp::dhcp::IDhcpServer*  s_dhcp;
     static ::dhcp::dns::DnsServer*     s_dns;
     static ::dhcp::time::TimeServer*   s_time;
     static ::dhcp::web::AuthManager*   s_auth;
     static ::dhcp::files::IFileManager* s_files;
+    /** @brief The web server itself, for switching HTTPS on and off (stage 158). */
+    static ::dhcp::web::IWebServer*    s_web;
+    /**
+     * @brief The HTTPS certificate store of this build (stage 160).
+     *
+     * `nullptr` on a target without a volume for the pair: the page then reports
+     * `no_store` instead of offering buttons that could not work.
+     */
+    static ::dhcp::security::CertStore* s_certs;
 };
 
 } // namespace web

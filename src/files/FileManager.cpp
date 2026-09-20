@@ -24,6 +24,8 @@
 #include "FileSink.h"
 #include "FileSource.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace files {
 
@@ -43,15 +45,15 @@ constexpr uint32_t kTransferTaskStackBytes = 8192;
 constexpr mode_t kDirMode = 0777;
 
 /** @brief errno text for the `detail` out-parameter. */
-std::string errnoText()
+string errnoText()
 {
-    return std::string(strerror(errno));
+    return string(strerror(errno));
 }
 
 /** @brief Case-insensitive "a before b" comparison of entry names. */
-bool nameLess(const std::string& a, const std::string& b)
+bool nameLess(const string& a, const string& b)
 {
-    const size_t n = std::min(a.size(), b.size());
+    const size_t n = min(a.size(), b.size());
     for (size_t i = 0; i < n; ++i) {
         const int ca = tolower(static_cast<unsigned char>(a[i]));
         const int cb = tolower(static_cast<unsigned char>(b[i]));
@@ -67,7 +69,7 @@ bool nameLess(const std::string& a, const std::string& b)
  * with opendir/readdir and removed bottom-up, so a directory can never be
  * removed before its contents.
  */
-bool removeTree(const std::string& fullPath)
+bool removeTree(const string& fullPath)
 {
     struct stat st = {};
     if (stat(fullPath.c_str(), &st) != 0) return false;
@@ -80,7 +82,7 @@ bool removeTree(const std::string& fullPath)
     bool ok = true;
     struct dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
-        const std::string name = ent->d_name;
+        const string name = ent->d_name;
         if (name == "." || name == "..") continue;
         if (!removeTree(fullPath + "/" + name)) ok = false;
     }
@@ -90,7 +92,7 @@ bool removeTree(const std::string& fullPath)
 }
 
 /** @brief True when the directory has at least one entry besides `.`/`..`. */
-bool isDirEmpty(const std::string& fullPath)
+bool isDirEmpty(const string& fullPath)
 {
     DIR* dir = opendir(fullPath.c_str());
     if (dir == nullptr) return false;   // cannot tell — treat as non-empty
@@ -98,7 +100,7 @@ bool isDirEmpty(const std::string& fullPath)
     bool empty = true;
     struct dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
-        const std::string name = ent->d_name;
+        const string name = ent->d_name;
         if (name == "." || name == "..") continue;
         empty = false;
         break;
@@ -141,7 +143,7 @@ uint32_t FileManager::nowMs()
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-void FileManager::addVolume(std::unique_ptr<storage::IFileSystem> volume)
+void FileManager::addVolume(unique_ptr<storage::IFileSystem> volume)
 {
     if (!volume) return;
 
@@ -155,7 +157,7 @@ void FileManager::addVolume(std::unique_ptr<storage::IFileSystem> volume)
 
     ESP_LOGI(TAG, "volume registered: id=%s mountPoint=%s", volume->id().c_str(),
              volume->mountPoint().c_str());
-    volumes_.push_back(std::move(volume));
+    volumes_.push_back(move(volume));
 }
 
 // The classic ESP32 has neither the FAT data partition nor a card slot, so the
@@ -205,11 +207,11 @@ void FileManager::refresh()
     lastRetryMs_ = now;
 }
 
-std::vector<storage::VolumeInfo> FileManager::volumes()
+vector<storage::VolumeInfo> FileManager::volumes()
 {
     refresh();
 
-    std::vector<storage::VolumeInfo> out;
+    vector<storage::VolumeInfo> out;
     out.reserve(volumes_.size());
     for (auto& vol : volumes_) {
         out.push_back(vol->info());
@@ -217,7 +219,7 @@ std::vector<storage::VolumeInfo> FileManager::volumes()
     return out;
 }
 
-storage::IFileSystem* FileManager::find(const std::string& volumeId)
+storage::IFileSystem* FileManager::find(const string& volumeId)
 {
     refresh();
 
@@ -231,7 +233,7 @@ storage::IFileSystem* FileManager::find(const std::string& volumeId)
 // Path / volume helpers
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::resolve(const std::string& volumeId,
+FileStatus FileManager::resolve(const string& volumeId,
                                storage::IFileSystem*& vol)
 {
     vol = find(volumeId);
@@ -249,8 +251,8 @@ FileStatus FileManager::resolve(const std::string& volumeId,
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::absolute(storage::IFileSystem& vol, const std::string& path,
-                                 std::string& rel, std::string& full)
+FileStatus FileManager::absolute(storage::IFileSystem& vol, const string& path,
+                                 string& rel, string& full)
 {
     // Single enforcement point: every operation goes through the same policy.
     if (!storage::PathUtil::normalize(path, rel)) return FileStatus::InvalidPath;
@@ -262,14 +264,14 @@ FileStatus FileManager::absolute(storage::IFileSystem& vol, const std::string& p
 // Directory listing
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::scan(const std::string& volumeId, const std::string& path,
-                            IDirVisitor& visitor, std::string* detail)
+FileStatus FileManager::scan(const string& volumeId, const string& path,
+                            IDirVisitor& visitor, string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
 
@@ -288,7 +290,7 @@ FileStatus FileManager::scan(const std::string& volumeId, const std::string& pat
 
     struct dirent* ent = nullptr;
     while ((ent = readdir(dir)) != nullptr) {
-        const std::string name = ent->d_name;
+        const string name = ent->d_name;
         if (name == ".." || name == ".") continue;
         // `<name>.part` is the temporary file of a paused (or abandoned) upload,
         // and that suffix is reserved for it anyway: it is not operator data, so
@@ -300,7 +302,7 @@ FileStatus FileManager::scan(const std::string& volumeId, const std::string& pat
         e.name = name;
 
         struct stat stEnt = {};
-        const std::string entPath = full + "/" + name;
+        const string entPath = full + "/" + name;
         if (::stat(entPath.c_str(), &stEnt) == 0) {
             e.isDir = S_ISDIR(stEnt.st_mode);
             e.size = e.isDir ? 0 : static_cast<uint64_t>(stEnt.st_size);
@@ -315,8 +317,8 @@ FileStatus FileManager::scan(const std::string& volumeId, const std::string& pat
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::list(const std::string& volumeId, const std::string& path,
-                            std::vector<FileEntry>& out, std::string* detail)
+FileStatus FileManager::list(const string& volumeId, const string& path,
+                            vector<FileEntry>& out, string* detail)
 {
     out.clear();
 
@@ -325,7 +327,7 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
     // what a directory contains — the cap here never reaches the engine, which
     // would otherwise delete a source tree it had only partly copied.
     struct CollectVisitor : IDirVisitor {
-        CollectVisitor(std::vector<FileEntry>& target, size_t limit)
+        CollectVisitor(vector<FileEntry>& target, size_t limit)
             : entries(target), cap(limit) {}
 
         bool visit(const FileEntry& entry) override
@@ -334,7 +336,7 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
             return entries.size() < cap;
         }
 
-        std::vector<FileEntry>& entries;
+        vector<FileEntry>& entries;
         size_t cap;
     };
 
@@ -343,7 +345,7 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
     if (st != FileStatus::Ok) return st;
 
     // Directories first, then case-insensitive by name.
-    std::sort(out.begin(), out.end(), [](const FileEntry& a, const FileEntry& b) {
+    sort(out.begin(), out.end(), [](const FileEntry& a, const FileEntry& b) {
         if (a.isDir != b.isDir) return a.isDir;
         return nameLess(a.name, b.name);
     });
@@ -351,16 +353,16 @@ FileStatus FileManager::list(const std::string& volumeId, const std::string& pat
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::createWriter(const std::string& volumeId,
-                                    const std::string& path,
-                                    std::unique_ptr<IFileSink>& out,
-                                    std::string* detail)
+FileStatus FileManager::createWriter(const string& volumeId,
+                                    const string& path,
+                                    unique_ptr<IFileSink>& out,
+                                    string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::InvalidPath;   // needs a file name
@@ -372,13 +374,13 @@ FileStatus FileManager::createWriter(const std::string& volumeId,
         return FileStatus::AlreadyExists;
     }
 
-    auto sink = std::make_unique<FileSink>(full, 0);
+    auto sink = make_unique<FileSink>(full, 0);
     if (!sink->isOpen()) {
         if (detail) *detail = errnoText();
         return FileStatus::IoError;
     }
 
-    out = std::move(sink);
+    out = move(sink);
     return FileStatus::Ok;
 }
 
@@ -386,14 +388,14 @@ FileStatus FileManager::createWriter(const std::string& volumeId,
 // mkdir / rename / remove / format
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::mkdir(const std::string& volumeId, const std::string& path,
-                              std::string* detail)
+FileStatus FileManager::mkdir(const string& volumeId, const string& path,
+                              string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::AlreadyExists;   // the root always exists
@@ -406,14 +408,14 @@ FileStatus FileManager::mkdir(const std::string& volumeId, const std::string& pa
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::rename(const std::string& volumeId, const std::string& from,
-                               const std::string& to, std::string* detail)
+FileStatus FileManager::rename(const string& volumeId, const string& from,
+                               const string& to, string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string relFrom, fullFrom, relTo, fullTo;
+    string relFrom, fullFrom, relTo, fullTo;
     st = absolute(*vol, from, relFrom, fullFrom);
     if (st != FileStatus::Ok) return st;
     st = absolute(*vol, to, relTo, fullTo);
@@ -436,14 +438,14 @@ FileStatus FileManager::rename(const std::string& volumeId, const std::string& f
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::remove(const std::string& volumeId, const std::string& path,
-                               bool recursive, std::string* detail)
+FileStatus FileManager::remove(const string& volumeId, const string& path,
+                               bool recursive, string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::InvalidPath;   // never the whole volume
@@ -475,7 +477,7 @@ FileStatus FileManager::remove(const std::string& volumeId, const std::string& p
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::format(const std::string& volumeId, std::string* detail)
+FileStatus FileManager::format(const string& volumeId, string* detail)
 {
     // Deliberately **not** `resolve()`: formatting is the operation for a card
     // whose filesystem is unusable — an interrupted format is the classic way to
@@ -514,8 +516,8 @@ FileStatus FileManager::format(const std::string& volumeId, std::string* detail)
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::powerCycle(const std::string& volumeId, uint32_t offMs,
-                                   std::string* detail)
+FileStatus FileManager::powerCycle(const string& volumeId, uint32_t offMs,
+                                   string* detail)
 {
     // Deliberately **not** `resolve()`: this is called while a format owns the
     // volume — that is exactly the situation it exists for — so the busy check
@@ -535,14 +537,14 @@ FileStatus FileManager::powerCycle(const std::string& volumeId, uint32_t offMs,
 // Streamed transfers (upload / download)
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::stat(const std::string& volumeId, const std::string& path,
-                             FileEntry& out, std::string* detail)
+FileStatus FileManager::stat(const string& volumeId, const string& path,
+                             FileEntry& out, string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::InvalidPath;   // the root has no metadata
@@ -561,16 +563,16 @@ FileStatus FileManager::stat(const std::string& volumeId, const std::string& pat
 }
 
 
-FileStatus FileManager::openRead(const std::string& volumeId,
-                                 const std::string& path,
-                                 std::unique_ptr<IFileSource>& out,
-                                 std::string* detail)
+FileStatus FileManager::openRead(const string& volumeId,
+                                 const string& path,
+                                 unique_ptr<IFileSource>& out,
+                                 string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::InvalidPath;   // a volume is not a file
@@ -582,27 +584,27 @@ FileStatus FileManager::openRead(const std::string& volumeId,
     }
     if (S_ISDIR(stFile.st_mode)) return FileStatus::InvalidPath;   // not a file
 
-    auto src = std::make_unique<FileSource>(full);
+    auto src = make_unique<FileSource>(full);
     if (!src->isOpen()) {
         if (detail) *detail = errnoText();
         return FileStatus::IoError;
     }
 
-    out = std::move(src);
+    out = move(src);
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::openWrite(const std::string& volumeId,
-                                  const std::string& path,
+FileStatus FileManager::openWrite(const string& volumeId,
+                                  const string& path,
                                   uint64_t offset, uint64_t totalLen, uint64_t chunkLen,
-                                  std::unique_ptr<IFileSink>& out, UploadRange& range,
-                                  std::string* detail)
+                                  unique_ptr<IFileSink>& out, UploadRange& range,
+                                  string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
     if (rel == "/") return FileStatus::InvalidPath;   // needs a file name
@@ -616,14 +618,14 @@ FileStatus FileManager::openWrite(const std::string& volumeId,
     // How much of the file is already on the device decides whether this chunk
     // continues the upload or has to start it over. The arithmetic lives in
     // UploadRange; a client that lost track asks uploadOffset for the truth.
-    const std::string partPath = full + storage::PathUtil::kUploadPartSuffix;
+    const string partPath = full + storage::PathUtil::kUploadPartSuffix;
     uint64_t partSize = 0;
     struct stat stPart = {};
     if (::stat(partPath.c_str(), &stPart) == 0) {
         partSize = static_cast<uint64_t>(stPart.st_size);
     }
 
-    const std::string reason = UploadRange::check(partSize, offset, chunkLen,
+    const string reason = UploadRange::check(partSize, offset, chunkLen,
                                                   totalLen != 0, totalLen, range);
     if (!reason.empty()) {
         ESP_LOGW(TAG, "upload of %s refused: %s", rel.c_str(), reason.c_str());
@@ -644,7 +646,7 @@ FileStatus FileManager::openWrite(const std::string& volumeId,
         return FileStatus::NoSpace;
     }
 
-    auto sink = std::make_unique<FileSink>(full, range.offset);
+    auto sink = make_unique<FileSink>(full, range.offset);
     if (!sink->isOpen()) {
         if (detail) *detail = errnoText();
         return FileStatus::IoError;
@@ -653,12 +655,12 @@ FileStatus FileManager::openWrite(const std::string& volumeId,
     ESP_LOGI(TAG, "upload started: %s (offset %llu of %llu, volume %s)", rel.c_str(),
              (unsigned long long)range.offset, (unsigned long long)range.total,
              volumeId.c_str());
-    out = std::move(sink);
+    out = move(sink);
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::uploadOffset(const std::string& volumeId, const std::string& path,
-                                     uint64_t& offset, std::string* detail)
+FileStatus FileManager::uploadOffset(const string& volumeId, const string& path,
+                                     uint64_t& offset, string* detail)
 {
     offset = 0;
 
@@ -666,7 +668,7 @@ FileStatus FileManager::uploadOffset(const std::string& volumeId, const std::str
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
 
@@ -683,14 +685,14 @@ FileStatus FileManager::uploadOffset(const std::string& volumeId, const std::str
     return FileStatus::Ok;
 }
 
-FileStatus FileManager::discardUpload(const std::string& volumeId, const std::string& path,
-                                      std::string* detail)
+FileStatus FileManager::discardUpload(const string& volumeId, const string& path,
+                                      string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     FileStatus st = resolve(volumeId, vol);
     if (st != FileStatus::Ok) return st;
 
-    std::string rel, full;
+    string rel, full;
     st = absolute(*vol, path, rel, full);
     if (st != FileStatus::Ok) return st;
 
@@ -704,7 +706,7 @@ FileStatus FileManager::discardUpload(const std::string& volumeId, const std::st
     return FileStatus::Ok;
 }
 
-uint64_t FileManager::freeBytes(const std::string& volumeId)
+uint64_t FileManager::freeBytes(const string& volumeId)
 {
     storage::IFileSystem* vol = find(volumeId);
     if (vol == nullptr || !vol->isMounted()) return 0;
@@ -721,7 +723,7 @@ uint64_t FileManager::freeBytes(const std::string& volumeId)
 // the card on its own would be worse than no diagnostic at all.
 // ─────────────────────────────────────────────────────
 
-FileStatus FileManager::checkStart(const std::string& volumeId, std::string* detail)
+FileStatus FileManager::checkStart(const string& volumeId, string* detail)
 {
     storage::IFileSystem* vol = nullptr;
     const FileStatus st = resolve(volumeId, vol);
@@ -820,7 +822,7 @@ bool FileManager::checkStopRequested()
     return stop;
 }
 
-void FileManager::checkSetProgress(const std::string& current, uint32_t dirs,
+void FileManager::checkSetProgress(const string& current, uint32_t dirs,
                                    uint32_t files, uint32_t badEntries, uint64_t bytes)
 {
     if (checkMutex_ == nullptr) return;
@@ -852,8 +854,8 @@ void FileManager::checkFinish(const CheckReport& report)
         "file_check",
         report.cancelled ? ::dhcp::core::JobState::Cancelled
                          : ::dhcp::core::JobState::Done,
-        report.badEntries > 0 ? std::to_string(report.badEntries) + " damaged"
-                              : std::string{});
+        report.badEntries > 0 ? to_string(report.badEntries) + " damaged"
+                              : string{});
 }
 
 void FileManager::checkTask(void* arg)
@@ -864,7 +866,7 @@ void FileManager::checkTask(void* arg)
         return;
     }
 
-    std::string mount;
+    string mount;
     if (self->checkMutex_ != nullptr) {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->checkMutex_), portMAX_DELAY);
         mount = self->checkMount_;
@@ -878,7 +880,7 @@ void FileManager::checkTask(void* arg)
     vTaskDelete(nullptr);
 }
 
-void FileManager::checkWalk(const std::string& mountPoint)
+void FileManager::checkWalk(const string& mountPoint)
 {
     CheckReport report;
     if (checkMutex_ != nullptr) {
@@ -891,7 +893,7 @@ void FileManager::checkWalk(const std::string& mountPoint)
     // Explicit stack of directories instead of recursion: every cancel check
     // then sits in one loop, and the depth is bounded by the same policy the
     // rest of the API uses (PathUtil caps paths at kMaxPathLen).
-    std::vector<std::string> pending;
+    vector<string> pending;
     pending.push_back("/");
 
     uint64_t budgetLeft = kCheckBudgetBytes;
@@ -899,7 +901,7 @@ void FileManager::checkWalk(const std::string& mountPoint)
     bool truncated = false;
     bool cancelled = false;
 
-    const auto noteError = [&report](const std::string& path, const std::string& why) {
+    const auto noteError = [&report](const string& path, const string& why) {
         ++report.badEntries;
         if (report.errors.size() < kCheckMaxErrors) {
             report.errors.push_back({path, why});
@@ -913,7 +915,7 @@ void FileManager::checkWalk(const std::string& mountPoint)
             break;
         }
 
-        const std::string dir = pending.back();
+        const string dir = pending.back();
         pending.pop_back();
         ++report.dirs;
 
@@ -927,11 +929,11 @@ void FileManager::checkWalk(const std::string& mountPoint)
 
         struct dirent* ent = nullptr;
         while ((ent = readdir(handle)) != nullptr) {
-            const std::string name = ent->d_name;
+            const string name = ent->d_name;
             if (name == "." || name == "..") continue;
 
-            const std::string rel = (dir == "/") ? ("/" + name) : (dir + "/" + name);
-            const std::string full = storage::PathUtil::join(mountPoint, rel);
+            const string rel = (dir == "/") ? ("/" + name) : (dir + "/" + name);
+            const string full = storage::PathUtil::join(mountPoint, rel);
 
             struct stat st = {};
             if (::stat(full.c_str(), &st) != 0) {
@@ -956,19 +958,19 @@ void FileManager::checkWalk(const std::string& mountPoint)
                 continue;
             }
 
-            std::vector<char> buffer(kCheckChunkBytes);
+            vector<char> buffer(kCheckChunkBytes);
             uint64_t read = 0;
             bool budgetHit = false;
             bool ioFail = false;
-            std::string failDetail;
+            string failDetail;
 
             while (read < size) {
                 if (budgetLeft == 0) {
                     budgetHit = true;
                     break;
                 }
-                const uint64_t want = std::min<uint64_t>(
-                    std::min<uint64_t>(kCheckChunkBytes, size - read), budgetLeft);
+                const uint64_t want = min<uint64_t>(
+                    min<uint64_t>(kCheckChunkBytes, size - read), budgetLeft);
                 const size_t got = fread(buffer.data(), 1, static_cast<size_t>(want), f);
                 if (got == 0) break;
                 read += got;
@@ -1040,8 +1042,8 @@ void FileManager::checkWalk(const std::string& mountPoint)
 // ─────────────────────────────────────────────────────
 
 FileStatus FileManager::transferConflicts(const TransferRequest& req,
-                                          std::vector<std::string>& names,
-                                          std::string* detail)
+                                          vector<string>& names,
+                                          string* detail)
 {
     // Cheap by construction: N `stat()` calls on the selected entries, no walk.
     // The REST handler runs this before it answers, which is what lets it ask
@@ -1049,7 +1051,7 @@ FileStatus FileManager::transferConflicts(const TransferRequest& req,
     return TransferEngine::conflicts(*this, req, names, detail);
 }
 
-FileStatus FileManager::transferStart(const TransferRequest& req, std::string* detail)
+FileStatus FileManager::transferStart(const TransferRequest& req, string* detail)
 {
     if (!supported()) return FileStatus::Unsupported;
 
@@ -1124,7 +1126,7 @@ FileStatus FileManager::transferStart(const TransferRequest& req, std::string* d
 
     // The registry entry makes the transfer visible on the scheduler page, where
     // it can be stopped as well; the byte total arrives with the measurement.
-    std::string arg = std::to_string(req.paths.size()) + (req.paths.size() == 1 ? " entry -> " : " entries -> ");
+    string arg = to_string(req.paths.size()) + (req.paths.size() == 1 ? " entry -> " : " entries -> ");
     arg += req.dstVolume + req.dstPath;
     ::dhcp::core::JobRegistry::instance().begin("transfer", "jobs.transfer", arg, 0);
     return FileStatus::Ok;
@@ -1207,9 +1209,9 @@ void FileManager::transferTask(void* arg)
     const ::dhcp::core::JobState state = report.cancelled ? ::dhcp::core::JobState::Cancelled
                           : (report.failed > 0) ? ::dhcp::core::JobState::Failed
                                                 : ::dhcp::core::JobState::Done;
-    std::string summary = std::to_string(report.filesDone) + " file(s)";
-    if (report.skipped > 0) summary += ", " + std::to_string(report.skipped) + " skipped";
-    if (report.failed > 0) summary += ", " + std::to_string(report.failed) + " failed";
+    string summary = to_string(report.filesDone) + " file(s)";
+    if (report.skipped > 0) summary += ", " + to_string(report.skipped) + " skipped";
+    if (report.failed > 0) summary += ", " + to_string(report.failed) + " failed";
     if (!report.error.empty()) summary += ": " + report.error;
     ::dhcp::core::JobRegistry::instance().finish("transfer", state, summary);
 

@@ -15,7 +15,9 @@
 
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
+
+using namespace std;
 
 extern "C" {
 
@@ -67,7 +69,7 @@ static int test_config_static_bindings()
 {
     auto& cfg = dhcp::core::Config::instance();
 
-    std::vector<dhcp::core::StaticBinding> bindings;
+    vector<dhcp::core::StaticBinding> bindings;
     bindings.push_back({"24:0A:C4:01:23:45", "192.168.1.50", "Printer"});
     bindings.push_back({"AA:BB:CC:DD:EE:FF", "192.168.1.60", "Camera"});
 

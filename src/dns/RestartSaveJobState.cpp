@@ -1,5 +1,7 @@
 #include "RestartSaveJobState.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace dns {
 
@@ -28,7 +30,7 @@ RestartSaveJobState::StartResult RestartSaveJobState::request(bool enabled)
     return StartResult::Started;
 }
 
-void RestartSaveJobState::finish(Verdict verdict, const std::string& detail)
+void RestartSaveJobState::finish(Verdict verdict, const string& detail)
 {
     busy_ = false;
     verdict_ = verdict;

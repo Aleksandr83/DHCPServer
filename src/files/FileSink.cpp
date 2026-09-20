@@ -7,6 +7,8 @@
 
 #include "esp_log.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace files {
 
@@ -14,8 +16,8 @@ namespace {
 const char* TAG = "FileSink";
 }
 
-FileSink::FileSink(std::string finalPath, uint64_t initialSize)
-    : finalPath_(std::move(finalPath))
+FileSink::FileSink(string finalPath, uint64_t initialSize)
+    : finalPath_(move(finalPath))
     , partPath_(finalPath_ + ".part")
     , written_(initialSize)
 {

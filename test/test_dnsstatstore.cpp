@@ -12,6 +12,8 @@
 //
 // The harness always exits with 0 — the proof is the printed text.
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -34,17 +36,17 @@ using dhcp::dns::DnsStatTotals;
 
 static int g_fail = 0;
 
-static void check(bool ok, const std::string& what)
+static void check(bool ok, const string& what)
 {
     if (ok) {
-        std::printf("  ok   %s\n", what.c_str());
+        printf("  ok   %s\n", what.c_str());
     } else {
-        std::printf("  FAIL %s\n", what.c_str());
+        printf("  FAIL %s\n", what.c_str());
         ++g_fail;
     }
 }
 
-static int makeDir(const std::string& path)
+static int makeDir(const string& path)
 {
 #ifdef _WIN32
     return ::_mkdir(path.c_str());
@@ -53,30 +55,30 @@ static int makeDir(const std::string& path)
 #endif
 }
 
-static bool exists(const std::string& path)
+static bool exists(const string& path)
 {
     struct stat st = {};
     return ::stat(path.c_str(), &st) == 0;
 }
 
-static std::string tempBase()
+static string tempBase()
 {
-    const char* env = std::getenv("TEMP");
-    if (env == nullptr) env = std::getenv("TMP");
-    return (env != nullptr) ? std::string(env) : std::string(".");
+    const char* env = getenv("TEMP");
+    if (env == nullptr) env = getenv("TMP");
+    return (env != nullptr) ? string(env) : string(".");
 }
 
-static std::string g_dir;
+static string g_dir;
 
 static void test_encode_has_a_fixed_size_and_a_magic()
 {
-    std::printf("test_encode_has_a_fixed_size_and_a_magic\n");
+    printf("test_encode_has_a_fixed_size_and_a_magic\n");
     DnsStatTotals totals;
     totals.hits = 132;
     totals.forwards = 9;
     totals.hitUsSum = 132 * 199;
 
-    const std::string record = DnsStatStore::encode(totals);
+    const string record = DnsStatStore::encode(totals);
     check(record.size() == DnsStatStore::kRecordSize, "the record is 92 bytes");
     check(record.compare(0, 4, "DST1") == 0, "it starts with the magic");
     check(DnsStatStore::kVersion == 2, "this build writes version 2");
@@ -88,7 +90,7 @@ static void test_encode_has_a_fixed_size_and_a_magic()
  *  neither can a stored "wait" or "walk". */
 static void test_the_split_survives_the_round_trip()
 {
-    std::printf("test_the_split_survives_the_round_trip\n");
+    printf("test_the_split_survives_the_round_trip\n");
     DnsStatTotals in;
     in.hits = 1000;
     in.forwards = 10;
@@ -101,7 +103,7 @@ static void test_the_split_survives_the_round_trip()
     in.evictScanNodes = 3 * 59520;
 
     DnsStatTotals out;
-    std::string why;
+    string why;
     check(DnsStatStore::decode(DnsStatStore::encode(in), out, &why), "the record decodes");
     check(out.hits == in.hits && out.hitUsSum == in.hitUsSum,
           "the numbers the average is made of are exact");
@@ -134,23 +136,23 @@ static void test_the_split_survives_the_round_trip()
  *  — the version 1 shape is exactly such a shorter file. */
 static void test_the_version_and_the_payload_size_must_agree()
 {
-    std::printf("test_the_version_and_the_payload_size_must_agree\n");
+    printf("test_the_version_and_the_payload_size_must_agree\n");
     DnsStatTotals totals;
     totals.hits = 5;
-    const std::string good = DnsStatStore::encode(totals);
+    const string good = DnsStatStore::encode(totals);
     DnsStatTotals out;
-    std::string why;
+    string why;
 
-    std::string asV1 = good;
+    string asV1 = good;
     asV1[4] = 1;                 // claim version 1, keep the 72-byte payload
     check(!DnsStatStore::decode(asV1, out, &why) && why == "payload size mismatch",
           "a version 1 header on a version 2 payload is refused");
 
-    const std::string shortV2 = good.substr(0, DnsStatStore::kRecordSizeLegacy);
+    const string shortV2 = good.substr(0, DnsStatStore::kRecordSizeLegacy);
     check(!DnsStatStore::decode(shortV2, out, &why),
           "a 44-byte record claiming version 2 is refused");
 
-    std::string split = good;
+    string split = good;
     split[40] = static_cast<char>(split[40] ^ 0x01);   // flip a bit in `waitUs`
     check(!DnsStatStore::decode(split, out, &why) && why == "checksum mismatch",
           "the checksum covers the new counters too");
@@ -161,10 +163,10 @@ static void test_the_version_and_the_payload_size_must_agree()
  *  would throw away the only history the average has. */
 static void test_a_version1_file_still_loads()
 {
-    std::printf("test_a_version1_file_still_loads\n");
-    const std::string path = g_dir + "/legacy.dat";
+    printf("test_a_version1_file_still_loads\n");
+    const string path = g_dir + "/legacy.dat";
 
-    std::string r;
+    string r;
     r.append("DST1", 4);
     auto u32 = [&r](uint32_t v) {
         for (int i = 0; i < 4; i++) r.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
@@ -183,15 +185,15 @@ static void test_a_version1_file_still_loads()
     u32(sum);            // checksum
     check(r.size() == DnsStatStore::kRecordSizeLegacy, "the legacy record is 44 bytes");
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    FILE* f = fopen(path.c_str(), "wb");
     check(f != nullptr, "the legacy file is written");
     if (f != nullptr) {
-        std::fwrite(r.data(), 1, r.size(), f);
-        std::fclose(f);
+        fwrite(r.data(), 1, r.size(), f);
+        fclose(f);
     }
 
     DnsStatTotals back;
-    std::string why;
+    string why;
     check(DnsStatStore::load(path, back, &why), "a version 1 file loads (" + why + ")");
     check(back.hits == 500 && back.forwards == 7, "its counters come back");
     check(back.avgHitUs() == 42, "and so does the average they make");
@@ -201,14 +203,14 @@ static void test_a_version1_file_still_loads()
 
 static void test_round_trip_keeps_every_number()
 {
-    std::printf("test_round_trip_keeps_every_number\n");
+    printf("test_round_trip_keeps_every_number\n");
     DnsStatTotals in;
     in.hits = 18446744073709551615ull;      // every counter at its maximum
     in.forwards = 12345678901234567890ull;
     in.hitUsSum = 9876543210987654321ull;
 
     DnsStatTotals out;
-    std::string why;
+    string why;
     check(DnsStatStore::decode(DnsStatStore::encode(in), out, &why), "a record decodes");
     check(out.hits == in.hits && out.forwards == in.forwards && out.hitUsSum == in.hitUsSum,
           "all three numbers survive a 64-bit round trip");
@@ -225,7 +227,7 @@ static void test_round_trip_keeps_every_number()
 
 static void test_the_average_is_an_average_across_a_reboot()
 {
-    std::printf("test_the_average_is_an_average_across_a_reboot\n");
+    printf("test_the_average_is_an_average_across_a_reboot\n");
     // Saved before the reboot: 4 hits of 100 us. After it, two more hits of 400 us.
     DnsStatTotals saved;
     saved.hits = 4;
@@ -243,12 +245,12 @@ static void test_the_average_is_an_average_across_a_reboot()
 
 static void test_damaged_records_are_refused_with_a_reason()
 {
-    std::printf("test_damaged_records_are_refused_with_a_reason\n");
+    printf("test_damaged_records_are_refused_with_a_reason\n");
     DnsStatTotals totals;
     totals.hits = 5;
-    const std::string good = DnsStatStore::encode(totals);
+    const string good = DnsStatStore::encode(totals);
     DnsStatTotals out;
-    std::string why;
+    string why;
 
     check(!DnsStatStore::decode("", out, &why) && why == "unexpected size",
           "an empty file is refused");
@@ -257,38 +259,38 @@ static void test_damaged_records_are_refused_with_a_reason()
     check(!DnsStatStore::decode(good + "x", out, &why) && why == "unexpected size",
           "a file with trailing bytes is refused");
 
-    std::string foreign = good;
+    string foreign = good;
     foreign[0] = 'X';
     check(!DnsStatStore::decode(foreign, out, &why) && why == "not a statistics file",
           "a foreign file is refused");
 
     // A version from the future: this build cannot know what its extra fields mean.
-    std::string newer = good;
+    string newer = good;
     newer[4] = 9;
     check(!DnsStatStore::decode(newer, out, &why) && why == "unsupported version",
           "a newer version is refused instead of guessed");
 
-    std::string corrupt = good;
+    string corrupt = good;
     corrupt[16] = static_cast<char>(corrupt[16] ^ 0x01);   // flip a bit in `hits`
     check(!DnsStatStore::decode(corrupt, out, &why) && why == "checksum mismatch",
           "a single flipped bit is caught by the checksum");
 
-    std::string wrongSize = good;
+    string wrongSize = good;
     wrongSize[8] = 25;
     check(!DnsStatStore::decode(wrongSize, out, &why), "a payload-size mismatch is refused");
 }
 
 static void test_save_load_and_no_temporary_file_is_left()
 {
-    std::printf("test_save_load_and_no_temporary_file_is_left\n");
-    const std::string path = g_dir + "/Statistica.dat";
+    printf("test_save_load_and_no_temporary_file_is_left\n");
+    const string path = g_dir + "/Statistica.dat";
 
     DnsStatTotals totals;
     totals.hits = 132;
     totals.forwards = 9;
     totals.hitUsSum = 132 * 199;
 
-    std::string why;
+    string why;
     check(DnsStatStore::save(path, totals, &why), "the file is written");
     check(exists(path), "it is there");
     check(!exists(path + ".tmp"), "no temporary file stays behind");
@@ -305,23 +307,23 @@ static void test_save_load_and_no_temporary_file_is_left()
 // survives a failed save" — that one is simply gone, the operator chose it.
 static void test_a_torn_write_is_refused_by_the_format()
 {
-    std::printf("test_a_torn_write_is_refused_by_the_format\n");
-    const std::string path = g_dir + "/torn.dat";
+    printf("test_a_torn_write_is_refused_by_the_format\n");
+    const string path = g_dir + "/torn.dat";
 
     DnsStatTotals totals;
     totals.hits = 900;
     totals.hitUsSum = 900 * 20;
-    std::string why;
+    string why;
     check(DnsStatStore::save(path, totals, &why), "a good record is written");
 
     // Cut it in the middle: the first 20 bytes of the 92 are what a power cut
     // leaves behind.
-    const std::string record = DnsStatStore::encode(totals);
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    const string record = DnsStatStore::encode(totals);
+    FILE* f = fopen(path.c_str(), "wb");
     check(f != nullptr, "the file can be reopened for the simulation");
     if (f != nullptr) {
-        std::fwrite(record.data(), 1, 20, f);
-        std::fclose(f);
+        fwrite(record.data(), 1, 20, f);
+        fclose(f);
     }
 
     DnsStatTotals back;
@@ -332,16 +334,16 @@ static void test_a_torn_write_is_refused_by_the_format()
 
 static void test_missing_and_unwritable_paths_are_reported()
 {
-    std::printf("test_missing_and_unwritable_paths_are_reported\n");
+    printf("test_missing_and_unwritable_paths_are_reported\n");
     DnsStatTotals out;
-    std::string why;
+    string why;
 
     check(!DnsStatStore::load(g_dir + "/nothing_here.dat", out, &why) &&
           why == "no statistics file", "a device that never saved has no file (not an error)");
 
-    const std::string garbage = g_dir + "/garbage.dat";
-    std::FILE* f = std::fopen(garbage.c_str(), "wb");
-    if (f != nullptr) { std::fwrite("not a record at all", 1, 19, f); std::fclose(f); }
+    const string garbage = g_dir + "/garbage.dat";
+    FILE* f = fopen(garbage.c_str(), "wb");
+    if (f != nullptr) { fwrite("not a record at all", 1, 19, f); fclose(f); }
     check(!DnsStatStore::load(garbage, out, &why), "a garbage file is refused");
 
     check(!DnsStatStore::save(g_dir + "/no_such_dir/Statistica.dat", out, &why),
@@ -351,8 +353,8 @@ static void test_missing_and_unwritable_paths_are_reported()
 
 static void test_remove_is_idempotent_enough_for_a_factory_reset()
 {
-    std::printf("test_remove_is_idempotent_enough_for_a_factory_reset\n");
-    const std::string path = g_dir + "/gone.dat";
+    printf("test_remove_is_idempotent_enough_for_a_factory_reset\n");
+    const string path = g_dir + "/gone.dat";
 
     DnsStatTotals totals;
     totals.hits = 3;
@@ -374,15 +376,15 @@ static void test_remove_is_idempotent_enough_for_a_factory_reset()
 // on every planned restart.
 static void test_saving_over_an_existing_file_works()
 {
-    std::printf("test_saving_over_an_existing_file_works\n");
-    const std::string path = g_dir + "/over.dat";
+    printf("test_saving_over_an_existing_file_works\n");
+    const string path = g_dir + "/over.dat";
     ::remove(path.c_str());
 
     DnsStatTotals first;
     first.hits = 100;
     first.forwards = 10;
     first.hitUsSum = 100 * 30;
-    std::string why;
+    string why;
     check(DnsStatStore::save(path, first, &why), "the first save creates the file");
 
     DnsStatTotals second;
@@ -412,7 +414,7 @@ static void test_saving_over_an_existing_file_works()
 /** A queue and a target that only keep their contents for the test to read. */
 class TestQueue : public dhcp::core::IErrorQueue {
 public:
-    std::vector<dhcp::core::ErrorLogEntry> items;
+    vector<dhcp::core::ErrorLogEntry> items;
 
     bool push(const dhcp::core::ErrorLogEntry& entry) override
     {
@@ -431,30 +433,30 @@ public:
 
 class TestTarget : public dhcp::core::IErrorLogTarget {
 public:
-    std::vector<std::string> lines;
-    std::string name = "test";
+    vector<string> lines;
+    string name = "test";
 
-    bool append(dhcp::core::LogLevel /*level*/, const std::string& line) override
+    bool append(dhcp::core::LogLevel /*level*/, const string& line) override
     {
         lines.push_back(line);
         return true;
     }
 
-    const std::string& description() const override { return name; }
+    const string& description() const override { return name; }
 };
 
-static bool anyLineHas(const std::vector<std::string>& lines, const std::string& needle)
+static bool anyLineHas(const vector<string>& lines, const string& needle)
 {
     for (const auto& line : lines) {
-        if (line.find(needle) != std::string::npos) return true;
+        if (line.find(needle) != string::npos) return true;
     }
     return false;
 }
 
 static void test_retry_is_silent_when_the_first_attempt_works()
 {
-    std::printf("test_retry_is_silent_when_the_first_attempt_works\n");
-    const std::string path = g_dir + "/quiet.dat";
+    printf("test_retry_is_silent_when_the_first_attempt_works\n");
+    const string path = g_dir + "/quiet.dat";
     ::remove(path.c_str());
 
     TestQueue queue;
@@ -463,7 +465,7 @@ static void test_retry_is_silent_when_the_first_attempt_works()
 
     DnsStatTotals totals;
     totals.hits = 5;
-    std::string why;
+    string why;
     check(DnsStatStore::saveWithRetry(path, totals, &why, &log),
           "a save that works returns true");
     log.drain(0);
@@ -472,8 +474,8 @@ static void test_retry_is_silent_when_the_first_attempt_works()
 
 static void test_retry_removes_the_file_and_logs_every_step()
 {
-    std::printf("test_retry_removes_the_file_and_logs_every_step\n");
-    const std::string path = g_dir + "/retry.dat";
+    printf("test_retry_removes_the_file_and_logs_every_step\n");
+    const string path = g_dir + "/retry.dat";
     ::remove(path.c_str());
     ::rmdir(path.c_str());
     // A directory under the record's name: fopen(path, "wb") fails, which is the
@@ -486,7 +488,7 @@ static void test_retry_removes_the_file_and_logs_every_step()
 
     DnsStatTotals totals;
     totals.hits = 7;
-    std::string why;
+    string why;
     check(!DnsStatStore::saveWithRetry(path, totals, &why, &log),
           "both attempts fail — and the call says so");
     check(why == "cannot create the file",
@@ -507,8 +509,8 @@ static void test_retry_removes_the_file_and_logs_every_step()
 
 static void test_retry_keeps_the_file_out_of_the_way_when_it_can()
 {
-    std::printf("test_retry_keeps_the_file_out_of_the_way_when_it_can\n");
-    const std::string path = g_dir + "/untouched.dat";
+    printf("test_retry_keeps_the_file_out_of_the_way_when_it_can\n");
+    const string path = g_dir + "/untouched.dat";
     ::remove(path.c_str());
 
     TestQueue queue;
@@ -517,7 +519,7 @@ static void test_retry_keeps_the_file_out_of_the_way_when_it_can()
 
     DnsStatTotals totals;
     totals.hits = 3;
-    std::string why;
+    string why;
     check(DnsStatStore::saveWithRetry(path, totals, &why, &log),
           "a working save goes through the retry path untouched");
     log.drain(0);
@@ -551,9 +553,9 @@ int main()
     test_retry_keeps_the_file_out_of_the_way_when_it_can();
 
     if (g_fail != 0) {
-        std::printf("FAILED (%d checks)\n", g_fail);
+        printf("FAILED (%d checks)\n", g_fail);
     } else {
-        std::printf("PASSED!\n");
+        printf("PASSED!\n");
     }
     return 0;
 }

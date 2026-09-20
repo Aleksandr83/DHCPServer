@@ -15,6 +15,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+using namespace std;
+
 static const char* TAG = "TerminalMenu";
 
 namespace dhcp {
@@ -32,7 +34,7 @@ static const char* HELP_TEXT =
 TerminalMenu::TerminalMenu(dhcp::wifi::IWiFiManager& wifi,
                            dhcp::led::ILedController& led,
                            dhcp::web::AuthManager* auth,
-                           const std::string& prompt)
+                           const string& prompt)
     : wifi_(wifi)
     , led_(led)
     , auth_(auth)
@@ -42,8 +44,8 @@ TerminalMenu::TerminalMenu(dhcp::wifi::IWiFiManager& wifi,
 
 void TerminalMenu::setLifecycleHooks(Hook beforeReboot, Hook factoryReset)
 {
-    beforeReboot_ = std::move(beforeReboot);
-    factoryReset_ = std::move(factoryReset);
+    beforeReboot_ = move(beforeReboot);
+    factoryReset_ = move(factoryReset);
 }
 
 void TerminalMenu::start()
@@ -60,30 +62,30 @@ void TerminalMenu::stop()
     println("\r\nTerminal menu stopped.");
 }
 
-void TerminalMenu::print(const std::string& msg)
+void TerminalMenu::print(const string& msg)
 {
     printf("%s", msg.c_str());
     fflush(stdout);
 }
 
-void TerminalMenu::println(const std::string& msg)
+void TerminalMenu::println(const string& msg)
 {
     printf("%s\r\n", msg.c_str());
     fflush(stdout);
 }
 
-void TerminalMenu::processLine(const std::string& line)
+void TerminalMenu::processLine(const string& line)
 {
     if (line.empty()) return;
 
-    std::istringstream stream(line);
-    std::string cmd;
+    istringstream stream(line);
+    string cmd;
     stream >> cmd;
 
     if (cmd == "help") {
         cmdHelp();
     } else if (cmd == "lan") {
-        std::string sub;
+        string sub;
         stream >> sub;
         if (sub == "status") {
             cmdLanStatus();
@@ -93,7 +95,7 @@ void TerminalMenu::processLine(const std::string& line)
     } else if (cmd == "version") {
         cmdVersion();
     } else if (cmd == "passwd") {
-        std::string sub;
+        string sub;
         stream >> sub;
         if (sub == "reset") {
             cmdPasswdReset();
@@ -101,7 +103,7 @@ void TerminalMenu::processLine(const std::string& line)
             println("Unknown passwd subcommand. Usage: passwd reset");
         }
     } else if (cmd == "settings") {
-        std::string sub;
+        string sub;
         stream >> sub;
         if (sub == "reset") {
             cmdSettingsReset();
@@ -130,7 +132,7 @@ void TerminalMenu::cmdLanStatus()
 {
     if (wifi_.isConnected()) {
         char buf[128];
-        std::snprintf(buf, sizeof(buf),
+        snprintf(buf, sizeof(buf),
                       "Status: Connected\r\n"
                       "  Link: %s\r\n"
                       "  IPv4: %s\r\n"
@@ -148,14 +150,19 @@ void TerminalMenu::cmdVersion()
 {
     const auto& ver = dhcp::core::Version::instance();
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "Firmware version: %s\r\n", ver.toString().c_str());
+    snprintf(buf, sizeof(buf), "Firmware version: %s\r\n", ver.toString().c_str());
     print(buf);
 }
 
 void TerminalMenu::cmdPasswdReset()
 {
     // Reset web credentials to defaults and persist to NVS
-    dhcp::core::SecurityConfig sec;
+    // The command owns the credentials and the lockout limits only, so the rest
+    // of the security settings is read first and carried over: a default-built
+    // struct here would switch HTTPS off and send the certificate back to the
+    // internal volume in NVS, and the device would come up serving an interface
+    // the operator had configured otherwise (stage 160).
+    dhcp::core::SecurityConfig sec = dhcp::core::Config::instance().getSecurity();
     sec.username = "admin";
     sec.password = "admin";
     sec.maxAttempts = core::SecurityConfig::kDefaultMaxAttempts;

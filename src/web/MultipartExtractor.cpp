@@ -2,6 +2,8 @@
 
 #include <utility>
 
+using namespace std;
+
 namespace {
 
 /// Rule 39: the length of the CRLF CRLF that ends the part headers.
@@ -12,9 +14,9 @@ constexpr size_t kHeaderTerminatorBytes = 4;
 namespace dhcp {
 namespace web {
 
-MultipartExtractor::MultipartExtractor(std::string boundary, Sink sink)
+MultipartExtractor::MultipartExtractor(string boundary, Sink sink)
     : delimiter_("\r\n--" + boundary)
-    , sink_(std::move(sink))
+    , sink_(move(sink))
 {
     // An empty boundary would make the delimiter just CRLF CRLF and would eat
     // every blank line inside the payload — refuse to guess instead. (Checked
@@ -33,7 +35,7 @@ bool MultipartExtractor::feed(const uint8_t* data, size_t len)
         headerAcc_.append(reinterpret_cast<const char*>(data), len);
 
         const size_t end = headerAcc_.find("\r\n\r\n");
-        if (end == std::string::npos) {
+        if (end == string::npos) {
             if (headerAcc_.size() > kMaxHeaderBytes) {
                 failed_ = true;
                 return false;
@@ -42,7 +44,7 @@ bool MultipartExtractor::feed(const uint8_t* data, size_t len)
         }
 
         dataStarted_ = true;
-        const std::string payload = headerAcc_.substr(end + kHeaderTerminatorBytes);
+        const string payload = headerAcc_.substr(end + kHeaderTerminatorBytes);
         headerAcc_.clear();
 
         if (!payload.empty()) {
@@ -59,7 +61,7 @@ bool MultipartExtractor::consume(const char* data, size_t len)
     pending_.append(data, len);
 
     const size_t pos = pending_.find(delimiter_);
-    if (pos != std::string::npos) {
+    if (pos != string::npos) {
         // Everything before the delimiter is payload; the delimiter itself, a
         // possible `--` marker and the epilogue are envelope.
         if (pos > 0) {

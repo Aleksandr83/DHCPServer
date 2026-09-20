@@ -19,7 +19,9 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
+
+using namespace std;
 
 using dhcp::storage::PathUtil;
 
@@ -28,7 +30,7 @@ extern "C" {
 /** Valid inputs are normalized to "/seg/seg" — or to "/" for the root. */
 static int test_normalize_ok()
 {
-    std::string out;
+    string out;
 
     // Root variants
     TEST_ASSERT_TRUE(PathUtil::normalize("", out));
@@ -77,7 +79,7 @@ static int test_normalize_ok()
 /** Anything that could escape the volume or confuse FATFS is rejected. */
 static int test_normalize_rejects()
 {
-    std::string out;
+    string out;
 
     // Escaping the volume
     TEST_ASSERT_FALSE(PathUtil::normalize("..", out));
@@ -97,8 +99,8 @@ static int test_normalize_rejects()
     TEST_ASSERT_FALSE(PathUtil::normalize("/a\"b", out));
     TEST_ASSERT_FALSE(PathUtil::normalize("/c:\\temp", out));
     TEST_ASSERT_FALSE(PathUtil::normalize("/a\\b", out));
-    TEST_ASSERT_FALSE(PathUtil::normalize(std::string("/a") + '\x01', out));
-    TEST_ASSERT_FALSE(PathUtil::normalize(std::string("/a") + '\x7F', out));
+    TEST_ASSERT_FALSE(PathUtil::normalize(string("/a") + '\x01', out));
+    TEST_ASSERT_FALSE(PathUtil::normalize(string("/a") + '\x7F', out));
 
     // Trailing dot / space would be trimmed by FATFS on create
     TEST_ASSERT_FALSE(PathUtil::normalize("/name.", out));
@@ -106,11 +108,11 @@ static int test_normalize_rejects()
     TEST_ASSERT_FALSE(PathUtil::normalize("/dir/name. ", out));
 
     // Length and depth caps
-    TEST_ASSERT_FALSE(PathUtil::normalize("/" + std::string(PathUtil::kMaxSegmentLen + 1, 'x'), out));
-    std::string deep;
+    TEST_ASSERT_FALSE(PathUtil::normalize("/" + string(PathUtil::kMaxSegmentLen + 1, 'x'), out));
+    string deep;
     for (size_t i = 0; i <= PathUtil::kMaxDepth + 1; ++i) deep += "/d";
     TEST_ASSERT_FALSE(PathUtil::normalize(deep, out));
-    std::string longPath = "/";
+    string longPath = "/";
     for (size_t i = 0; i < PathUtil::kMaxPathLen; ++i) longPath += 'y';
     TEST_ASSERT_FALSE(PathUtil::normalize(longPath, out));
 
@@ -120,14 +122,14 @@ static int test_normalize_rejects()
 /** Boundary values that must still be accepted. */
 static int test_normalize_limits()
 {
-    std::string out;
+    string out;
 
     // Exactly the maximum segment length
-    TEST_ASSERT_TRUE(PathUtil::normalize("/" + std::string(PathUtil::kMaxSegmentLen, 'x'), out));
+    TEST_ASSERT_TRUE(PathUtil::normalize("/" + string(PathUtil::kMaxSegmentLen, 'x'), out));
     TEST_ASSERT_EQ(out.size(), PathUtil::kMaxSegmentLen + 1);
 
     // Exactly the maximum depth
-    std::string deep;
+    string deep;
     for (size_t i = 0; i < PathUtil::kMaxDepth; ++i) deep += "/d";
     TEST_ASSERT_TRUE(PathUtil::normalize(deep, out));
     TEST_ASSERT_STR_EQ(out, deep);
@@ -152,14 +154,14 @@ static int test_valid_name()
     TEST_ASSERT_FALSE(PathUtil::isValidName("a:b"));
     TEST_ASSERT_FALSE(PathUtil::isValidName("name."));
     TEST_ASSERT_FALSE(PathUtil::isValidName("name "));
-    TEST_ASSERT_FALSE(PathUtil::isValidName(std::string(PathUtil::kMaxSegmentLen + 1, 'x')));
+    TEST_ASSERT_FALSE(PathUtil::isValidName(string(PathUtil::kMaxSegmentLen + 1, 'x')));
     return 0;
 }
 
 /** Directory + name → child path (upload / mkdir / rename destination). */
 static int test_normalize_child()
 {
-    std::string out;
+    string out;
 
     TEST_ASSERT_TRUE(PathUtil::normalizeChild("/", "a.txt", out));
     TEST_ASSERT_STR_EQ(out, "/a.txt");
@@ -176,7 +178,7 @@ static int test_normalize_child()
     TEST_ASSERT_FALSE(PathUtil::normalizeChild("/", "", out));
     TEST_ASSERT_FALSE(PathUtil::normalizeChild("/", ".", out));
     // Depth cap applies to the resulting path, not just to the input
-    std::string deep;
+    string deep;
     for (size_t i = 0; i < PathUtil::kMaxDepth; ++i) deep += "/d";
     TEST_ASSERT_FALSE(PathUtil::normalizeChild(deep, "x", out));
 
@@ -202,7 +204,7 @@ static int test_join_parent_basename()
     TEST_ASSERT_STR_EQ(PathUtil::basename("/a/b/c.txt"), "c.txt");
 
     // Round-trip: parent + basename rebuilds the original path
-    std::string norm;
+    string norm;
     TEST_ASSERT_TRUE(PathUtil::normalize("/logs/2026/15 dns.txt", norm));
     TEST_ASSERT_STR_EQ(PathUtil::join(PathUtil::parent(norm),
                                       PathUtil::basename(norm)), norm);
@@ -225,7 +227,7 @@ static int test_upload_part_names()
     TEST_ASSERT_TRUE(PathUtil::isValidName("part"));
     TEST_ASSERT_TRUE(PathUtil::isValidName("part.txt"));
 
-    std::string route;
+    string route;
     TEST_ASSERT_FALSE(PathUtil::normalize("/logs/movie.mkv.part", route));
     TEST_ASSERT_FALSE(PathUtil::normalizeChild("/logs", "x.part", route));
     TEST_ASSERT_TRUE(PathUtil::normalize("/logs/movie.mkv", route));

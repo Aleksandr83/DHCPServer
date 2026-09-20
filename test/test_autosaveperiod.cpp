@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstdio>
 
+using namespace std;
+
 using namespace dhcp::core;
 
 static_assert(kSecondsPerMinute == 60, "a minute changed");
@@ -75,6 +77,6 @@ int main()
     assert(autosavePeriodSec(AutosavePeriod::Hour, kHoursPerDay) ==
            autosavePeriodSec(AutosavePeriod::Day, 1));
 
-    std::printf("All AutosavePeriod tests PASSED!\n");
+    printf("All AutosavePeriod tests PASSED!\n");
     return 0;
 }

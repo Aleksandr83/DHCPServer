@@ -23,6 +23,8 @@
 #include "apps/ping/ping_sock.h"
 #include "freertos/semphr.h"
 
+using namespace std;
+
 static const char* TAG = "DhcpServer";
 
 // Helper macro for IP address formatting (replacement for lwip IPSTR/IP2STR)
@@ -450,7 +452,7 @@ void DhcpServer::reloadStaticBindings()
     for (const auto& b : bindings) {
         StaticEntry entry;
         // Parse MAC
-        std::sscanf(b.mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+        sscanf(b.mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
                     &entry.mac[0], &entry.mac[1], &entry.mac[2],
                     &entry.mac[3], &entry.mac[4], &entry.mac[5]);
         entry.ip = ipStrToU32(b.ip);
@@ -663,10 +665,10 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
     // Free — it is already in the packet that was just parsed — but never
     // trusted: DhcpClientName filters it before it can reach JSON or NVS.
     const size_t kOptionsOffset = sizeof(DhcpMessage) - sizeof(msg->options);
-    const std::string clientName =
+    const string clientName =
         (len > kOptionsOffset)
             ? DhcpClientName::fromOptions(msg->options, len - kOptionsOffset)
-            : std::string();
+            : string();
 
     // Log incoming DHCP messages if terminal logging enabled
     if (logTerminal_) {
@@ -801,7 +803,7 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
 
 void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
                                 uint32_t requestedIp, uint32_t relayIp,
-                                const std::string& clientName)
+                                const string& clientName)
 {
     uint32_t offerIp = 0;
     if (requestedIp &&
@@ -1122,7 +1124,7 @@ uint32_t DhcpServer::resolveRouter(const uint8_t* clientMac, bool& sendRouter) c
     return serverGateway_;
 }
 
-uint32_t DhcpServer::ipStrToU32(const std::string& ip) const
+uint32_t DhcpServer::ipStrToU32(const string& ip) const
 {
     uint32_t addr;
     inet_pton(AF_INET, ip.c_str(), &addr);
@@ -1178,7 +1180,7 @@ bool DhcpServer::canAddLeaseEntry(uint32_t ip)
     return false;
 }
 
-void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const std::string& hostname)
+void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const string& hostname)
 {
     DhcpLease lease;
     memcpy(lease.mac, mac, DHCP_HWADDR_LEN);
@@ -1196,7 +1198,7 @@ void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const std::string& ho
     }
 }
 
-bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const std::string& hostname)
+bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const string& hostname)
 {
     // Reserve the offered IP for a short hold so concurrent DISCOVERs from
     // different clients don't get offered the same address. The reservation
@@ -1250,7 +1252,7 @@ uint32_t DhcpServer::getCurrentTimeSec() const
     return static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
 }
 
-std::string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const
+string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const
 {
     const uint32_t now = getCurrentTimeSec();
     for (const auto& entry : leases_) {
@@ -1259,7 +1261,7 @@ std::string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const
         if (memcmp(lease.mac, mac, 6) != 0) continue;
         if (!lease.hostname.empty()) return lease.hostname;
     }
-    return std::string();
+    return string();
 }
 
 bool DhcpServer::clientIpByMac(const uint8_t mac[6], uint32_t& ipNet) const
@@ -1319,12 +1321,12 @@ IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6])
     // asked about at all: that is the honest answer, not a failure.
     const uint32_t nameServer = nameServerIp();
     if (haveIp && nameServer != 0) {
-        const std::string raw = PtrProbe::query(ipNet, nameServer);
+        const string raw = PtrProbe::query(ipNet, nameServer);
         if (!raw.empty()) {
             // A PTR value is a claim by a DNS server, and it is usually a FQDN:
             // the field wants the computer's name, so take the host label and
             // filter the text like every other name.
-            std::string name = DhcpClientName::sanitize(raw);
+            string name = DhcpClientName::sanitize(raw);
             while (!name.empty() && name.back() == '.') name.pop_back();
             name = DhcpClientName::shortLabel(name);
             if (!name.empty()) {
@@ -1345,9 +1347,9 @@ IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6])
     // silence is an answer too — a made-up name would be worse than an empty
     // field. The name arrives in the NetBIOS upper case and is left as it is.
     if (haveIp) {
-        const std::string raw = NbstatProbe::query(ipNet);
+        const string raw = NbstatProbe::query(ipNet);
         if (!raw.empty()) {
-            const std::string name = DhcpClientName::sanitize(raw);
+            const string name = DhcpClientName::sanitize(raw);
             if (!name.empty()) {
                 result.name = name;
                 result.source = "netbios";
@@ -1379,7 +1381,7 @@ uint32_t DhcpServer::leaseCount() const
     return static_cast<uint32_t>(leases_.size());
 }
 
-std::string DhcpServer::stateString() const
+string DhcpServer::stateString() const
 {
     switch (state_) {
         case DhcpServerState::RUNNING: return "running";
@@ -1389,9 +1391,9 @@ std::string DhcpServer::stateString() const
     }
 }
 
-std::vector<DhcpLease> DhcpServer::getLeases() const
+vector<DhcpLease> DhcpServer::getLeases() const
 {
-    std::vector<DhcpLease> result;
+    vector<DhcpLease> result;
     for (const auto& [ip, lease] : leases_) {
         result.push_back(lease);
     }
@@ -1410,24 +1412,24 @@ bool DhcpServer::getMacByIp(uint32_t ip, uint8_t mac[6]) const
 // REST event logging
 // ─────────────────────────────────────────────────────
 
-void DhcpServer::setRestLogging(bool enabled, const std::string& url,
-                                bool authEnabled, const std::string& user,
-                                const std::string& password)
+void DhcpServer::setRestLogging(bool enabled, const string& url,
+                                bool authEnabled, const string& user,
+                                const string& password)
 {
     restLogger_.setAuth(authEnabled, user, password);
     restLogger_.setEnabled(enabled);
     restLogger_.setUrl(url);
 }
 
-std::string DhcpServer::macToStr(const uint8_t* mac)
+string DhcpServer::macToStr(const uint8_t* mac)
 {
     char buf[kMacTextBytes];
-    std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    return std::string(buf);
+    return string(buf);
 }
 
-std::string DhcpServer::ipToStr(uint32_t ipNet)
+string DhcpServer::ipToStr(uint32_t ipNet)
 {
     // IPs are stored as uint32_t in network byte order — the 4 bytes in
     // memory are already in the correct dotted order. Reading them by index
@@ -1435,10 +1437,10 @@ std::string DhcpServer::ipToStr(uint32_t ipNet)
     // would reverse the octets (e.g. 101.1.168.192 instead of 192.168.1.101).
     char buf[kIp4TextLen];
     const uint8_t* b = reinterpret_cast<const uint8_t*>(&ipNet);
-    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
                   (unsigned)b[0], (unsigned)b[1],
                   (unsigned)b[2], (unsigned)b[3]);
-    return std::string(buf);
+    return string(buf);
 }
 
 void DhcpServer::logDhcpRest(const char* event, const uint8_t* mac, uint32_t ipNet,

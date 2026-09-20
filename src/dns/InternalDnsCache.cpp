@@ -12,6 +12,12 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
+// Rule 40: a using-directive is allowed where it cannot leak. This file is a
+// translation unit of its own, so `using namespace std;` here shortens `string`,
+// `vector` and `tolower` without touching any other file — a header must never do
+// this, because its using-directive would follow the header into every includer.
+using namespace std;
+
 static const char* TAG = "InternalCache";
 
 namespace dhcp {
@@ -179,10 +185,10 @@ uint32_t InternalDnsCache::nowMs()
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
 }
 
-std::string InternalDnsCache::lower(const std::string& s)
+string InternalDnsCache::lower(const string& s)
 {
-    std::string out = s;
-    for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    string out = s;
+    for (auto& c : out) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
     return out;
 }
 
@@ -290,8 +296,8 @@ void InternalDnsCache::unlock() const
 // store / lookup
 // ─────────────────────────────────────────────────────
 
-void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
-                             const std::vector<std::string>& ips,
+void InternalDnsCache::store(const string& domain, uint16_t qtype,
+                             const vector<string>& ips,
                              uint32_t ttl)
 {
     // A query needed this name (either because the cache missed, or because a
@@ -299,8 +305,8 @@ void InternalDnsCache::store(const std::string& domain, uint16_t qtype,
     storeInternal(domain, qtype, ips, ttl, /*countUse=*/true, 0);
 }
 
-void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
-                                     const std::vector<std::string>& ips,
+void InternalDnsCache::storeInternal(const string& domain, uint16_t qtype,
+                                     const vector<string>& ips,
                                      uint32_t ttl, bool countUse,
                                      uint64_t usesExact)
 {
@@ -309,7 +315,7 @@ void InternalDnsCache::storeInternal(const std::string& domain, uint16_t qtype,
     // Only A (IPv4) and AAAA (IPv6) answers are cached.
     if (qtype != kTypeA && qtype != kTypeAaaa) return;
 
-    const std::string lname = lower(domain);
+    const string lname = lower(domain);
     if (lname.size() >= kMaxNameLen) return;
 
     lock();
@@ -455,13 +461,13 @@ void InternalDnsCache::resetTop()
     topValid_ = false;
 }
 
-bool InternalDnsCache::lookup(const std::string& domain, uint16_t qtype,
-                              std::vector<std::string>& ips, uint32_t& ttl)
+bool InternalDnsCache::lookup(const string& domain, uint16_t qtype,
+                              vector<string>& ips, uint32_t& ttl)
 {
     if (!arena_) return false;
     if (domain.empty()) return false;
 
-    const std::string lname = lower(domain);
+    const string lname = lower(domain);
     if (lname.size() >= kMaxNameLen) return false;
 
     // Stage 127: the wait for the arena mutex is inside the interval the caller
@@ -869,7 +875,7 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
             }
         }
 
-        std::vector<std::string> ips;
+        vector<string> ips;
         bool entryOk = true;
         if (qtype == 1) {
             for (uint8_t j = 0; j < nA; j++) {

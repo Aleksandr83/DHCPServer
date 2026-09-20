@@ -3,6 +3,8 @@
 
 #include <cstring>
 
+using namespace std;
+
 namespace dhcp {
 namespace dhcp {
 
@@ -29,14 +31,14 @@ constexpr uint8_t kWildcardNameByte = '*';  // the name every NetBIOS host answe
 
 /** One name-table entry, read out of the answer. */
 struct NameEntry {
-    std::string name;    // trailing blanks/NULs already removed
+    string name;    // trailing blanks/NULs already removed
     uint8_t suffix;
     uint16_t flags;
 };
 
 /** @brief Read `count` entries at `off`; false when the answer is too short. */
 bool readTable(const uint8_t* buf, size_t len, size_t off, uint8_t count,
-               std::vector<NameEntry>& out)
+               vector<NameEntry>& out)
 {
     if (off + static_cast<size_t>(count) * NbstatProbe::kEntryBytes > len) return false;
     for (uint8_t i = 0; i < count; i++) {
@@ -59,9 +61,9 @@ bool readTable(const uint8_t* buf, size_t len, size_t off, uint8_t count,
 
 } // namespace
 
-std::vector<uint8_t> NbstatProbe::buildQuery(uint16_t id)
+vector<uint8_t> NbstatProbe::buildQuery(uint16_t id)
 {
-    std::vector<uint8_t> q;
+    vector<uint8_t> q;
     q.reserve(kMaxQueryBytes);
 
     q.push_back(static_cast<uint8_t>(id >> 8));
@@ -92,27 +94,27 @@ std::vector<uint8_t> NbstatProbe::buildQuery(uint16_t id)
     return q;
 }
 
-std::string NbstatProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t id)
+string NbstatProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t id)
 {
     uint16_t questions = 0;
     uint16_t answers = 0;
-    if (!DnsMessage::readHeader(buf, len, id, questions, answers)) return std::string();
-    if (answers == 0) return std::string();
+    if (!DnsMessage::readHeader(buf, len, id, questions, answers)) return string();
+    if (answers == 0) return string();
 
     size_t off = DnsMessage::kHeaderBytes;
     for (uint16_t i = 0; i < questions; i++) {
         off = DnsMessage::skipName(buf, len, off);
-        if (off + DnsMessage::kQuestionTailBytes > len) return std::string();
+        if (off + DnsMessage::kQuestionTailBytes > len) return string();
         off += DnsMessage::kQuestionTailBytes;           // QTYPE + QCLASS
     }
 
     for (uint16_t i = 0; i < answers; i++) {
         off = DnsMessage::skipName(buf, len, off);       // owner name
-        if (off + DnsMessage::kRecordFixedBytes > len) return std::string();
+        if (off + DnsMessage::kRecordFixedBytes > len) return string();
         const uint16_t type = static_cast<uint16_t>((buf[off] << 8) | buf[off + 1]);
         const uint16_t rdLength = static_cast<uint16_t>((buf[off + DnsMessage::kRdLengthOffset] << 8) |
                                                         buf[off + DnsMessage::kRdLengthOffset + 1]);
-        if (off + DnsMessage::kRecordFixedBytes + rdLength > len) return std::string();
+        if (off + DnsMessage::kRecordFixedBytes + rdLength > len) return string();
         if (type != kTypeNbstat) {                       // another record: skip it
             off += DnsMessage::kRecordFixedBytes + rdLength;
             continue;
@@ -120,13 +122,13 @@ std::string NbstatProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t 
         // The record data of a node status answer IS the name table: one count
         // byte, then that many entries.
         const size_t table = off + DnsMessage::kRdataOffset;
-        if (rdLength < kTableCountBytes || table + rdLength > len) return std::string();
+        if (rdLength < kTableCountBytes || table + rdLength > len) return string();
         const uint8_t count = buf[table];
-        std::vector<NameEntry> entries;
+        vector<NameEntry> entries;
         if (!readTable(buf, table + rdLength, table + kTableCountBytes, count, entries))
-            return std::string();
+            return string();
 
-        std::string firstUnique;
+        string firstUnique;
         for (const NameEntry& e : entries) {
             if ((e.flags & kFlagGroup) != 0) continue;   // a group is not a computer
             if (e.name.empty()) continue;
@@ -135,7 +137,7 @@ std::string NbstatProbe::parseResponse(const uint8_t* buf, size_t len, uint16_t 
         }
         return firstUnique;
     }
-    return std::string();
+    return string();
 }
 
 #ifndef DHCP_TEST_HOST
@@ -154,17 +156,17 @@ uint16_t NbstatProbe::nextId()
     return (id == kNoId) ? kFirstUsableId : id;
 }
 
-std::string NbstatProbe::query(uint32_t ipNet)
+string NbstatProbe::query(uint32_t ipNet)
 {
-    if (ipNet == kNoAddress || ipNet == kBroadcastAddress) return std::string();
+    if (ipNet == kNoAddress || ipNet == kBroadcastAddress) return string();
 
-    const std::vector<uint8_t> request = buildQuery(nextId());
-    if (request.empty()) return std::string();
+    const vector<uint8_t> request = buildQuery(nextId());
+    if (request.empty()) return string();
     const uint16_t id = static_cast<uint16_t>((request[DnsMessage::kIdOffset] << 8) |
                                               request[DnsMessage::kIdOffset + 1]);
 
     const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) return std::string();
+    if (fd < 0) return string();
 
     struct sockaddr_in to;
     memset(&to, 0, sizeof(to));
@@ -172,7 +174,7 @@ std::string NbstatProbe::query(uint32_t ipNet)
     to.sin_port = htons(kPortNetbiosNameService);
     to.sin_addr.s_addr = ipNet;
 
-    std::string name;
+    string name;
     // A machine that does not speak NetBIOS often answers the datagram with an
     // ICMP port-unreachable, which this socket reports as an error: that is not
     // a failure of the probe, it is the answer "no name here".

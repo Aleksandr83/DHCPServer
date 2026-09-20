@@ -865,9 +865,23 @@ Get security/authentication configuration.
 {
   "username": "admin",
   "max_attempts": 5,
-  "lockout_period": 300
+  "lockout_period": 300,
+  "https_enabled": false,
+  "https_available": false,
+  "https_status": "no_certificate"
 }
 ```
+
+`https_enabled` is what is listening, not what is stored: it is true only while the
+TLS server on port 443 is actually up. A device that comes back with HTTPS in its
+settings and a pair that cannot serve yet (the usual one being `not_yet_valid` —
+SNTP answers after the servers are up, so at boot the certificate is judged against
+the epoch) reports `false` here and starts the listener by itself once the clock
+arrives (stage 165). `https_available` says whether HTTPS could be served right
+now, and `https_status` names the reason when it could not — one of
+`ready`, `no_store` (this build has no volume for certificates), `storage_unavailable`
+(the volume is not mounted), `no_certificate`, `unreadable`, `expired`,
+`not_yet_valid` (stage 158). Only `ready` makes `https_available` true.
 
 ---
 
@@ -881,11 +895,26 @@ Update security/authentication configuration.
   "username": "admin",
   "password": "newpassword",
   "max_attempts": 5,
-  "lockout_period": 300
+  "lockout_period": 300,
+  "https_enabled": true
 }
 ```
 
 > If `password` is empty or omitted, the existing password is kept unchanged.
+
+> `https_enabled` switches the HTTPS server on port 443 immediately (HTTP on port 80
+> keeps working). It is applied **before** the rest of the request: when no usable
+> certificate is stored the request is refused with `400 Bad Request` and
+> `{"status":"error","message":"no usable certificate (expired)"}`, and nothing is
+> changed.
+
+> A request accepted here is also retried by the device on its own: a stored "on" that
+> the boot could not honour because the clock was not set yet starts the TLS listener as
+> soon as SNTP (or a manual clock setting) provides a date (stage 165).
+
+> The name a new certificate is made with (`cert.name` below) is **not** part of this
+> request: it is written by `POST /api/security/certificates` when a pair is actually
+> generated, so a save here can never promise a name no certificate carries.
 
 **Response `200 OK`:**
 ```json
@@ -893,6 +922,193 @@ Update security/authentication configuration.
   "status": "ok"
 }
 ```
+
+---
+
+## GET /api/security/certificates
+
+State of the HTTPS certificate pair: on which volume it lives, whether it can still
+serve, and what a new one would be made of (Settings → Security → Certificates, stage 160).
+Since stage 163 the create dialog asks for the name and the period itself, so the two
+`cert.*` fields below are what pre-fills it rather than fields of the page.
+
+> The **private key is in no answer of this endpoint and has no download route at all** —
+> the only reader of `server.key` is the TLS server itself.
+
+**Response `200 OK`** (a valid pair on the internal volume):
+```json
+{
+  "storage": "internal",
+  "state": "ready",
+  "available": true,
+  "https_enabled": false,
+  "https_available": true,
+  "volumes": [
+    { "id": "internal", "mount": "/fat",    "current": true,  "present": true  },
+    { "id": "sdcard",   "mount": "/sdcard", "current": false, "present": false }
+  ],
+  "cert": {
+    "present": true,
+    "valid": true,
+    "expired": false,
+    "not_yet_valid": false,
+    "expiring_soon": false,
+    "days_left": 1795,
+    "not_before": 1789898820,
+    "not_after": 1947665220,
+    "subject": "CN=dhcpserver.local",
+    "sans": "DNS:dhcpserver.local, IP:192.168.1.55",
+    "cert_bytes": 640,
+    "key_bytes": 241,
+    "path": "/fat/certs/server.crt",
+    "validity_years": 5,
+    "validity_options": [1, 2, 3, 5, 10],
+    "warning_days": 30,
+    "name": "dhcpserver.local",
+    "default_name": "dhcpserver.local",
+    "ip": "192.168.1.55",
+    "error": ""
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `storage` | Volume the pair is on now: `internal` (`/fat`) or `sdcard` (`/sdcard`); `none` when this build has no volume for certificates |
+| `state` | `ready`, `no_store` (no volume in this build), `storage_unavailable` (the volume is not mounted), `no_certificate`, `unreadable`, `expired`, `not_yet_valid`, `unknown` |
+| `available` | The volume of the pair is mounted and usable. **Not** "a pair exists" — `available: true` with `state: "no_certificate"` is a working volume with nothing stored on it |
+| `https_enabled` | What is listening: true only while the TLS server is up (stage 165). `https_available` is whether HTTPS could be served right now; both are the same values `GET /api/security/settings` reports |
+| `volumes[]` | Both volumes, so the picker can show where a pair is already waiting: `current` marks the chosen one, `present` says whether the pair was found there |
+| `cert.present/valid/expired/not_yet_valid/expiring_soon` | What the pair on the chosen volume is |
+| `cert.days_left` | Days until `not_after`, counted **only** for a pair that parsed (`0` otherwise, because "0 days left" next to a file that could not be read would be read as "expired") |
+| `cert.not_before` / `not_after` | Unix seconds (UTC) |
+| `cert.subject` / `sans` | Text of the subject and of the alternative names of the stored certificate |
+| `cert.cert_bytes` / `key_bytes` | Sizes of `server.crt` and `server.key`; `0` when the file is not there |
+| `cert.path` | Path of the certificate file on the chosen volume |
+| `cert.validity_years` | The period used when the request does not name one (`5`) |
+| `cert.validity_options` | The periods the store accepts, in years: `[1, 2, 3, 5, 10]`. The page builds its picker from this table, so what it offers and what the device accepts cannot drift apart |
+| `cert.warning_days` | The interface warns while fewer days than this are left (`30`) |
+| `cert.name` | The name a new certificate would carry — the stored setting (NVS `sec_cert_name`), which pre-fills the name field of the create dialog |
+| `cert.default_name` | The name an **empty** field means: the default of the security module (`dhcpserver.local`), not the stored setting. The page reads it from here, so it does not carry a copy of the constant (stage 163) |
+| `cert.ip` | The address that would go into the SAN: the device's own DHCP address, not a field of the request |
+| `cert.error` | Why the pair could not be read or parsed, when that is the case |
+
+**Response when the build has no volume for certificates** (classic ESP32 — neither the
+internal FAT nor a card slot):
+
+```json
+{
+  "storage": "none",
+  "state": "no_store",
+  "available": false,
+  "https_enabled": false,
+  "volumes": [],
+  "cert": {}
+}
+```
+
+---
+
+## POST /api/security/certificates
+
+Actions on the pair. The body always carries `action`:
+
+| `action` | Fields | What it does |
+|----------|--------|--------------|
+| `generate` | `name` (optional), `years` (optional) | Writes a new ECDSA P-256, self-signed pair on the current volume, replacing the old one |
+| `delete` | — | Removes `server.crt` and `server.key` |
+| `storage` | `storage` (`internal`/`sdcard`), `copy` (optional, default `false`) | Chooses the volume; with `copy: true` the pair is copied there when the source has one and the target has none |
+
+**Request body:**
+```json
+{
+  "action": "generate",
+  "name": "dhcpserver.local",
+  "years": 5
+}
+```
+
+> `name` is the name the browser will be asked to accept. An empty or omitted `name`
+> means "keep the stored one" (so a page that could not read the setting cannot erase
+> it). The rules are the X.509 host-name rules the device checks: letters, digits,
+> dots and hyphens, at most 253 characters, no leading or trailing dot or hyphen, no
+> empty label; anything else is refused with the value named in the message. The stored
+> name is updated **only after the pair was actually written** — a refused generation
+> must not leave a setting describing a certificate that does not exist.
+
+> `years` is one of `validity_options` (`1`, `2`, `3`, `5`, `10`); omitted means `5`.
+> A value outside the list is refused with the list spelled out, so a stale page or a
+> hand-written request cannot create a period the interface never offers. The period is
+> not stored: it belongs to one generation, and the next page load offers the default
+> again.
+
+> Generation also fails while the device clock is not set (`the device clock is not set
+> yet: the certificate would be dated 1970`) — a certificate dated 1970 is rejected by
+> every browser, and a refusal with a reason is worth more than a useless file.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "https_restart": true
+}
+```
+
+`https_restart` is `true` when the HTTPS switch was **already on** before this request and
+the action was accepted: the listener is re-applied 400 ms later, and that holds even when
+the action changed nothing (a `storage` request naming the volume the pair is already on is
+still re-applied). With the switch off the answer is `false` and nothing is started — a pair
+sitting on the device is not a reason to open a listener the operator turned off.
+
+It happens **after** this answer has left: the listener about to be stopped may be the one
+serving this very request, so the switch waits 400 ms and the page reads the state again
+(`GET` above) instead of being told what should have happened. Which state that is follows
+from the pair that is left: an accepted action that leaves nothing usable (a deletion, or a
+`storage` move to a volume with no pair) switches HTTPS **off**, and a usable pair switches
+it back **on**. A refused action answers `400` and leaves the listener alone, so a
+generation that failed cannot close a working HTTPS.
+
+**Error `400 Bad Request`:**
+```json
+{
+  "status": "error",
+  "message": "\"my device\" is not a usable certificate name"
+}
+```
+
+The message is the store's own text — `this build has no volume for certificates`, `the
+volume /sdcard is not available`, `unknown storage volume`, `unknown action`, `no action
+given`, or the reason of the refused action (a name that cannot be a host name, a period
+outside the list, a clock that is not set).
+
+Three more reasons belong to this route rather than to the store, because `generate` runs
+in a **task of its own** (stage 164): writing a pair goes through mbedTLS X.509 and the PSA
+key store, and that chain does not fit the stack of the httpd task. The handler asks the
+task to do the work and waits up to **10 seconds** for it (`kCertGenWaitMs`); the answers it
+can produce are `cannot start the certificate generator` (the task could not be created —
+no memory for its stack), `a certificate generation is already running` (a second request
+arrived while the first was still in flight, so the two cannot collide on one file pair) and
+`the certificate generation did not finish` (the wait ran out; the work is not abandoned, it
+finishes on its own and the page may simply be reloaded to see the pair). The wait does not
+hold the web server: a pair takes tens of milliseconds, and the request is answered by the
+handler, not by the task.
+
+---
+
+## GET /api/security/certificates/download
+
+Downloads the certificate file of the chosen volume — the public half of the pair only.
+
+**Response `200 OK`:** the file itself, `Content-Type: application/x-pem-file`,
+`Content-Disposition: attachment; filename="server.crt"`.
+
+> There is no route for the private key, and this one reads `server.crt` and never opens
+> `server.key`: the key leaves the device only through the TLS handshake.
+
+**Error `400 Bad Request`:** the same `{"status":"error","message":…}` shape as above —
+`this build has no volume for certificates`, `the volume /sdcard is not available`, or
+the `FILE` error of the read itself (`cannot read /fat/certs/server.crt: No such file or
+directory` when nothing is stored yet).
 
 ---
 

@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <string>
 
+using namespace std;
+
 using dhcp::dns::RestartSaveJobState;
 using StartResult = RestartSaveJobState::StartResult;
 using Verdict = RestartSaveJobState::Verdict;
@@ -26,12 +28,12 @@ using Verdict = RestartSaveJobState::Verdict;
 static int g_checks = 0;
 static int g_failed = 0;
 
-static void check(bool ok, const std::string& what)
+static void check(bool ok, const string& what)
 {
     ++g_checks;
     if (!ok) {
         ++g_failed;
-        std::printf("  FAIL  %s\n", what.c_str());
+        printf("  FAIL  %s\n", what.c_str());
     }
 }
 
@@ -58,14 +60,14 @@ static const char* name(Verdict v)
 }
 
 static void expect_start(RestartSaveJobState& s, bool enabled, StartResult want,
-                         const std::string& what)
+                         const string& what)
 {
     const StartResult got = s.request(enabled);
     check(got == want, what + ": got " + name(got) + ", want " + name(want));
 }
 
 static void expect_verdict(const RestartSaveJobState& s, Verdict want,
-                           const std::string& what)
+                           const string& what)
 {
     check(s.verdict() == want,
           what + ": got " + name(s.verdict()) + ", want " + name(want));
@@ -74,7 +76,7 @@ static void expect_verdict(const RestartSaveJobState& s, Verdict want,
 /** A fresh state has no verdict and no running job. */
 static void test_initial()
 {
-    std::printf("initial state\n");
+    printf("initial state\n");
     RestartSaveJobState s;
     check(!s.busy(), "a fresh job state is not busy");
     expect_verdict(s, Verdict::None, "and has no verdict to report");
@@ -83,7 +85,7 @@ static void test_initial()
 /** A request with the switch off starts nothing and says so. */
 static void test_skipped()
 {
-    std::printf("switch off\n");
+    printf("switch off\n");
     RestartSaveJobState s;
     expect_start(s, false, StartResult::Skipped, "a disabled request is skipped");
     check(!s.busy(), "and leaves nothing running");
@@ -93,7 +95,7 @@ static void test_skipped()
 /** Started → busy; a second request must not start a second writer. */
 static void test_single_flight()
 {
-    std::printf("single flight\n");
+    printf("single flight\n");
     RestartSaveJobState s;
     expect_start(s, true, StartResult::Started, "the first request starts the job");
     check(s.busy(), "and the job is busy");
@@ -109,7 +111,7 @@ static void test_single_flight()
 /** finish() ends the job and stores its verdict. */
 static void test_finish()
 {
-    std::printf("finish\n");
+    printf("finish\n");
     RestartSaveJobState s;
     s.request(true);
     s.finish(Verdict::Ok);
@@ -125,7 +127,7 @@ static void test_finish()
 /** No inherited luck: Ok from the previous run is gone the moment a new starts. */
 static void test_no_inherited_verdict()
 {
-    std::printf("no inherited verdict\n");
+    printf("no inherited verdict\n");
     RestartSaveJobState s;
     s.request(true);
     s.finish(Verdict::Ok);
@@ -142,7 +144,7 @@ static void test_no_inherited_verdict()
 /** Turning the switch off while a job runs must not fake its outcome. */
 static void test_skip_during_run()
 {
-    std::printf("switch off while running\n");
+    printf("switch off while running\n");
     RestartSaveJobState s;
     s.request(true);
     expect_start(s, false, StartResult::Skipped, "a request with the switch off is skipped");
@@ -157,7 +159,7 @@ static void test_skip_during_run()
 /** A start the owner accepted and then could not perform is a failure. */
 static void test_abort_start()
 {
-    std::printf("aborted start\n");
+    printf("aborted start\n");
     RestartSaveJobState s;
     s.request(true);
     s.abortStart();
@@ -172,7 +174,7 @@ static void test_abort_start()
 /** What a page sees when it polls across two consecutive runs. */
 static void test_poll_sequence()
 {
-    std::printf("what the page reads while polling\n");
+    printf("what the page reads while polling\n");
     RestartSaveJobState s;
 
     s.request(true);
@@ -198,11 +200,11 @@ int main()
     test_abort_start();
     test_poll_sequence();
 
-    std::printf("\n%d checks\n", g_checks);
+    printf("\n%d checks\n", g_checks);
     if (g_failed == 0) {
-        std::printf("PASSED!\n");
+        printf("PASSED!\n");
         return 0;
     }
-    std::printf("FAILED (%d)\n", g_failed);
+    printf("FAILED (%d)\n", g_failed);
     return 1;
 }

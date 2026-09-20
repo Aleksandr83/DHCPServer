@@ -38,6 +38,9 @@
 #include "storage/SdFileSystem.h"
 #include "time/TimeServer.h"
 #include "web/WebServer.h"
+#include "security/CertStore.h"
+
+using namespace std;
 
 static const char* TAG = "DHCPServer";
 
@@ -73,6 +76,7 @@ static dhcp::menu::TerminalMenu s_terminalMenu(s_netAdapter, s_ledController,
 // Forward declarations
 static void onNetworkConnected();
 static void onNetworkDisconnected();
+static void onClockSet();
 static void updateLedByNetworkStatus();
 
 extern "C" void app_main(void)
@@ -115,8 +119,8 @@ extern "C" void app_main(void)
     // is mounted lazily: FileManager retries in the background, so inserting it
     // later works without a reboot.
     s_fileManager.addVolume(
-        std::make_unique<dhcp::storage::FatFileSystem>("fat", "fat", "/fat"));
-    s_fileManager.addVolume(std::make_unique<dhcp::storage::SdFileSystem>());
+        make_unique<dhcp::storage::FatFileSystem>("fat", "fat", "/fat"));
+    s_fileManager.addVolume(make_unique<dhcp::storage::SdFileSystem>());
     s_fileManager.mountAll();
 
     // ─── Error log ──────────────────────────────────
@@ -127,6 +131,29 @@ extern "C" void app_main(void)
     dhcp::core::ErrorLog::instance().start("/fat");
     // LAN-only access policy (device address + netmask from the DHCP settings).
     s_fileManager.applyAccessFilter();
+
+    // ─── Certificate store for HTTPS ────────────────
+    // The pair lives on one of the two data volumes, and the setting says which.
+    // The store is built here because this is the only place that knows those
+    // volumes exist; the web server receives a pointer to it and starts the TLS
+    // listener with what it finds there (stage 158). The classic ESP32 build
+    // never reaches this block, passes nothing, and its interface reports HTTPS
+    // as unavailable instead of hiding the reason.
+    {
+        auto* internalVolume = s_fileManager.find("fat");
+        auto* cardVolume = s_fileManager.find("sd");
+        if (internalVolume != nullptr && cardVolume != nullptr) {
+            static dhcp::security::CertStore certStore(*internalVolume, *cardVolume);
+            certStore.setStorage(dhcp::core::Config::instance().getSecurity().certStorage);
+            s_webServer.setCertificateStore(&certStore);
+            // The REST layer gets the same store: the certificates page reads and
+            // changes the pair through it, and a second store would be a second
+            // answer to "which volume holds the certificate" (stage 160).
+            dhcp::web::RestApi::setCertificateStore(&certStore);
+        } else {
+            ESP_LOGW(TAG, "certificate store not wired: a data volume is missing");
+        }
+    }
 #endif
 
     // ─── Configure server IP from config ────────────
@@ -140,6 +167,12 @@ extern "C" void app_main(void)
     // DHCP/DNS/Web servers would never start.
     s_ethManager.setOnConnected(onNetworkConnected);
     s_ethManager.setOnDisconnected(onNetworkDisconnected);
+
+    // The clock is a service of its own: SNTP answers after the network is up
+    // (and so after the web server is started), and a certificate cannot be
+    // judged before there is a date to judge it against. The web server is told
+    // when the clock arrives and retries the TLS listener then (stage 165).
+    s_timeServer.setOnClockSet(onClockSet);
 
     // ─── Initialize Ethernet ────────────────────────
     s_ethManager.init();
@@ -173,7 +206,7 @@ extern "C" void app_main(void)
                 buf[--len] = '\0';
             }
             if (len > 0) {
-                s_terminalMenu.processLine(std::string(buf));
+                s_terminalMenu.processLine(string(buf));
                 s_terminalMenu.print("dhcp> ");
             }
         }
@@ -200,7 +233,7 @@ static void onNetworkConnected()
     s_terminalMenu.println("");
     s_terminalMenu.println("*** Network connected ***");
     char buf[128];
-    std::snprintf(buf, sizeof(buf), "    IPv4: %s\r\n    IPv6: %s",
+    snprintf(buf, sizeof(buf), "    IPv4: %s\r\n    IPv6: %s",
                   s_netAdapter.ip4().c_str(), s_netAdapter.ip6().c_str());
     s_terminalMenu.println(buf);
 
@@ -324,4 +357,12 @@ static void updateLedByNetworkStatus()
     } else {
         s_ledController.turnOff();
     }
+}
+
+static void onClockSet()
+{
+    // The notification itself comes from the network task, so the web server is
+    // asked to deal with it there — it decides and returns, and the retry runs on
+    // its own task (see WebServer::onClockSet).
+    s_webServer.onClockSet();
 }

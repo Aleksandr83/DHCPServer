@@ -15,21 +15,23 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
+
+using namespace std;
 
 extern "C" {
 
 static int test_dns_cache_stub()
 {
     dhcp::dns::DnsCache cache;
-    std::vector<std::string> result;
+    vector<string> result;
 
     // Stub always returns false
     bool found = cache.lookup("example.com", 1, result);
     TEST_ASSERT_FALSE(found);
 
     // Store always returns true
-    std::vector<std::string> ips = {"192.168.1.1"};
+    vector<string> ips = {"192.168.1.1"};
     bool stored = cache.store("example.com", 1, ips);
     TEST_ASSERT_TRUE(stored);
 

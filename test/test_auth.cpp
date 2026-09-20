@@ -11,6 +11,8 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d\n", __FILE__, __LINE__); return 1; } } while(0)
 
+using namespace std;
+
 extern "C" {
 
 static int test_auth_valid_credentials()
@@ -19,7 +21,7 @@ static int test_auth_valid_credentials()
 
     // Default credentials: admin:admin
     // Base64 of "admin:admin" is "YWRtaW46YWRtaW4="
-    std::string authHeader = "Basic YWRtaW46YWRtaW4=";
+    string authHeader = "Basic YWRtaW46YWRtaW4=";
 
     bool result = auth.authenticate(authHeader, "192.168.1.10");
     TEST_ASSERT_TRUE(result);
@@ -33,7 +35,7 @@ static int test_auth_invalid_credentials()
     dhcp::web::AuthManager auth;
 
     // Wrong password
-    std::string authHeader = "Basic YWRtaW46d3Jvbmc="; // admin:wrong
+    string authHeader = "Basic YWRtaW46d3Jvbmc="; // admin:wrong
 
     bool result = auth.authenticate(authHeader, "192.168.1.10");
     TEST_ASSERT_FALSE(result);
@@ -57,8 +59,8 @@ static int test_auth_lockout()
 {
     dhcp::web::AuthManager auth;
 
-    std::string authHeader = "Basic YWRtaW46d3Jvbmc="; // admin:wrong
-    std::string clientIp = "10.0.0.1";
+    string authHeader = "Basic YWRtaW46d3Jvbmc="; // admin:wrong
+    string clientIp = "10.0.0.1";
 
     // Fail 5 times
     for (int i = 0; i < 5; i++) {
@@ -70,7 +72,7 @@ static int test_auth_lockout()
     TEST_ASSERT_TRUE(locked);
 
     // Correct password should also be rejected
-    std::string goodAuth = "Basic YWRtaW46YWRtaW4=";
+    string goodAuth = "Basic YWRtaW46YWRtaW4=";
     bool result = auth.authenticate(goodAuth, clientIp);
     TEST_ASSERT_FALSE(result);
 

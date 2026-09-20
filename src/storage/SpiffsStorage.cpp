@@ -6,12 +6,14 @@
 #include "esp_log.h"
 #include "esp_err.h"
 
+using namespace std;
+
 static const char* TAG = "SpiffsStorage";
 
 namespace dhcp {
 namespace storage {
 
-SpiffsStorage::SpiffsStorage(const std::string& basePath, size_t maxFiles)
+SpiffsStorage::SpiffsStorage(const string& basePath, size_t maxFiles)
     : basePath_(basePath)
     , maxFiles_(maxFiles)
 {
@@ -71,7 +73,7 @@ bool SpiffsStorage::isMounted() const
     return mounted_;
 }
 
-std::string SpiffsStorage::fullPath(const std::string& path) const
+string SpiffsStorage::fullPath(const string& path) const
 {
     // If path already starts with basePath, use as-is
     if (path.rfind(basePath_, 0) == 0) {
@@ -80,12 +82,12 @@ std::string SpiffsStorage::fullPath(const std::string& path) const
     return basePath_ + path;
 }
 
-std::vector<uint8_t> SpiffsStorage::readFile(const std::string& path)
+vector<uint8_t> SpiffsStorage::readFile(const string& path)
 {
-    std::vector<uint8_t> result;
+    vector<uint8_t> result;
     if (!mounted_) return result;
 
-    std::string fpath = fullPath(path);
+    string fpath = fullPath(path);
     FILE* f = fopen(fpath.c_str(), "rb");
     if (!f) return result;
 
@@ -101,17 +103,17 @@ std::vector<uint8_t> SpiffsStorage::readFile(const std::string& path)
     return result;
 }
 
-std::string SpiffsStorage::readTextFile(const std::string& path)
+string SpiffsStorage::readTextFile(const string& path)
 {
     auto data = readFile(path);
-    return std::string(data.begin(), data.end());
+    return string(data.begin(), data.end());
 }
 
-bool SpiffsStorage::writeFile(const std::string& path, const std::vector<uint8_t>& data)
+bool SpiffsStorage::writeFile(const string& path, const vector<uint8_t>& data)
 {
     if (!mounted_) return false;
 
-    std::string fpath = fullPath(path);
+    string fpath = fullPath(path);
     FILE* f = fopen(fpath.c_str(), "wb");
     if (!f) return false;
 
@@ -122,16 +124,16 @@ bool SpiffsStorage::writeFile(const std::string& path, const std::vector<uint8_t
     return true;
 }
 
-bool SpiffsStorage::writeTextFile(const std::string& path, const std::string& text)
+bool SpiffsStorage::writeTextFile(const string& path, const string& text)
 {
-    std::vector<uint8_t> data(text.begin(), text.end());
+    vector<uint8_t> data(text.begin(), text.end());
     return writeFile(path, data);
 }
 
-bool SpiffsStorage::exists(const std::string& path)
+bool SpiffsStorage::exists(const string& path)
 {
     if (!mounted_) return false;
-    std::string fpath = fullPath(path);
+    string fpath = fullPath(path);
     FILE* f = fopen(fpath.c_str(), "rb");
     if (f) {
         fclose(f);
@@ -140,10 +142,10 @@ bool SpiffsStorage::exists(const std::string& path)
     return false;
 }
 
-bool SpiffsStorage::remove(const std::string& path)
+bool SpiffsStorage::remove(const string& path)
 {
     if (!mounted_) return false;
-    std::string fpath = fullPath(path);
+    string fpath = fullPath(path);
     return (::remove(fpath.c_str()) == 0);
 }
 

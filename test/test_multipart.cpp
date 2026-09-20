@@ -23,7 +23,9 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
+
+using namespace std;
 
 using dhcp::web::MultipartExtractor;
 
@@ -32,9 +34,9 @@ namespace {
 const char* kB = "----WebKitFormBoundaryAbC123";
 
 /** @brief A realistic browser body with a binary payload. */
-std::string makeBody(const std::string& payload)
+string makeBody(const string& payload)
 {
-    std::string body;
+    string body;
     body += "--";
     body += kB;
     body += "\r\nContent-Disposition: form-data; name=\"firmware\"; filename=\"DHCPServer.bin\"\r\n";
@@ -47,16 +49,16 @@ std::string makeBody(const std::string& payload)
 }
 
 /** @brief Feed @p body in chunks of @p chunkSize and collect the payload. */
-std::string extract(const std::string& body, size_t chunkSize, bool& finished, bool& failed)
+string extract(const string& body, size_t chunkSize, bool& finished, bool& failed)
 {
-    std::string out;
+    string out;
     MultipartExtractor ex(kB, [&out](const uint8_t* d, size_t n) {
         out.append(reinterpret_cast<const char*>(d), n);
         return true;
     });
 
     for (size_t i = 0; i < body.size(); i += chunkSize) {
-        const size_t n = std::min(chunkSize, body.size() - i);
+        const size_t n = min(chunkSize, body.size() - i);
         if (!ex.feed(reinterpret_cast<const uint8_t*>(body.data() + i), n)) break;
     }
     finished = ex.finish();
@@ -65,9 +67,9 @@ std::string extract(const std::string& body, size_t chunkSize, bool& finished, b
 }
 
 /** @brief Payload of 1 KB with the OTA image magic, NULs and the delimiter. */
-std::string binaryPayload()
+string binaryPayload()
 {
-    std::string p;
+    string p;
     p += '\xE9';                       // image magic — must survive verbatim
     p += "\x01\x02\x00\xFF";           // NUL and high bytes
     for (int i = 0; i < 1000; ++i) p += static_cast<char>(i & 0xFF);
@@ -82,9 +84,9 @@ extern "C" {
 /** One-shot feed: the payload comes out exactly, envelope and epilogue dropped. */
 static int test_single_feed()
 {
-    const std::string payload = "hello OTA image";
+    const string payload = "hello OTA image";
     bool finished = false, failed = false;
-    const std::string got = extract(makeBody(payload), 4096, finished, failed);
+    const string got = extract(makeBody(payload), 4096, finished, failed);
 
     TEST_ASSERT_FALSE(failed);
     TEST_ASSERT_TRUE(finished);
@@ -95,14 +97,14 @@ static int test_single_feed()
 /** The extractor must not care how the body is chunked (worst case: 1 byte). */
 static int test_every_chunk_size()
 {
-    const std::string payload = binaryPayload();
-    const std::string body = makeBody(payload);
+    const string payload = binaryPayload();
+    const string body = makeBody(payload);
 
     for (size_t chunk : {size_t(1), size_t(2), size_t(3), size_t(7), size_t(16),
                          size_t(63), size_t(64), size_t(65), size_t(1024),
                          size_t(4096)}) {
         bool finished = false, failed = false;
-        const std::string got = extract(body, chunk, finished, failed);
+        const string got = extract(body, chunk, finished, failed);
         if (failed || !finished || got != payload) {
             printf("FAIL: chunk size %u (failed=%d finished=%d got=%u bytes)\n",
                    (unsigned)chunk, (int)failed, (int)finished, (unsigned)got.size());
@@ -115,9 +117,9 @@ static int test_every_chunk_size()
 /** A payload that contains the delimiter prefix must not be truncated. */
 static int test_payload_with_delimiter_prefix()
 {
-    const std::string payload = "A\r\n--" + std::string(kB).substr(0, 10) + "B";
+    const string payload = "A\r\n--" + string(kB).substr(0, 10) + "B";
     bool finished = false, failed = false;
-    const std::string got = extract(makeBody(payload), 4, finished, failed);
+    const string got = extract(makeBody(payload), 4, finished, failed);
 
     TEST_ASSERT_FALSE(failed);
     TEST_ASSERT_TRUE(finished);
@@ -129,7 +131,7 @@ static int test_payload_with_delimiter_prefix()
 static int test_empty_payload()
 {
     bool finished = false, failed = false;
-    const std::string got = extract(makeBody(""), 4096, finished, failed);
+    const string got = extract(makeBody(""), 4096, finished, failed);
 
     TEST_ASSERT_FALSE(failed);
     TEST_ASSERT_TRUE(finished);
@@ -140,7 +142,7 @@ static int test_empty_payload()
 /** A truncated body (no closing delimiter) must be reported as incomplete. */
 static int test_missing_closing_delimiter()
 {
-    std::string body = makeBody("payload that never ends");
+    string body = makeBody("payload that never ends");
     body.resize(body.size() - 30);   // cut through payload + delimiter
 
     bool finished = false, failed = false;
@@ -162,7 +164,7 @@ static int test_empty_boundary()
 /** Headers longer than the cap (no CRLFCRLF) must fail, not eat memory. */
 static int test_header_flood()
 {
-    std::string body = "--";
+    string body = "--";
     body += kB;
     body += "\r\nX-Pad: ";
     body.append(MultipartExtractor::kMaxHeaderBytes + 64, 'x');
@@ -177,7 +179,7 @@ static int test_header_flood()
 /** A sink failure aborts the transfer (used for OTA write errors). */
 static int test_sink_failure()
 {
-    const std::string body = makeBody("0123456789");
+    const string body = makeBody("0123456789");
     MultipartExtractor ex(kB, [](const uint8_t*, size_t) { return false; });
 
     const bool ok = ex.feed(reinterpret_cast<const uint8_t*>(body.data()), body.size());
@@ -189,13 +191,13 @@ static int test_sink_failure()
 /** A real OTA-like image (magic + 1.2 MB of data) is extracted byte-exact. */
 static int test_image_like_payload()
 {
-    std::string payload;
+    string payload;
     payload += '\xE9';
     payload.append(1200 * 1024, '\x5A');   // ~1.2 MB, like DHCPServer.bin
-    const std::string body = makeBody(payload);
+    const string body = makeBody(payload);
 
     bool finished = false, failed = false;
-    const std::string got = extract(body, 1024, finished, failed);
+    const string got = extract(body, 1024, finished, failed);
 
     TEST_ASSERT_FALSE(failed);
     TEST_ASSERT_TRUE(finished);

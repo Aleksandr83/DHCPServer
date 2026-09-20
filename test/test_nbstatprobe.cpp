@@ -15,6 +15,8 @@
  *       host_main.cpp -o test_nbstatprobe
  */
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -28,7 +30,7 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, #b, (long long)(a), (long long)(b)); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
 
 using dhcp::dhcp::NbstatProbe;
 
@@ -36,7 +38,7 @@ namespace {
 
 /** One name-table entry: 15 blank-padded bytes, a suffix, two flag bytes. */
 struct Entry {
-    std::string name;
+    string name;
     uint8_t suffix = 0x00;
     uint16_t flags = 0x0000;
 };
@@ -74,7 +76,7 @@ public:
     }
 
     /** The answer record: owner pointer, type, class, TTL, RDLENGTH, table. */
-    Answer& record(const std::vector<Entry>& entries, uint16_t rdLengthOverride = 0xFFFF)
+    Answer& record(const vector<Entry>& entries, uint16_t rdLengthOverride = 0xFFFF)
     {
         add(0xC0); add(0x0C);                   // owner = the question name
         add(0x00); add(0x21);                   // TYPE = NBSTAT
@@ -99,7 +101,7 @@ public:
     size_t size() const { return buf_.size(); }
 
 private:
-    std::vector<uint8_t> buf_;
+    vector<uint8_t> buf_;
 };
 
 } // namespace

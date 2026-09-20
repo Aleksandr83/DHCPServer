@@ -4,6 +4,8 @@
 
 #include "esp_heap_caps.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace core {
 
@@ -64,7 +66,7 @@ bool FreeRtosErrorQueue::push(const ErrorLogEntry& entry)
     item.level = levelToByte(entry.level);
     // The text is already clamped by ErrorLogCore; this is the belt to that
     // braces, because a silent overflow here would corrupt the log itself.
-    std::strncpy(item.text, entry.text.c_str(), sizeof(item.text) - 1);
+    strncpy(item.text, entry.text.c_str(), sizeof(item.text) - 1);
     item.text[sizeof(item.text) - 1] = '\0';
 
     // Zero timeout: the producer never waits for the log.

@@ -9,6 +9,8 @@
 #include "esp_timer.h"
 #include "mbedtls/base64.h"
 
+using namespace std;
+
 static const char* TAG = "AuthManager";
 
 namespace dhcp {
@@ -45,8 +47,8 @@ void AuthManager::reloadConfig()
              static_cast<unsigned long>(lockoutPeriodSec_));
 }
 
-bool AuthManager::authenticate(const std::string& authHeader,
-                                const std::string& clientIp)
+bool AuthManager::authenticate(const string& authHeader,
+                                const string& clientIp)
 {
     cleanupExpired();
 
@@ -63,13 +65,13 @@ bool AuthManager::authenticate(const std::string& authHeader,
     }
 
     // Parse "Basic <base64>"
-    const std::string prefix = "Basic ";
+    const string prefix = "Basic ";
     if (authHeader.compare(0, prefix.length(), prefix) != 0) {
         recordFailure(clientIp);
         return false;
     }
 
-    std::string base64Credentials = authHeader.substr(prefix.length());
+    string base64Credentials = authHeader.substr(prefix.length());
 
     // Decode base64 (simple implementation for ESP-IDF)
     // We use the mbedTLS base64 decoder
@@ -84,17 +86,17 @@ bool AuthManager::authenticate(const std::string& authHeader,
         return false;
     }
 
-    std::string credentials(reinterpret_cast<char*>(decoded), decodedLen);
+    string credentials(reinterpret_cast<char*>(decoded), decodedLen);
 
     // Format: "username:password"
     auto colonPos = credentials.find(':');
-    if (colonPos == std::string::npos) {
+    if (colonPos == string::npos) {
         recordFailure(clientIp);
         return false;
     }
 
-    std::string user = credentials.substr(0, colonPos);
-    std::string pass = credentials.substr(colonPos + 1);
+    string user = credentials.substr(0, colonPos);
+    string pass = credentials.substr(colonPos + 1);
 
     if (user == username_ && pass == password_) {
         // Success — clear failed attempts for this IP
@@ -106,7 +108,7 @@ bool AuthManager::authenticate(const std::string& authHeader,
     return false;
 }
 
-bool AuthManager::isLockedOut(const std::string& clientIp) const
+bool AuthManager::isLockedOut(const string& clientIp) const
 {
     auto it = failedAttempts_.find(clientIp);
     if (it == failedAttempts_.end()) return false;
@@ -121,12 +123,12 @@ bool AuthManager::isLockedOut(const std::string& clientIp) const
     return it->second.count >= maxAttempts_;
 }
 
-std::string AuthManager::wwwAuthenticateHeader() const
+string AuthManager::wwwAuthenticateHeader() const
 {
     return "Basic realm=\"DHCPServer\"";
 }
 
-void AuthManager::recordFailure(const std::string& clientIp)
+void AuthManager::recordFailure(const string& clientIp)
 {
     uint32_t now = getCurrentTimeSec();
     auto& entry = failedAttempts_[clientIp];

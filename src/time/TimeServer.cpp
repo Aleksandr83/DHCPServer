@@ -16,6 +16,8 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
+using namespace std;
+
 namespace {
 
 // Rule 39: the field bases of struct tm — the year counts from 1900, the month
@@ -217,6 +219,14 @@ void TimeServer::onSyncNotification(struct timeval* tv)
     } else {
         ESP_LOGI(TAG, "SNTP synchronised");
     }
+    s_instance->notifyClockSet();
+}
+
+void TimeServer::notifyClockSet()
+{
+    // Nothing starts here: the listener decides what a clock is worth to it, and
+    // this may run in the network task (see ClockSetCallback).
+    if (onClockSet_) onClockSet_();
 }
 
 // ─────────────────────────────────────────────────────
@@ -235,7 +245,7 @@ uint32_t TimeServer::uptimeSec() const
     return static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
 }
 
-std::string TimeServer::nowUtcString() const
+string TimeServer::nowUtcString() const
 {
     struct timeval tv;
     if (gettimeofday(&tv, nullptr) != 0) return "";
@@ -243,13 +253,13 @@ std::string TimeServer::nowUtcString() const
     struct tm tmv;
     gmtime_r(&secs, &tmv);
     char buf[80];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
                   tmv.tm_year + kTmYearBase, tmv.tm_mon + kTmMonthBase, tmv.tm_mday,
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    return std::string(buf);
+    return string(buf);
 }
 
-std::string TimeServer::nowLocalString() const
+string TimeServer::nowLocalString() const
 {
     struct timeval tv;
     if (gettimeofday(&tv, nullptr) != 0) return "";
@@ -257,13 +267,13 @@ std::string TimeServer::nowLocalString() const
     struct tm tmv;
     gmtime_r(&secs, &tmv);
     char buf[80];
-    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
                   tmv.tm_year + kTmYearBase, tmv.tm_mon + kTmMonthBase, tmv.tm_mday,
                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    return std::string(buf);
+    return string(buf);
 }
 
-std::string TimeServer::stateString() const
+string TimeServer::stateString() const
 {
     switch (state_) {
     case TimeServerState::RUNNING: return "running";
@@ -296,6 +306,7 @@ bool TimeServer::setUtcTime(uint32_t unixUtc)
     // deliberately left running — a later sync may correct this value).
     synced_ = true;
     ESP_LOGI(TAG, "System clock set manually to %s UTC", nowUtcString().c_str());
+    notifyClockSet();
     return true;
 }
 

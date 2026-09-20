@@ -494,6 +494,7 @@
                 if (e.is_dir) {
                     const a = document.createElement('a');
                     a.href = '#';
+                    a.className = 'files-dir';
                     a.textContent = '📁 ' + e.name;
                     a.onclick = (ev) => {
                         ev.preventDefault();

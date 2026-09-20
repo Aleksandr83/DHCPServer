@@ -1041,6 +1041,22 @@ th {
     text-decoration: none;
 }
 
+/* Folder names in the listing are links, but until now nothing said so: no rule
+   matched them, so the browser drew them in its own link colour (#0000EE, and
+   purple once visited), which is the one colour this dark theme cannot carry.
+   A name now reads like the file names next to it; the hover is what says
+   "this opens". The breadcrumbs and the "up" row above stay accent-coloured on
+   purpose — they are navigation, not the contents of the folder. */
+a.files-dir {
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+a.files-dir:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
 /* ─── In-page modal dialog ─────────────────────────── */
 /* Native window.prompt()/confirm() are not available in every environment the
    UI is opened in (embedded browsers block them), so the explorer asks through
@@ -1088,6 +1104,63 @@ th {
     gap: 0.6rem;
     justify-content: flex-end;
     margin-top: 0.8rem;
+}
+
+/* A row of a dialog that asks for settings rather than a yes/no: a label, its
+   control and a hint under them. Rows are shown one call at a time, so the
+   spacing lives on the row instead of on the control. */
+.modal-card .modal-field {
+    margin: 0.5rem 0 0.7rem;
+}
+
+.modal-card .modal-field label {
+    display: block;
+    margin-bottom: 0.35rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.modal-card .modal-field input[type="text"],
+.modal-card .modal-field select {
+    width: 100%;
+    margin: 0;
+}
+
+/* A text field with a clear button: the × sits inside the right end of the
+   input, so the two share one line, and the text keeps a way out from under it. */
+.field-with-clear {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.field-with-clear input[type="text"] {
+    padding-right: 2.1rem;
+}
+
+.field-clear {
+    position: absolute;
+    right: 0.35rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.field-clear:hover {
+    background: var(--input-bg);
+    color: var(--text-primary);
+}
+
+/* The warning of a dialog (a pair is about to be replaced) has to be read
+   before the buttons, and it is not an ordinary grey hint. */
+.modal-card #ui-modal-warn {
+    color: var(--danger);
 }
 
 /* Directory picker (Move): the path being browsed, then the clickable list of

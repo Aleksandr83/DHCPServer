@@ -11,6 +11,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+using namespace std;
+
 static const char* TAG = "TimeLogger";
 
 namespace {
@@ -51,21 +53,21 @@ void TimeLogger::setLogRest(bool enabled)
     updateRestSenderState();
 }
 
-void TimeLogger::setLogUrl(const std::string& url)
+void TimeLogger::setLogUrl(const string& url)
 {
     logUrl_ = url;
     updateRestSenderState();
 }
 
-void TimeLogger::setLogAuth(bool enabled, const std::string& user,
-                            const std::string& pass)
+void TimeLogger::setLogAuth(bool enabled, const string& user,
+                            const string& pass)
 {
     logAuthEnabled_ = enabled;
     logAuthUser_ = user;
     logAuthPassword_ = pass;
 }
 
-void TimeLogger::logRequest(const std::string& clientAddr, uint8_t stratum)
+void TimeLogger::logRequest(const string& clientAddr, uint8_t stratum)
 {
     if (logTerminal_) {
         ESP_LOGI(TAG, "NTP request from %s -> stratum %u",
@@ -150,8 +152,8 @@ void TimeLogger::sendRestLog(const RestLogRecord& rec)
 {
     if (logUrl_.empty()) return;
 
-    const std::string& url = logUrl_;
-    const std::string payload = buildRestJson(rec);
+    const string& url = logUrl_;
+    const string payload = buildRestJson(rec);
 
     esp_http_client_config_t cfg = {};
     cfg.url = url.c_str();
@@ -202,14 +204,14 @@ void TimeLogger::sendRestLog(const RestLogRecord& rec)
     esp_http_client_cleanup(client);
 }
 
-std::string TimeLogger::buildRestJson(const RestLogRecord& rec) const
+string TimeLogger::buildRestJson(const RestLogRecord& rec) const
 {
-    std::string json = "{\"client_ip\":\"";
+    string json = "{\"client_ip\":\"";
     json += rec.client;
     json += "\",\"stratum\":";
-    json += std::to_string(static_cast<unsigned>(rec.stratum));
+    json += to_string(static_cast<unsigned>(rec.stratum));
     json += ",\"ts_ms\":";
-    json += std::to_string(rec.ts);
+    json += to_string(rec.ts);
     json += "}";
     return json;
 }

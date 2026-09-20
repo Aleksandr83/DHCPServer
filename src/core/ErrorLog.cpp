@@ -9,6 +9,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace core {
 
@@ -43,11 +45,11 @@ ErrorLog::~ErrorLog()
     target_.reset();
 }
 
-bool ErrorLog::start(const std::string& mountPoint)
+bool ErrorLog::start(const string& mountPoint)
 {
     if (task_ != nullptr) return true;   // already started
 
-    std::string dir = mountPoint;
+    string dir = mountPoint;
     if (!dir.empty() && dir.back() == '/') dir.pop_back();
 
     // Look before setting anything up: a volume that is not there is worth
@@ -60,8 +62,8 @@ bool ErrorLog::start(const std::string& mountPoint)
                  dir.empty() ? "?" : dir.c_str());
     }
 
-    target_ = std::make_unique<FileErrorLogTarget>(dir + "/logs/Errors.log");
-    core_ = std::make_unique<ErrorLogCore>(queue_, *target_, &uptimeSec);
+    target_ = make_unique<FileErrorLogTarget>(dir + "/logs/Errors.log");
+    core_ = make_unique<ErrorLogCore>(queue_, *target_, &uptimeSec);
 
     if (!queue_.ready()) {
         ESP_LOGE(kTag, "no queue — the error log cannot be started");
@@ -94,19 +96,19 @@ void ErrorLog::run()
     }
 }
 
-const std::string& ErrorLog::target() const
+const string& ErrorLog::target() const
 {
-    static const std::string empty;
+    static const string empty;
     return target_ ? target_->description() : empty;
 }
 
-bool ErrorLog::error(const char* tag, const std::string& message)
+bool ErrorLog::error(const char* tag, const string& message)
 {
     if (!core_) { ++preStartDropped_; return false; }
     return core_->submit(LogLevel::Error, tag, message);
 }
 
-bool ErrorLog::warn(const char* tag, const std::string& message)
+bool ErrorLog::warn(const char* tag, const string& message)
 {
     if (!core_) { ++preStartDropped_; return false; }
     return core_->submit(LogLevel::Warn, tag, message);
@@ -117,10 +119,10 @@ bool ErrorLog::errorf(const char* tag, const char* fmt, ...)
     char buffer[ErrorLogCore::kMaxMessage + 1];
     va_list args;
     va_start(args, fmt);
-    const int n = std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    const int n = vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     (void)n;
-    return error(tag, std::string(buffer));
+    return error(tag, string(buffer));
 }
 
 uint32_t ErrorLog::dropped() const

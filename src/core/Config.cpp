@@ -7,6 +7,8 @@
 #include "nvs.h"
 #include "esp_log.h"
 
+using namespace std;
+
 static const char* TAG = "Config";
 static const char* NVS_NAMESPACE = "dhcp";
 
@@ -71,6 +73,10 @@ static const char* KEY_SEC_USER       = "sec_user";
 static const char* KEY_SEC_PASS       = "sec_pass";
 static const char* KEY_SEC_MAX_ATT    = "sec_max_att";
 static const char* KEY_SEC_LOCKOUT    = "sec_lockout";
+// HTTPS of the web interface and the volume that holds the certificate pair.
+static const char* KEY_SEC_HTTPS      = "sec_https";
+static const char* KEY_SEC_CERT_VOL   = "sec_cert_vol";
+static const char* KEY_SEC_CERT_NAME  = "sec_cert_name";
 // Time (NTP) server settings (NVS keys limited to 15 chars).
 static const char* KEY_TIME_ENABLED   = "time_enabled";
 static const char* KEY_TIME_SYNC_EN   = "time_sync_en";
@@ -113,7 +119,7 @@ static nvs_handle_t openNvs()
     return handle;
 }
 
-std::string Config::readStr(const char* key, const std::string& def)
+string Config::readStr(const char* key, const string& def)
 {
     nvs_handle_t h = openNvs();
     if (!h) return def;
@@ -123,7 +129,7 @@ std::string Config::readStr(const char* key, const std::string& def)
         nvs_close(h);
         return def;
     }
-    std::string val(len, '\0');
+    string val(len, '\0');
     err = nvs_get_str(h, key, &val[0], &len);
     nvs_close(h);
     if (err != ESP_OK) return def;
@@ -132,7 +138,7 @@ std::string Config::readStr(const char* key, const std::string& def)
     return val;
 }
 
-void Config::writeStr(const char* key, const std::string& val)
+void Config::writeStr(const char* key, const string& val)
 {
     nvs_handle_t h = openNvs();
     if (!h) return;
@@ -168,7 +174,7 @@ void Config::writeI32(const char* key, int32_t val)
     nvs_close(h);
 }
 
-bool Config::readBlob(const char* key, std::vector<uint8_t>& out)
+bool Config::readBlob(const char* key, vector<uint8_t>& out)
 {
     nvs_handle_t h = openNvs();
     if (!h) return false;
@@ -184,7 +190,7 @@ bool Config::readBlob(const char* key, std::vector<uint8_t>& out)
     return (err == ESP_OK);
 }
 
-bool Config::writeBlob(const char* key, const std::vector<uint8_t>& data)
+bool Config::writeBlob(const char* key, const vector<uint8_t>& data)
 {
     nvs_handle_t h = openNvs();
     if (!h) return false;
@@ -296,25 +302,25 @@ void Config::setDhcp(const DhcpConfig& cfg)
 
 // ─── Static bindings ────────────────────────────────
 
-std::vector<StaticBinding> Config::getStaticBindings() const
+vector<StaticBinding> Config::getStaticBindings() const
 {
-    std::vector<StaticBinding> result;
-    std::vector<uint8_t> blob;
+    vector<StaticBinding> result;
+    vector<uint8_t> blob;
     if (!readBlob(KEY_DHCP_BINDINGS, blob)) return result;
 
     // Format: "mac1|ip1|name1|gateway1|useGateway1|enabled1|useDns1\n..."
     // (backward compatible: "mac|ip" or "mac|ip|name")
-    std::string text(blob.begin(), blob.end());
-    std::istringstream stream(text);
-    std::string line;
-    while (std::getline(stream, line)) {
+    string text(blob.begin(), blob.end());
+    istringstream stream(text);
+    string line;
+    while (getline(stream, line)) {
         if (line.empty()) continue;
         // Split on '|'
-        std::vector<std::string> f;
+        vector<string> f;
         size_t start = 0;
         while (true) {
             size_t p = line.find('|', start);
-            if (p == std::string::npos) {
+            if (p == string::npos) {
                 f.push_back(line.substr(start));
                 break;
             }
@@ -336,12 +342,12 @@ std::vector<StaticBinding> Config::getStaticBindings() const
     return result;
 }
 
-bool Config::setStaticBindings(const std::vector<StaticBinding>& bindings)
+bool Config::setStaticBindings(const vector<StaticBinding>& bindings)
 {
     if (bindings.empty()) {
         return eraseKey(KEY_DHCP_BINDINGS);
     }
-    std::string text;
+    string text;
     for (const auto& b : bindings) {
         if (!text.empty()) text += '\n';
         text += b.mac + '|' + b.ip + '|' + b.name + '|' + b.gateway + '|' +
@@ -353,7 +359,7 @@ bool Config::setStaticBindings(const std::vector<StaticBinding>& bindings)
                  text.size(), kMaxBindingsBytes);
         return false;
     }
-    std::vector<uint8_t> blob(text.begin(), text.end());
+    vector<uint8_t> blob(text.begin(), text.end());
     return writeBlob(KEY_DHCP_BINDINGS, blob);
 }
 
@@ -362,7 +368,7 @@ size_t Config::staticBindingsBytes() const
     // Serialize exactly like setStaticBindings() so the reported usage matches
     // the NVS blob size that the kMaxBindingsBytes limit is applied to.
     auto bindings = getStaticBindings();
-    std::string text;
+    string text;
     for (const auto& b : bindings) {
         if (!text.empty()) text += '\n';
         text += b.mac + '|' + b.ip + '|' + b.name + '|' + b.gateway + '|' +
@@ -374,14 +380,14 @@ size_t Config::staticBindingsBytes() const
 
 // ─── Allowed computers (DHCP allow-list) ────────────
 
-std::string Config::getAllowedComputers() const
+string Config::getAllowedComputers() const
 {
-    std::vector<uint8_t> blob;
-    if (!readBlob(KEY_DHCP_ALLOWED, blob)) return std::string();
-    return std::string(blob.begin(), blob.end());
+    vector<uint8_t> blob;
+    if (!readBlob(KEY_DHCP_ALLOWED, blob)) return string();
+    return string(blob.begin(), blob.end());
 }
 
-bool Config::setAllowedComputers(const std::string& text)
+bool Config::setAllowedComputers(const string& text)
 {
     if (text.empty()) {
         return eraseKey(KEY_DHCP_ALLOWED);
@@ -391,7 +397,7 @@ bool Config::setAllowedComputers(const std::string& text)
                  text.size(), kMaxAllowedBytes);
         return false;
     }
-    std::vector<uint8_t> blob(text.begin(), text.end());
+    vector<uint8_t> blob(text.begin(), text.end());
     return writeBlob(KEY_DHCP_ALLOWED, blob);
 }
 
@@ -488,27 +494,27 @@ void Config::setDns(const DnsConfig& cfg)
 
 // ─── Local DNS hosts ────────────────────────────────
 
-std::vector<LocalHostEntry> Config::getLocalHosts() const
+vector<LocalHostEntry> Config::getLocalHosts() const
 {
-    std::vector<LocalHostEntry> result;
-    std::vector<uint8_t> blob;
+    vector<LocalHostEntry> result;
+    vector<uint8_t> blob;
     if (!readBlob(KEY_DNS_HOSTS, blob)) return result;
 
     // Format: "name1|ip4|ip6|enabled\n..."
     // (backward compatible: "name|ip" -> ip4, or "name|ip4|ip6" -> enabled=true)
-    std::string text(blob.begin(), blob.end());
-    std::istringstream stream(text);
-    std::string line;
-    while (std::getline(stream, line)) {
+    string text(blob.begin(), blob.end());
+    istringstream stream(text);
+    string line;
+    while (getline(stream, line)) {
         if (line.empty()) continue;
         auto p1 = line.find('|');
-        if (p1 == std::string::npos) continue;
+        if (p1 == string::npos) continue;
         auto p2 = line.find('|', p1 + 1);
         LocalHostEntry e;
         e.name = line.substr(0, p1);
-        if (p2 != std::string::npos) {
+        if (p2 != string::npos) {
             auto p3 = line.find('|', p2 + 1);
-            if (p3 != std::string::npos) {
+            if (p3 != string::npos) {
                 e.ip4 = line.substr(p1 + 1, p2 - p1 - 1);
                 e.ip6 = line.substr(p2 + 1, p3 - p2 - 1);
                 e.enabled = line.substr(p3 + 1) != "0";
@@ -526,12 +532,12 @@ std::vector<LocalHostEntry> Config::getLocalHosts() const
     return result;
 }
 
-bool Config::setLocalHosts(const std::vector<LocalHostEntry>& hosts)
+bool Config::setLocalHosts(const vector<LocalHostEntry>& hosts)
 {
     if (hosts.empty()) {
         return eraseKey(KEY_DNS_HOSTS);
     }
-    std::string text;
+    string text;
     for (const auto& h : hosts) {
         if (!text.empty()) text += '\n';
         text += h.name + '|' + h.ip4 + '|' + h.ip6 + '|' + (h.enabled ? "1" : "0");
@@ -541,7 +547,7 @@ bool Config::setLocalHosts(const std::vector<LocalHostEntry>& hosts)
                  text.size(), kMaxLocalHostsBytes);
         return false;
     }
-    std::vector<uint8_t> blob(text.begin(), text.end());
+    vector<uint8_t> blob(text.begin(), text.end());
     return writeBlob(KEY_DNS_HOSTS, blob);
 }
 
@@ -550,7 +556,7 @@ size_t Config::localHostsBytes() const
     // Serialize exactly like setLocalHosts() so the reported usage matches
     // the NVS blob size that the kMaxLocalHostsBytes limit is applied to.
     auto hosts = getLocalHosts();
-    std::string text;
+    string text;
     for (const auto& h : hosts) {
         if (!text.empty()) text += '\n';
         text += h.name + '|' + h.ip4 + '|' + h.ip6 + '|' + (h.enabled ? "1" : "0");
@@ -560,14 +566,14 @@ size_t Config::localHostsBytes() const
 
 // ─── DNS cache blob ─────────────────────────────────
 
-std::vector<uint8_t> Config::getDnsCache() const
+vector<uint8_t> Config::getDnsCache() const
 {
-    std::vector<uint8_t> data;
+    vector<uint8_t> data;
     readBlob(KEY_DNS_CACHE_DATA, data);
     return data;
 }
 
-bool Config::setDnsCache(const std::vector<uint8_t>& data)
+bool Config::setDnsCache(const vector<uint8_t>& data)
 {
     if (data.size() > kMaxDnsCacheBytes) {
         ESP_LOGE(TAG, "DNS cache too large: %zu > %zu",
@@ -586,6 +592,20 @@ SecurityConfig Config::getSecurity() const
     cfg.password = readStr(KEY_SEC_PASS, "admin");
     cfg.maxAttempts = static_cast<uint32_t>(readI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(SecurityConfig::kDefaultMaxAttempts)));
     cfg.lockoutPeriodSec = static_cast<uint32_t>(readI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(SecurityConfig::kDefaultLockoutSec)));
+    cfg.httpsEnabled = readI32(KEY_SEC_HTTPS, 0) != 0;
+    // An index this build does not know means the internal volume (see
+    // security::certStorageFromIndex): a device that once stored something else
+    // must still find its certificate instead of reporting that it has none.
+    cfg.certStorage = ::dhcp::security::certStorageFromIndex(
+        static_cast<uint8_t>(readI32(KEY_SEC_CERT_VOL, 0)));
+    cfg.certName = readStr(KEY_SEC_CERT_NAME, ::dhcp::security::kDefaultCommonName);
+    // A stored name that is not a host name (a leftover of another build, or a
+    // value that never was one) would produce a certificate no browser accepts,
+    // so it falls back to the default — the same treatment a stale volume index
+    // gets above. The default itself is a valid name by construction.
+    if (!::dhcp::security::isValidHostName(cfg.certName)) {
+        cfg.certName = ::dhcp::security::kDefaultCommonName;
+    }
     return cfg;
 }
 
@@ -595,6 +615,9 @@ void Config::setSecurity(const SecurityConfig& cfg)
     writeStr(KEY_SEC_PASS, cfg.password);
     writeI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(cfg.maxAttempts));
     writeI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(cfg.lockoutPeriodSec));
+    writeI32(KEY_SEC_HTTPS, cfg.httpsEnabled ? 1 : 0);
+    writeI32(KEY_SEC_CERT_VOL, static_cast<int32_t>(::dhcp::security::certStorageIndex(cfg.certStorage)));
+    writeStr(KEY_SEC_CERT_NAME, cfg.certName);
 }
 
 // ─── Time (NTP) server ──────────────────────────────

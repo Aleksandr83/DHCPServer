@@ -10,6 +10,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+using namespace std;
+
 static const char* TAG = "DnsLogger";
 
 // Capture the HTTP response body (first bytes) so a non-2xx reply (e.g.
@@ -91,14 +93,14 @@ void DnsLogger::setLogRest(bool enabled)
     updateRestSenderState();
 }
 
-void DnsLogger::setLogUrl(const std::string& url)
+void DnsLogger::setLogUrl(const string& url)
 {
     logUrl_ = url;
     updateRestSenderState();
 }
 
-void DnsLogger::setLogAuth(bool enabled, const std::string& user,
-                           const std::string& pass)
+void DnsLogger::setLogAuth(bool enabled, const string& user,
+                           const string& pass)
 {
     logAuthEnabled_ = enabled;
     logAuthUser_ = user;
@@ -106,16 +108,16 @@ void DnsLogger::setLogAuth(bool enabled, const std::string& user,
 }
 
 void DnsLogger::setLocalHosts(
-    const std::map<std::string, std::vector<std::string>>* hosts)
+    const map<string, vector<string>>* hosts)
 {
     localHosts_ = hosts;
 }
 
-void DnsLogger::logQuery(const std::string& domain, uint16_t type,
-                          const std::string& clientAddr,
-                          const std::string& clientMac,
+void DnsLogger::logQuery(const string& domain, uint16_t type,
+                          const string& clientAddr,
+                          const string& clientMac,
                           DnsLogSource source,
-                          bool resolved, const std::string& answer)
+                          bool resolved, const string& answer)
 {
     if (logTerminal_) {
         bool allowed = (source == DnsLogSource::LOCAL && logLocal_) ||
@@ -137,11 +139,11 @@ void DnsLogger::logQuery(const std::string& domain, uint16_t type,
     }
 }
 
-void DnsLogger::logToTerminal(const std::string& domain, uint16_t type,
-                               const std::string& clientAddr,
-                               const std::string& clientMac,
+void DnsLogger::logToTerminal(const string& domain, uint16_t type,
+                               const string& clientAddr,
+                               const string& clientMac,
                                DnsLogSource source,
-                               bool resolved, const std::string& answer)
+                               bool resolved, const string& answer)
 {
     const char* tag = (source == DnsLogSource::LOCAL) ? "local" :
                       (source == DnsLogSource::CACHE) ? "cache" : "forward";
@@ -162,11 +164,11 @@ void DnsLogger::logToTerminal(const std::string& domain, uint16_t type,
     }
 }
 
-void DnsLogger::logToRest(const std::string& domain, uint16_t type,
-                           const std::string& clientAddr,
-                           const std::string& clientMac,
+void DnsLogger::logToRest(const string& domain, uint16_t type,
+                           const string& clientAddr,
+                           const string& clientMac,
                            DnsLogSource source,
-                           bool resolved, const std::string& answer)
+                           bool resolved, const string& answer)
 {
     if (!restQueue_) return;
 
@@ -265,31 +267,31 @@ void DnsLogger::restSenderTask(void* arg)
 // ".lo" style name (known only by the built-in DNS server for LAN clients)
 // can be reached without relying on the system DNS resolver (which would
 // fail with EAI_NONAME). Unchanged if the host is not a local host.
-std::string DnsLogger::resolveUrlHost(const std::string& url) const
+string DnsLogger::resolveUrlHost(const string& url) const
 {
     const auto schemeEnd = url.find("://");
-    if (schemeEnd == std::string::npos) return url;
+    if (schemeEnd == string::npos) return url;
 
     const size_t hostStart = schemeEnd + 3;
     const size_t hostEnd = url.find_first_of("/:", hostStart);
     const size_t hostLen =
-        (hostEnd == std::string::npos) ? (url.length() - hostStart) : (hostEnd - hostStart);
-    const std::string host = url.substr(hostStart, hostLen);
+        (hostEnd == string::npos) ? (url.length() - hostStart) : (hostEnd - hostStart);
+    const string host = url.substr(hostStart, hostLen);
     if (host.empty() || !localHosts_) return url;
 
     const auto it = localHosts_->find(host);
     if (it == localHosts_->end()) return url;
 
     // Prefer an IPv4 address if present.
-    std::string ip;
+    string ip;
     for (const auto& addr : it->second) {
-        if (addr.find(':') == std::string::npos) { ip = addr; break; }
+        if (addr.find(':') == string::npos) { ip = addr; break; }
     }
     if (ip.empty() && !it->second.empty()) ip = it->second.front();
     if (ip.empty()) return url;
 
-    std::string rewritten = url.substr(0, hostStart) + ip;
-    if (hostEnd != std::string::npos) rewritten += url.substr(hostEnd);
+    string rewritten = url.substr(0, hostStart) + ip;
+    if (hostEnd != string::npos) rewritten += url.substr(hostEnd);
     ESP_LOGI(TAG, "REST URL host '%s' resolved to %s", host.c_str(), ip.c_str());
     return rewritten;
 }
@@ -301,8 +303,8 @@ void DnsLogger::sendRestLog(const RestLogRecord& rec)
     // Keep the URL hostname as-is: the system DNS now points to the built-in
     // DNS server, so ".lo" names resolve and the Host header stays correct
     // for Apache name-based vhosts.
-    const std::string& url = logUrl_;
-    const std::string payload = buildRestJson(rec);
+    const string& url = logUrl_;
+    const string payload = buildRestJson(rec);
 
     // "Sent to REST" checkbox (logRestSent_) gates the detailed per-send
     // terminal logging; it only applies when terminal logging is on.
@@ -396,14 +398,14 @@ void DnsLogger::sendRestLog(const RestLogRecord& rec)
     esp_http_client_cleanup(client);
 }
 
-std::string DnsLogger::buildRestJson(const RestLogRecord& rec) const
+string DnsLogger::buildRestJson(const RestLogRecord& rec) const
 {
     const char* src = (rec.source == 0) ? "local" :
                       (rec.source == 1) ? "cache" : "forward";
-    std::string json = "{\"domain\":\"";
+    string json = "{\"domain\":\"";
     json += rec.domain;
     json += "\",\"type\":";
-    json += std::to_string(rec.type);
+    json += to_string(rec.type);
     json += ",\"client_ip\":\"";
     json += rec.client;
     json += "\",\"client_mac\":\"";

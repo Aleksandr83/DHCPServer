@@ -23,6 +23,8 @@
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
 
+using namespace std;
+
 using dhcp::files::FileSink;
 
 namespace {
@@ -31,25 +33,25 @@ const char* kDest = "test_filesink_dest.bin";
 const char* kPart = "test_filesink_dest.bin.part";
 
 /** Read a file into @p out; false when it does not exist. */
-bool readFile(const char* path, std::string& out)
+bool readFile(const char* path, string& out)
 {
-    std::FILE* f = std::fopen(path, "rb");
+    FILE* f = fopen(path, "rb");
     if (f == nullptr) return false;
     out.clear();
     char buf[256];
     size_t n = 0;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
-    std::fclose(f);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+    fclose(f);
     return true;
 }
 
 long fileSize(const char* path)
 {
-    std::FILE* f = std::fopen(path, "rb");
+    FILE* f = fopen(path, "rb");
     if (f == nullptr) return -1;
-    std::fseek(f, 0, SEEK_END);
-    const long size = std::ftell(f);
-    std::fclose(f);
+    fseek(f, 0, SEEK_END);
+    const long size = ftell(f);
+    fclose(f);
     return size;
 }
 
@@ -112,7 +114,7 @@ static int test_append_finishes_the_file()
         TEST_ASSERT_TRUE(sink.commit());
     }
 
-    std::string content;
+    string content;
     TEST_ASSERT_TRUE(readFile(kDest, content));
     TEST_ASSERT_EQ(content.size(), 8u);
     TEST_ASSERT_TRUE(content == "ABCDEFGH");
@@ -146,10 +148,10 @@ static int test_abort_keeps_the_destination()
     clean();
 
     {
-        std::FILE* f = std::fopen(kDest, "wb");
+        FILE* f = fopen(kDest, "wb");
         TEST_ASSERT_TRUE(f != nullptr);
-        std::fputs("old", f);
-        std::fclose(f);
+        fputs("old", f);
+        fclose(f);
     }
 
     {
@@ -159,7 +161,7 @@ static int test_abort_keeps_the_destination()
         sink.abort();
     }
 
-    std::string content;
+    string content;
     TEST_ASSERT_TRUE(readFile(kDest, content));
     TEST_ASSERT_TRUE(content == "old");
     TEST_ASSERT_EQ(fileSize(kPart), -1);

@@ -25,9 +25,11 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { \
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { \
     printf("FAIL: %s:%d:\n  got:      %s\n  expected: %s\n", __FILE__, __LINE__, \
-           std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+           string(a).c_str(), string(b).c_str()); return 1; } } while(0)
+
+using namespace std;
 
 using dhcp::web::FileJson;
 using dhcp::web::JsonWriter;
@@ -45,7 +47,7 @@ namespace {
  *
  * @return "" when the document looks well formed, otherwise a description.
  */
-std::string jsonProblem(const std::string& doc)
+string jsonProblem(const string& doc)
 {
     int depth = 0;
     bool inString = false;
@@ -109,7 +111,7 @@ std::string jsonProblem(const std::string& doc)
 
 /** @brief Fail the test when @p doc is structurally broken. */
 #define ASSERT_WELL_FORMED(doc) do { \
-    const std::string problem_ = jsonProblem(doc); \
+    const string problem_ = jsonProblem(doc); \
     if (!problem_.empty()) { \
         printf("FAIL: %s:%d: %s in:\n%s\n", __FILE__, __LINE__, problem_.c_str(), (doc).c_str()); \
         return 1; \
@@ -159,7 +161,7 @@ int test_writer_escaping()
 int test_writer_drops_control_chars()
 {
     JsonWriter w;
-    w.str("a", std::string("x") + '\x01' + "y");
+    w.str("a", string("x") + '\x01' + "y");
     TEST_ASSERT_STR_EQ(w.toString(), "{\"a\":\"xy\"}");
     ASSERT_WELL_FORMED(w.toString());
     return 0;
@@ -183,7 +185,7 @@ int test_writer_literal()
 /** `GET /api/files/volumes` without any volume — the smallest valid body. */
 int test_volumes_empty()
 {
-    const std::string body = FileJson::volumes(false, {});
+    const string body = FileJson::volumes(false, {});
     TEST_ASSERT_STR_EQ(body, "{\"enabled\":false,\"volumes\":[]}");
     ASSERT_WELL_FORMED(body);
     return 0;
@@ -196,11 +198,11 @@ int test_volumes_empty()
  */
 int test_volumes_has_no_leading_comma()
 {
-    std::vector<VolumeInfo> vols(2);
+    vector<VolumeInfo> vols(2);
     vols[0].id = "fat";
-    const std::string body = FileJson::volumes(true, vols);
+    const string body = FileJson::volumes(true, vols);
     TEST_ASSERT_TRUE(body.rfind("{\"", 0) == 0);
-    TEST_ASSERT_TRUE(body.find("{,") == std::string::npos);
+    TEST_ASSERT_TRUE(body.find("{,") == string::npos);
     ASSERT_WELL_FORMED(body);
     return 0;
 }
@@ -208,7 +210,7 @@ int test_volumes_has_no_leading_comma()
 /** Two volumes, the second one unmounted with an error text that needs escaping. */
 int test_volumes_two()
 {
-    std::vector<VolumeInfo> vols(2);
+    vector<VolumeInfo> vols(2);
 
     vols[0].id = "fat";
     vols[0].mountPoint = "/fat";
@@ -223,7 +225,7 @@ int test_volumes_two()
     vols[1].present = false;
     vols[1].error = "mount failed (4-bit): bad \"card\" \\ slot";
 
-    const std::string body = FileJson::volumes(true, vols);
+    const string body = FileJson::volumes(true, vols);
     TEST_ASSERT_STR_EQ(body,
         "{\"enabled\":true,\"volumes\":["
         "{\"id\":\"fat\",\"mount_point\":\"/fat\",\"mounted\":true,\"present\":true,"
@@ -245,7 +247,7 @@ int test_list_empty_entries()
     p.totalBytes = 21889024;
     p.freeBytes = 21000000;
 
-    const std::string body = FileJson::list(p);
+    const string body = FileJson::list(p);
     TEST_ASSERT_STR_EQ(body,
         "{\"volume\":\"fat\",\"path\":\"/\",\"mounted\":true,"
         "\"total_bytes\":21889024,\"free_bytes\":21000000,"
@@ -270,7 +272,7 @@ int test_list_with_entries()
         FileEntry{"\xd0\xa4\xd0\xb0\xd0\xb9\xd0\xbb \xd0\xbb\xd0\xbe\xd0\xb3.txt", false, 3, 1700000002},
     };
 
-    const std::string body = FileJson::list(p);
+    const string body = FileJson::list(p);
     TEST_ASSERT_STR_EQ(body,
         "{\"volume\":\"fat\",\"path\":\"/logs\",\"mounted\":true,"
         "\"total_bytes\":1000,\"free_bytes\":900,\"truncated\":true,\"entries\":["
@@ -292,7 +294,7 @@ int test_text_payload()
     p.size = p.text.size();
     p.mtime = 1700000003;
 
-    const std::string body = FileJson::text(p);
+    const string body = FileJson::text(p);
     TEST_ASSERT_STR_EQ(body,
         "{\"volume\":\"fat\",\"path\":\"/notes.txt\",\"size\":19,\"mtime\":1700000003,"
         "\"truncated\":false,\"text\":\"line 1\\nsay \\\"hi\\\"\\tend\"}");
@@ -311,7 +313,7 @@ int test_settings_payload()
     p.subnetMask = "255.255.255.0";
     p.blockedCount = 3;
 
-    const std::string body = FileJson::settings(p);
+    const string body = FileJson::settings(p);
     TEST_ASSERT_STR_EQ(body,
         "{\"enabled\":true,\"allow_own_subnet\":true,"
         "\"subnet_address\":\"192.168.1.201\",\"subnet_mask\":\"255.255.255.0\","
@@ -334,41 +336,41 @@ int test_volume_array()
     TEST_ASSERT_STR_EQ(FileJson::volumeArray({}), "[]");
     ASSERT_WELL_FORMED("{\"volumes\":" + FileJson::volumeArray({}) + "}");
 
-    std::vector<VolumeInfo> one(1);
+    vector<VolumeInfo> one(1);
     one[0].id = "fat";
     one[0].mountPoint = "/fat";
     one[0].mounted = true;
     one[0].present = true;
     one[0].totalBytes = 21889024;
     one[0].freeBytes = 21889024;
-    const std::string oneJson = FileJson::volumeArray(one);
+    const string oneJson = FileJson::volumeArray(one);
     TEST_ASSERT_STR_EQ(oneJson,
         "[{\"id\":\"fat\",\"mount_point\":\"/fat\",\"mounted\":true,\"present\":true,"
         "\"total_bytes\":21889024,\"free_bytes\":21889024,\"error\":\"\"}]");
 
     // The status document wraps the array: the field needs one comma in front
     // and the array itself must not start or end with one.
-    const std::string insideStatus =
+    const string insideStatus =
         "{\"files_enabled\":true,\"volumes\":" + oneJson +
         ",\"cpu_load0\":0,\"ram_total\":786432}";
     ASSERT_WELL_FORMED(insideStatus);
-    TEST_ASSERT_TRUE(insideStatus.find("{,") == std::string::npos);
+    TEST_ASSERT_TRUE(insideStatus.find("{,") == string::npos);
 
     // A second, unmounted volume (no card inserted): two objects, one comma.
-    std::vector<VolumeInfo> two = one;
+    vector<VolumeInfo> two = one;
     two.emplace_back();
     two[1].id = "sd";
     two[1].mountPoint = "/sdcard";
     two[1].error = "mount failed (1-bit): ESP_ERR_TIMEOUT";
-    const std::string twoJson = FileJson::volumeArray(two);
-    TEST_ASSERT_TRUE(twoJson.find("\"id\":\"sd\"") != std::string::npos);
-    TEST_ASSERT_TRUE(twoJson.find("},\"{") == std::string::npos);
-    TEST_ASSERT_TRUE(twoJson.find("},{") != std::string::npos);
+    const string twoJson = FileJson::volumeArray(two);
+    TEST_ASSERT_TRUE(twoJson.find("\"id\":\"sd\"") != string::npos);
+    TEST_ASSERT_TRUE(twoJson.find("},\"{") == string::npos);
+    TEST_ASSERT_TRUE(twoJson.find("},{") != string::npos);
     ASSERT_WELL_FORMED("{\"volumes\":" + twoJson + "}");
 
     // ... and the explorer's own endpoint still reports the same array.
-    const std::string explorer = FileJson::volumes(true, two);
-    TEST_ASSERT_TRUE(explorer.find(oneJson.substr(1, oneJson.size() - 2)) != std::string::npos);
+    const string explorer = FileJson::volumes(true, two);
+    TEST_ASSERT_TRUE(explorer.find(oneJson.substr(1, oneJson.size() - 2)) != string::npos);
     ASSERT_WELL_FORMED(explorer);
     return 0;
 }
@@ -394,7 +396,7 @@ int test_check_report()
     running.bytes = 4096;
     running.budgetBytes = 67108864;
 
-    const std::string busyBody = FileJson::check(running);
+    const string busyBody = FileJson::check(running);
     TEST_ASSERT_STR_EQ(busyBody,
         "{\"busy\":true,\"finished\":false,\"truncated\":false,\"cancelled\":false,"
         "\"volume\":\"sd\",\"current\":\"/logs/a.txt\",\"dirs\":3,\"files\":12,"
@@ -410,8 +412,8 @@ int test_check_report()
     clean.files = 5;
     clean.bytes = 1024;
     clean.budgetBytes = 67108864;
-    const std::string cleanBody = FileJson::check(clean);
-    TEST_ASSERT_TRUE(cleanBody.find("\"errors\":[]") != std::string::npos);
+    const string cleanBody = FileJson::check(clean);
+    TEST_ASSERT_TRUE(cleanBody.find("\"errors\":[]") != string::npos);
     ASSERT_WELL_FORMED(cleanBody);
 
     // Finished with failures: one escaped path, one escaped detail.
@@ -422,7 +424,7 @@ int test_check_report()
                           "size mismatch (4096 in the entry, 0 readable)"});
     bad.errors.push_back({"/фото/снимок.jpg", "Input/output error"});
 
-    const std::string badBody = FileJson::check(bad);
+    const string badBody = FileJson::check(bad);
     TEST_ASSERT_STR_EQ(badBody,
         "{\"busy\":false,\"finished\":true,\"truncated\":true,\"cancelled\":false,"
         "\"volume\":\"fat\",\"current\":\"\",\"dirs\":2,\"files\":5,"
@@ -458,7 +460,7 @@ int test_checker_rejects_broken_documents()
 /** Every builder output survives the checker with an arbitrary payload. */
 int test_all_builders_well_formed()
 {
-    std::vector<VolumeInfo> vols(1);
+    vector<VolumeInfo> vols(1);
     vols[0].id = "sd";
     vols[0].error = "x";
     ASSERT_WELL_FORMED(FileJson::volumes(true, vols));
@@ -501,7 +503,7 @@ int test_all_builders_well_formed()
 int test_jobs_payload()
 {
     // Nothing running: an empty array, not a missing field.
-    std::string empty = FileJson::jobs({});
+    string empty = FileJson::jobs({});
     TEST_ASSERT_STR_EQ(empty, "{\"jobs\":[]}");
     ASSERT_WELL_FORMED(empty);
     // A volume check in progress, with a known total.
@@ -515,7 +517,7 @@ int test_jobs_payload()
     check.total = 100;
     check.durationMs = 12345;
 
-    std::string one = FileJson::jobs({check});
+    string one = FileJson::jobs({check});
     TEST_ASSERT_STR_EQ(one,
         "{\"jobs\":[{\"id\":\"file_check\",\"title_key\":\"jobs.file_check\","
         "\"arg\":\"sd\",\"state\":\"running\",\"done\":30,\"total\":100,"
@@ -535,20 +537,20 @@ int test_jobs_payload()
     upload.durationMs = 4000;
     upload.cancelRequested = true;
 
-    std::string two = FileJson::jobs({check, upload});
-    TEST_ASSERT_TRUE(two.find("\"percent\":-1") != std::string::npos);
-    TEST_ASSERT_TRUE(two.find("\"state\":\"paused\"") != std::string::npos);
-    TEST_ASSERT_TRUE(two.find("\"cancel_requested\":true") != std::string::npos);
-    TEST_ASSERT_TRUE(two.find("/фото/\\\"big\\\".mkv") != std::string::npos);
+    string two = FileJson::jobs({check, upload});
+    TEST_ASSERT_TRUE(two.find("\"percent\":-1") != string::npos);
+    TEST_ASSERT_TRUE(two.find("\"state\":\"paused\"") != string::npos);
+    TEST_ASSERT_TRUE(two.find("\"cancel_requested\":true") != string::npos);
+    TEST_ASSERT_TRUE(two.find("/фото/\\\"big\\\".mkv") != string::npos);
     ASSERT_WELL_FORMED(two);
 
     // A finished operation that repeats stays in the list with its interval.
     ::dhcp::core::JobInfo repeating = check;
     repeating.state = ::dhcp::core::JobState::Done;
     repeating.repeatSec = 3600;
-    std::string scheduled = FileJson::jobs({repeating});
-    TEST_ASSERT_TRUE(scheduled.find("\"state\":\"done\"") != std::string::npos);
-    TEST_ASSERT_TRUE(scheduled.find("\"repeat_sec\":3600") != std::string::npos);
+    string scheduled = FileJson::jobs({repeating});
+    TEST_ASSERT_TRUE(scheduled.find("\"state\":\"done\"") != string::npos);
+    TEST_ASSERT_TRUE(scheduled.find("\"repeat_sec\":3600") != string::npos);
     ASSERT_WELL_FORMED(scheduled);
     return 0;
 }
@@ -575,7 +577,7 @@ int test_transfer_payload()
     running.dirsDone = 1;
     running.dirsTotal = 2;
 
-    const std::string body = FileJson::transfer(running);
+    const string body = FileJson::transfer(running);
     TEST_ASSERT_STR_EQ(body,
         "{\"phase\":\"copying\",\"busy\":true,\"finished\":false,"
         "\"cancelled\":false,\"instant\":false,\"op\":\"copy\","
@@ -593,9 +595,9 @@ int test_transfer_payload()
     measuring.phase = ::dhcp::files::TransferPhase::Measuring;
     measuring.busy = true;
     measuring.filesTotal = 120;
-    const std::string probing = FileJson::transfer(measuring);
-    TEST_ASSERT_TRUE(probing.find("\"phase\":\"measuring\"") != std::string::npos);
-    TEST_ASSERT_TRUE(probing.find("\"total_bytes\":0") != std::string::npos);
+    const string probing = FileJson::transfer(measuring);
+    TEST_ASSERT_TRUE(probing.find("\"phase\":\"measuring\"") != string::npos);
+    TEST_ASSERT_TRUE(probing.find("\"total_bytes\":0") != string::npos);
     ASSERT_WELL_FORMED(probing);
 
     // A same-volume move is a rename: `instant`, no byte copied — the page must
@@ -607,10 +609,10 @@ int test_transfer_payload()
     instant.op = ::dhcp::files::TransferOp::Move;
     instant.filesDone = 3;
     instant.deleted = 3;
-    const std::string renamed = FileJson::transfer(instant);
-    TEST_ASSERT_TRUE(renamed.find("\"instant\":true") != std::string::npos);
-    TEST_ASSERT_TRUE(renamed.find("\"op\":\"move\"") != std::string::npos);
-    TEST_ASSERT_TRUE(renamed.find("\"deleted\":3") != std::string::npos);
+    const string renamed = FileJson::transfer(instant);
+    TEST_ASSERT_TRUE(renamed.find("\"instant\":true") != string::npos);
+    TEST_ASSERT_TRUE(renamed.find("\"op\":\"move\"") != string::npos);
+    TEST_ASSERT_TRUE(renamed.find("\"deleted\":3") != string::npos);
     ASSERT_WELL_FORMED(renamed);
 
     // Cancelled with a failure: both survive, with the path it happened on — that
@@ -623,12 +625,12 @@ int test_transfer_payload()
     stopped.failed = 1;
     stopped.error = "not enough free space on the destination";
     stopped.errorPath = "/backup/photos";
-    const std::string partial = FileJson::transfer(stopped);
-    TEST_ASSERT_TRUE(partial.find("\"cancelled\":true") != std::string::npos);
-    TEST_ASSERT_TRUE(partial.find("\"skipped\":1") != std::string::npos);
-    TEST_ASSERT_TRUE(partial.find("\"failed\":1") != std::string::npos);
-    TEST_ASSERT_TRUE(partial.find("not enough free space") != std::string::npos);
-    TEST_ASSERT_TRUE(partial.find("\"error_path\":\"/backup/photos\"") != std::string::npos);
+    const string partial = FileJson::transfer(stopped);
+    TEST_ASSERT_TRUE(partial.find("\"cancelled\":true") != string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"skipped\":1") != string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"failed\":1") != string::npos);
+    TEST_ASSERT_TRUE(partial.find("not enough free space") != string::npos);
+    TEST_ASSERT_TRUE(partial.find("\"error_path\":\"/backup/photos\"") != string::npos);
     ASSERT_WELL_FORMED(partial);
     return 0;
 }
@@ -636,13 +638,13 @@ int test_transfer_payload()
 /** The `409` answer that makes the page ask about taken names. */
 int test_transfer_conflicts_payload()
 {
-    const std::string none = FileJson::transferConflicts({});
+    const string none = FileJson::transferConflicts({});
     TEST_ASSERT_STR_EQ(none, "{\"status\":\"conflict\",\"conflicts\":[]}");
     ASSERT_WELL_FORMED(none);
 
     // Names travel as they are: a volumne may hold anything FAT allows, and the
     // writer is the one place that knows how to escape it.
-    const std::string two = FileJson::transferConflicts({"photos", "отчёт 1.txt"});
+    const string two = FileJson::transferConflicts({"photos", "отчёт 1.txt"});
     TEST_ASSERT_STR_EQ(two,
         "{\"status\":\"conflict\",\"conflicts\":[{\"name\":\"photos\"},"
         "{\"name\":\"отчёт 1.txt\"}]}");

@@ -16,6 +16,8 @@
 //
 // The harness always exits with 0 — the proof is the printed text.
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -40,7 +42,7 @@ using namespace dhcp::files;
 static int g_fail = 0;
 
 /** Create a directory; MinGW's `mkdir` takes no mode argument. */
-static int makeDir(const std::string& path)
+static int makeDir(const string& path)
 {
 #ifdef _WIN32
     return ::_mkdir(path.c_str());
@@ -49,12 +51,12 @@ static int makeDir(const std::string& path)
 #endif
 }
 
-static void check(bool ok, const std::string& what)
+static void check(bool ok, const string& what)
 {
     if (ok) {
-        std::printf("  ok   %s\n", what.c_str());
+        printf("  ok   %s\n", what.c_str());
     } else {
-        std::printf("  FAIL %s\n", what.c_str());
+        printf("  FAIL %s\n", what.c_str());
         ++g_fail;
     }
 }
@@ -66,25 +68,25 @@ static void check(bool ok, const std::string& what)
 class HostFileOps : public IFileOps
 {
 public:
-    std::string rootA;          ///< Volume "a"
-    std::string rootB;          ///< Volume "b"
+    string rootA;          ///< Volume "a"
+    string rootB;          ///< Volume "b"
     uint64_t freeA = 1u << 30;
     uint64_t freeB = 1u << 30;
     bool writersFail = false;   ///< Simulate a destination that cannot be written
 
-    std::string rootFor(const std::string& volume) const
+    string rootFor(const string& volume) const
     {
         return volume == "a" ? rootA : rootB;
     }
 
-    std::string full(const std::string& volume, const std::string& path) const
+    string full(const string& volume, const string& path) const
     {
-        const std::string root = rootFor(volume);
+        const string root = rootFor(volume);
         return path == "/" ? root : root + path;
     }
 
-    FileStatus scan(const std::string& volume, const std::string& path,
-                    IDirVisitor& visitor, std::string* detail) override
+    FileStatus scan(const string& volume, const string& path,
+                    IDirVisitor& visitor, string* detail) override
     {
         // The board's policy, mirrored: a path that is not a directory answers
         // InvalidPath, a missing one NotFound. The fake used to answer NotFound
@@ -93,19 +95,19 @@ public:
         // through in the first place.
         struct stat st = {};
         if (::stat(full(volume, path).c_str(), &st) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return (errno == ENOENT) ? FileStatus::NotFound : FileStatus::IoError;
         }
         if (!S_ISDIR(st.st_mode)) return FileStatus::InvalidPath;
 
         DIR* dir = opendir(full(volume, path).c_str());
         if (dir == nullptr) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return FileStatus::NotFound;
         }
         struct dirent* ent = nullptr;
         while ((ent = readdir(dir)) != nullptr) {
-            const std::string name = ent->d_name;
+            const string name = ent->d_name;
             if (name == "." || name == "..") continue;
             if (name.size() > 5 && name.compare(name.size() - 5, 5, ".part") == 0) continue;
             FileEntry e;
@@ -122,8 +124,8 @@ public:
         return FileStatus::Ok;
     }
 
-    FileStatus stat(const std::string& volume, const std::string& path,
-                    FileEntry& out, std::string* detail) override
+    FileStatus stat(const string& volume, const string& path,
+                    FileEntry& out, string* detail) override
     {
         // The board's `FileManager::stat` refuses the volume root ("the root has
         // no metadata"), and this fake has to be just as strict: when it was not,
@@ -136,7 +138,7 @@ public:
 
         struct stat st = {};
         if (::stat(full(volume, path).c_str(), &st) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return (errno == ENOENT) ? FileStatus::NotFound : FileStatus::IoError;
         }
         out.isDir = S_ISDIR(st.st_mode);
@@ -145,32 +147,32 @@ public:
         return FileStatus::Ok;
     }
 
-    FileStatus mkdir(const std::string& volume, const std::string& path,
-                     std::string* detail) override
+    FileStatus mkdir(const string& volume, const string& path,
+                     string* detail) override
     {
         if (makeDir(full(volume, path)) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return (errno == EEXIST) ? FileStatus::AlreadyExists : FileStatus::IoError;
         }
         return FileStatus::Ok;
     }
 
-    FileStatus remove(const std::string& volume, const std::string& path,
-                      bool recursive, std::string* detail) override
+    FileStatus remove(const string& volume, const string& path,
+                      bool recursive, string* detail) override
     {
         struct stat st = {};
         if (::stat(full(volume, path).c_str(), &st) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return FileStatus::NotFound;
         }
         if (S_ISDIR(st.st_mode)) {
             if (recursive) {
-                std::vector<std::string> children;
+                vector<string> children;
                 DIR* dir = opendir(full(volume, path).c_str());
                 if (dir != nullptr) {
                     struct dirent* ent = nullptr;
                     while ((ent = readdir(dir)) != nullptr) {
-                        const std::string name = ent->d_name;
+                        const string name = ent->d_name;
                         if (name == "." || name == "..") continue;
                         children.push_back(path == "/" ? "/" + name : path + "/" + name);
                     }
@@ -182,57 +184,57 @@ public:
                 }
             }
             if (::rmdir(full(volume, path).c_str()) != 0) {
-                if (detail) *detail = std::strerror(errno);
+                if (detail) *detail = strerror(errno);
                 return (errno == ENOTEMPTY) ? FileStatus::NotEmpty : FileStatus::IoError;
             }
             return FileStatus::Ok;
         }
         if (::unlink(full(volume, path).c_str()) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return FileStatus::IoError;
         }
         return FileStatus::Ok;
     }
 
-    FileStatus rename(const std::string& volume, const std::string& from,
-                      const std::string& to, std::string* detail) override
+    FileStatus rename(const string& volume, const string& from,
+                      const string& to, string* detail) override
     {
         if (::rename(full(volume, from).c_str(), full(volume, to).c_str()) != 0) {
-            if (detail) *detail = std::strerror(errno);
+            if (detail) *detail = strerror(errno);
             return (errno == ENOENT) ? FileStatus::NotFound : FileStatus::IoError;
         }
         return FileStatus::Ok;
     }
 
-    FileStatus openRead(const std::string& volume, const std::string& path,
-                        std::unique_ptr<IFileSource>& out, std::string* detail) override
+    FileStatus openRead(const string& volume, const string& path,
+                        unique_ptr<IFileSource>& out, string* detail) override
     {
-        auto src = std::make_unique<FileSource>(full(volume, path));
+        auto src = make_unique<FileSource>(full(volume, path));
         if (!src->isOpen()) {
             if (detail) *detail = "cannot open the source";
             return FileStatus::IoError;
         }
-        out = std::move(src);
+        out = move(src);
         return FileStatus::Ok;
     }
 
-    FileStatus createWriter(const std::string& volume, const std::string& path,
-                            std::unique_ptr<IFileSink>& out, std::string* detail) override
+    FileStatus createWriter(const string& volume, const string& path,
+                            unique_ptr<IFileSink>& out, string* detail) override
     {
         if (writersFail) {
             if (detail) *detail = "destination is not writable";
             return FileStatus::IoError;
         }
-        auto sink = std::make_unique<FileSink>(full(volume, path));
+        auto sink = make_unique<FileSink>(full(volume, path));
         if (!sink->isOpen()) {
             if (detail) *detail = "cannot open the destination";
             return FileStatus::IoError;
         }
-        out = std::move(sink);
+        out = move(sink);
         return FileStatus::Ok;
     }
 
-    uint64_t freeBytes(const std::string& volume) override
+    uint64_t freeBytes(const string& volume) override
     {
         return volume == "a" ? freeA : freeB;
     }
@@ -264,16 +266,16 @@ struct Observer : ITransferObserver
 // Small helpers on top of the host filesystem
 // ─────────────────────────────────────────────────────
 
-static std::string g_root;
+static string g_root;
 
-static std::string tempBase()
+static string tempBase()
 {
-    const char* env = std::getenv("TEMP");
-    if (env == nullptr) env = std::getenv("TMP");
-    return (env != nullptr) ? std::string(env) : std::string(".");
+    const char* env = getenv("TEMP");
+    if (env == nullptr) env = getenv("TMP");
+    return (env != nullptr) ? string(env) : string(".");
 }
 
-static void rmTree(const std::string& path)
+static void rmTree(const string& path)
 {
     struct stat st = {};
     if (::stat(path.c_str(), &st) != 0) return;
@@ -282,7 +284,7 @@ static void rmTree(const std::string& path)
         if (dir != nullptr) {
             struct dirent* ent = nullptr;
             while ((ent = readdir(dir)) != nullptr) {
-                const std::string name = ent->d_name;
+                const string name = ent->d_name;
                 if (name == "." || name == "..") continue;
                 rmTree(path + "/" + name);
             }
@@ -294,9 +296,9 @@ static void rmTree(const std::string& path)
     ::unlink(path.c_str());
 }
 
-static bool mkdirs(const std::string& path)
+static bool mkdirs(const string& path)
 {
-    std::string acc;
+    string acc;
     for (size_t i = 0; i < path.size(); ++i) {
         acc += path[i];
         if (path[i] == '/' && acc.size() > 1) makeDir(acc);
@@ -304,43 +306,43 @@ static bool mkdirs(const std::string& path)
     return makeDir(path) == 0 || errno == EEXIST;
 }
 
-static void writeFile(const std::string& path, const std::string& data)
+static void writeFile(const string& path, const string& data)
 {
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (f == nullptr) { std::printf("  (cannot create %s)\n", path.c_str()); return; }
-    if (!data.empty()) std::fwrite(data.data(), 1, data.size(), f);
-    std::fclose(f);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (f == nullptr) { printf("  (cannot create %s)\n", path.c_str()); return; }
+    if (!data.empty()) fwrite(data.data(), 1, data.size(), f);
+    fclose(f);
 }
 
-static std::string readFile(const std::string& path)
+static string readFile(const string& path)
 {
-    FILE* f = std::fopen(path.c_str(), "rb");
+    FILE* f = fopen(path.c_str(), "rb");
     if (f == nullptr) return "<missing>";
-    std::string out;
+    string out;
     char buf[512];
     size_t n = 0;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
-    std::fclose(f);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+    fclose(f);
     return out;
 }
 
-static bool exists(const std::string& path)
+static bool exists(const string& path)
 {
     struct stat st = {};
     return ::stat(path.c_str(), &st) == 0;
 }
 
-static std::string repeat(char c, size_t n)
+static string repeat(char c, size_t n)
 {
-    return std::string(n, c);
+    return string(n, c);
 }
 
 // ─────────────────────────────────────────────────────
 // Cases
 // ─────────────────────────────────────────────────────
 
-static TransferRequest copyRequest(const std::vector<std::string>& paths,
-                                   const std::string& dst = "/")
+static TransferRequest copyRequest(const vector<string>& paths,
+                                   const string& dst = "/")
 {
     TransferRequest req;
     req.op = TransferOp::Copy;
@@ -354,7 +356,7 @@ static TransferRequest copyRequest(const std::vector<std::string>& paths,
 
 static void test_copy_one_file_crosses_volumes(HostFileOps& ops)
 {
-    std::printf("test_copy_one_file_crosses_volumes\n");
+    printf("test_copy_one_file_crosses_volumes\n");
     writeFile(g_root + "/volA/notes.txt", "hello transfer");
 
     Observer obs;
@@ -371,7 +373,7 @@ static void test_copy_one_file_crosses_volumes(HostFileOps& ops)
 
 static void test_move_deletes_the_source_only_after_the_copy(HostFileOps& ops)
 {
-    std::printf("test_move_deletes_the_source_only_after_the_copy\n");
+    printf("test_move_deletes_the_source_only_after_the_copy\n");
     writeFile(g_root + "/volA/move_me.txt", "payload");
 
     TransferRequest req = copyRequest({"/move_me.txt"});
@@ -388,7 +390,7 @@ static void test_move_deletes_the_source_only_after_the_copy(HostFileOps& ops)
 
 static void test_tree_is_copied_with_its_structure(HostFileOps& ops)
 {
-    std::printf("test_tree_is_copied_with_its_structure\n");
+    printf("test_tree_is_copied_with_its_structure\n");
     mkdirs(g_root + "/volA/tree/sub/deep");
     writeFile(g_root + "/volA/tree/a.txt", repeat('a', 100));
     writeFile(g_root + "/volA/tree/sub/b.txt", repeat('b', 200));
@@ -406,7 +408,7 @@ static void test_tree_is_copied_with_its_structure(HostFileOps& ops)
 
 static void test_move_of_a_tree_removes_the_whole_source(HostFileOps& ops)
 {
-    std::printf("test_move_of_a_tree_removes_the_whole_source\n");
+    printf("test_move_of_a_tree_removes_the_whole_source\n");
     mkdirs(g_root + "/volA/tree2/inner");
     writeFile(g_root + "/volA/tree2/x.bin", repeat('x', 4096));
     writeFile(g_root + "/volA/tree2/inner/y.bin", repeat('y', 5000));
@@ -425,7 +427,7 @@ static void test_move_of_a_tree_removes_the_whole_source(HostFileOps& ops)
 
 static void test_move_keeps_the_source_when_a_file_fails(HostFileOps& ops)
 {
-    std::printf("test_move_keeps_the_source_when_a_file_fails\n");
+    printf("test_move_keeps_the_source_when_a_file_fails\n");
     mkdirs(g_root + "/volA/tree3");
     writeFile(g_root + "/volA/tree3/good.bin", repeat('g', 300));
     writeFile(g_root + "/volA/tree3/bad.bin", repeat('b', 300));
@@ -450,13 +452,13 @@ static void test_move_keeps_the_source_when_a_file_fails(HostFileOps& ops)
 
 static void test_conflicts_are_found_without_a_walk(HostFileOps& ops)
 {
-    std::printf("test_conflicts_are_found_without_a_walk\n");
+    printf("test_conflicts_are_found_without_a_walk\n");
     writeFile(g_root + "/volA/c1.txt", "1");
     writeFile(g_root + "/volA/c2.txt", "2");
     writeFile(g_root + "/volB/c2.txt", "old");
 
-    std::vector<std::string> names;
-    std::string detail;
+    vector<string> names;
+    string detail;
     const FileStatus st = TransferEngine::conflicts(ops, copyRequest({"/c1.txt", "/c2.txt"}),
                                                     names, &detail);
 
@@ -466,7 +468,7 @@ static void test_conflicts_are_found_without_a_walk(HostFileOps& ops)
 
 static void test_skip_leaves_the_destination_and_the_source_alone(HostFileOps& ops)
 {
-    std::printf("test_skip_leaves_the_destination_and_the_source_alone\n");
+    printf("test_skip_leaves_the_destination_and_the_source_alone\n");
     writeFile(g_root + "/volA/skip_me.txt", "new");
     writeFile(g_root + "/volB/skip_me.txt", "old");
 
@@ -485,7 +487,7 @@ static void test_skip_leaves_the_destination_and_the_source_alone(HostFileOps& o
 
 static void test_overwrite_replaces_a_file_and_merges_a_directory(HostFileOps& ops)
 {
-    std::printf("test_overwrite_replaces_a_file_and_merges_a_directory\n");
+    printf("test_overwrite_replaces_a_file_and_merges_a_directory\n");
     mkdirs(g_root + "/volA/merge");
     writeFile(g_root + "/volA/merge/new.txt", "fresh");
     mkdirs(g_root + "/volB/merge");
@@ -504,10 +506,10 @@ static void test_overwrite_replaces_a_file_and_merges_a_directory(HostFileOps& o
 
 static void test_cancel_keeps_what_was_copied(HostFileOps& ops)
 {
-    std::printf("test_cancel_keeps_what_was_copied\n");
+    printf("test_cancel_keeps_what_was_copied\n");
     mkdirs(g_root + "/volA/big");
     for (int i = 0; i < 4; ++i) {
-        writeFile(g_root + "/volA/big/f" + std::to_string(i) + ".bin", repeat('z', 40000));
+        writeFile(g_root + "/volA/big/f" + to_string(i) + ".bin", repeat('z', 40000));
     }
 
     Observer obs;
@@ -524,11 +526,11 @@ static void test_cancel_keeps_what_was_copied(HostFileOps& ops)
 
 static void test_a_big_directory_is_copied_whole(HostFileOps& ops)
 {
-    std::printf("test_a_big_directory_is_copied_whole\n");
+    printf("test_a_big_directory_is_copied_whole\n");
     const int kCount = 520;   // more than IFileManager::kMaxListEntries
     mkdirs(g_root + "/volA/many");
     for (int i = 0; i < kCount; ++i) {
-        writeFile(g_root + "/volA/many/f" + std::to_string(i) + ".txt", "x");
+        writeFile(g_root + "/volA/many/f" + to_string(i) + ".txt", "x");
     }
 
     Observer obs;
@@ -542,7 +544,7 @@ static void test_a_big_directory_is_copied_whole(HostFileOps& ops)
 
 static void test_not_enough_space_is_refused_before_the_first_byte(HostFileOps& ops)
 {
-    std::printf("test_not_enough_space_is_refused_before_the_first_byte\n");
+    printf("test_not_enough_space_is_refused_before_the_first_byte\n");
     mkdirs(g_root + "/volA/huge");
     writeFile(g_root + "/volA/huge/big.bin", repeat('h', 200000));
 
@@ -562,7 +564,7 @@ static void test_not_enough_space_is_refused_before_the_first_byte(HostFileOps& 
 
 static void test_same_volume_move_is_an_instant_rename(HostFileOps& ops)
 {
-    std::printf("test_same_volume_move_is_an_instant_rename\n");
+    printf("test_same_volume_move_is_an_instant_rename\n");
     mkdirs(g_root + "/volA/here");
     writeFile(g_root + "/volA/here/inst.txt", "instant");
 
@@ -582,14 +584,14 @@ static void test_same_volume_move_is_an_instant_rename(HostFileOps& ops)
 
 static void test_a_destination_inside_the_source_is_refused(HostFileOps& ops)
 {
-    std::printf("test_a_destination_inside_the_source_is_refused\n");
+    printf("test_a_destination_inside_the_source_is_refused\n");
     mkdirs(g_root + "/volA/self/inner");
     writeFile(g_root + "/volA/self/inner/f.txt", "f");
 
     TransferRequest req = copyRequest({"/self"}, "/self/inner");
     req.dstVolume = "a";
 
-    std::string detail;
+    string detail;
     const FileStatus st = TransferEngine::validate(ops, req, &detail);
     check(st == FileStatus::InvalidPath, "a copy into its own subtree is refused");
 
@@ -606,7 +608,7 @@ static void test_a_destination_inside_the_source_is_refused(HostFileOps& ops)
 
 static void test_a_partial_failure_still_copies_the_rest(HostFileOps& ops)
 {
-    std::printf("test_a_partial_failure_still_copies_the_rest\n");
+    printf("test_a_partial_failure_still_copies_the_rest\n");
     mkdirs(g_root + "/volA/partial");
     writeFile(g_root + "/volA/partial/ok1.bin", repeat('1', 100));
     writeFile(g_root + "/volA/partial/ok2.bin", repeat('2', 100));
@@ -615,8 +617,8 @@ static void test_a_partial_failure_still_copies_the_rest(HostFileOps& ops)
     class PickyOps : public HostFileOps
     {
     public:
-        FileStatus createWriter(const std::string& volume, const std::string& path,
-                                std::unique_ptr<IFileSink>& out, std::string* detail) override
+        FileStatus createWriter(const string& volume, const string& path,
+                                unique_ptr<IFileSink>& out, string* detail) override
         {
             if (path == "/partial/ok1.bin") {
                 if (detail) *detail = "refused by the test";
@@ -640,13 +642,13 @@ static void test_a_partial_failure_still_copies_the_rest(HostFileOps& ops)
 
 static void test_a_copy_into_the_volume_root_is_accepted(HostFileOps& ops)
 {
-    std::printf("test_a_copy_into_the_volume_root_is_accepted\n");
+    printf("test_a_copy_into_the_volume_root_is_accepted\n");
     writeFile(g_root + "/volA/at_root.txt", "at root");
 
     // The destination is the root of the other volume — the only destination an
     // empty card or a freshly formatted partition offers, and the one the feature
     // is used with most often. It has to be accepted, and the file has to arrive.
-    std::string detail;
+    string detail;
     const FileStatus st = TransferEngine::validate(ops, copyRequest({"/at_root.txt"}, "/"),
                                                    &detail);
     check(st == FileStatus::Ok, "the volume root is a valid destination");
@@ -662,11 +664,11 @@ static void test_a_copy_into_the_volume_root_is_accepted(HostFileOps& ops)
 
 static void test_a_file_as_the_destination_is_refused(HostFileOps& ops)
 {
-    std::printf("test_a_file_as_the_destination_is_refused\n");
+    printf("test_a_file_as_the_destination_is_refused\n");
     writeFile(g_root + "/volB/not_a_dir.txt", "file");
     writeFile(g_root + "/volA/mover.txt", "data");
 
-    std::string detail;
+    string detail;
     const FileStatus st = TransferEngine::validate(ops, copyRequest({"/mover.txt"}, "/not_a_dir.txt"),
                                                    &detail);
     check(st == FileStatus::InvalidPath, "a file cannot be a destination folder");
@@ -704,9 +706,9 @@ int main()
     rmTree(g_root);
 
     if (g_fail != 0) {
-        std::printf("FAILED (%d checks)\n", g_fail);
+        printf("FAILED (%d checks)\n", g_fail);
     } else {
-        std::printf("PASSED!\n");
+        printf("PASSED!\n");
     }
     return 0;
 }

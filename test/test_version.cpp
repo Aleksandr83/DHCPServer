@@ -16,14 +16,16 @@
 // Simple test framework macros
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s\n", __FILE__, __LINE__, #a, #b); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, a, b); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, a, b); return 1; } } while(0)
+
+using namespace std;
 
 extern "C" {
 
 static int test_version_format()
 {
     const auto& ver = dhcp::core::Version::instance();
-    const std::string& str = ver.toString();
+    const string& str = ver.toString();
 
     printf("Version string: %s\n", str.c_str());
 
@@ -60,8 +62,8 @@ static int test_version_components()
 static int test_version_caching()
 {
     const auto& v = dhcp::core::Version::instance();
-    const std::string& s1 = v.toString();
-    const std::string& s2 = v.toString();
+    const string& s1 = v.toString();
+    const string& s2 = v.toString();
     TEST_ASSERT_TRUE(&s1 == &s2); // same cached object
     return 0;
 }

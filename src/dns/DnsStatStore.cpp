@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+using namespace std;
+
 namespace dhcp {
 namespace dns {
 
@@ -15,17 +17,17 @@ namespace {
 constexpr char kMagic[4] = {'D', 'S', 'T', '1'};
 
 /** @brief Append a little-endian unsigned value. */
-void putU32(std::string& out, uint32_t value)
+void putU32(string& out, uint32_t value)
 {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((value >> (8 * i)) & 0xFF));
 }
 
-void putU64(std::string& out, uint64_t value)
+void putU64(string& out, uint64_t value)
 {
     for (int i = 0; i < 8; ++i) out.push_back(static_cast<char>((value >> (8 * i)) & 0xFF));
 }
 
-uint32_t getU32(const std::string& in, size_t offset)
+uint32_t getU32(const string& in, size_t offset)
 {
     uint32_t value = 0;
     for (int i = 0; i < 4; ++i) {
@@ -34,7 +36,7 @@ uint32_t getU32(const std::string& in, size_t offset)
     return value;
 }
 
-uint64_t getU64(const std::string& in, size_t offset)
+uint64_t getU64(const string& in, size_t offset)
 {
     uint64_t value = 0;
     for (int i = 0; i < 8; ++i) {
@@ -44,7 +46,7 @@ uint64_t getU64(const std::string& in, size_t offset)
 }
 
 /** @brief Sum of the bytes of @p text (the file's own integrity check). */
-uint32_t checksumOf(const std::string& text)
+uint32_t checksumOf(const string& text)
 {
     uint32_t sum = 0;
     for (char c : text) sum += static_cast<unsigned char>(c);
@@ -53,9 +55,9 @@ uint32_t checksumOf(const std::string& text)
 
 } // namespace
 
-std::string DnsStatStore::encode(const DnsStatTotals& totals)
+string DnsStatStore::encode(const DnsStatTotals& totals)
 {
-    std::string out;
+    string out;
     out.reserve(kRecordSize);
     out.append(kMagic, sizeof(kMagic));
     putU32(out, kVersion);
@@ -77,13 +79,13 @@ std::string DnsStatStore::encode(const DnsStatTotals& totals)
     return out;
 }
 
-bool DnsStatStore::decode(const std::string& record, DnsStatTotals& out, std::string* why)
+bool DnsStatStore::decode(const string& record, DnsStatTotals& out, string* why)
 {
     if (record.size() != kRecordSize && record.size() != kRecordSizeLegacy) {
         if (why) *why = "unexpected size";
         return false;
     }
-    if (std::memcmp(record.data(), kMagic, sizeof(kMagic)) != 0) {
+    if (memcmp(record.data(), kMagic, sizeof(kMagic)) != 0) {
         if (why) *why = "not a statistics file";
         return false;
     }
@@ -125,9 +127,9 @@ bool DnsStatStore::decode(const std::string& record, DnsStatTotals& out, std::st
     return true;
 }
 
-bool DnsStatStore::save(const std::string& path, const DnsStatTotals& totals, std::string* why)
+bool DnsStatStore::save(const string& path, const DnsStatTotals& totals, string* why)
 {
-    const std::string record = encode(totals);
+    const string record = encode(totals);
 
     // Straight into the file, exactly like `cache.dat` (InternalDnsCache::saveToFile).
     //
@@ -143,15 +145,15 @@ bool DnsStatStore::save(const std::string& path, const DnsStatTotals& totals, st
     // version, payload size and checksum are checked on every load, so a torn file
     // is refused instead of being read as plausible numbers (the same protection
     // `cache.dat` relies on).
-    std::FILE* file = std::fopen(path.c_str(), "wb");
+    FILE* file = fopen(path.c_str(), "wb");
     if (file == nullptr) {
         if (why) *why = "cannot create the file";
         return false;
     }
 
-    const size_t written = std::fwrite(record.data(), 1, record.size(), file);
-    const bool flushed = std::fflush(file) == 0;
-    const bool closed = std::fclose(file) == 0;
+    const size_t written = fwrite(record.data(), 1, record.size(), file);
+    const bool flushed = fflush(file) == 0;
+    const bool closed = fclose(file) == 0;
 
     if (written != record.size() || !flushed || !closed) {
         if (why) *why = "write failed";
@@ -160,10 +162,10 @@ bool DnsStatStore::save(const std::string& path, const DnsStatTotals& totals, st
     return true;
 }
 
-bool DnsStatStore::saveWithRetry(const std::string& path, const DnsStatTotals& totals,
-                                 std::string* why, core::ErrorLogCore* log)
+bool DnsStatStore::saveWithRetry(const string& path, const DnsStatTotals& totals,
+                                 string* why, core::ErrorLogCore* log)
 {
-    std::string first;
+    string first;
     if (save(path, totals, &first)) return true;
 
     if (log) log->submit(core::LogLevel::Error, "stats",
@@ -177,7 +179,7 @@ bool DnsStatStore::saveWithRetry(const std::string& path, const DnsStatTotals& t
                          "retrying " + path + (removedDest ? " (the file was removed first)"
                                                           : " (there was no file to remove)"));
 
-    std::string second;
+    string second;
     if (save(path, totals, &second)) {
         if (log) log->submit(core::LogLevel::Warn, "stats",
                              "the second attempt saved " + path);
@@ -191,9 +193,9 @@ bool DnsStatStore::saveWithRetry(const std::string& path, const DnsStatTotals& t
     return false;
 }
 
-bool DnsStatStore::load(const std::string& path, DnsStatTotals& out, std::string* why)
+bool DnsStatStore::load(const string& path, DnsStatTotals& out, string* why)
 {
-    std::FILE* file = std::fopen(path.c_str(), "rb");
+    FILE* file = fopen(path.c_str(), "rb");
     if (file == nullptr) {
         if (why) *why = "no statistics file";
         return false;
@@ -203,27 +205,27 @@ bool DnsStatStore::load(const std::string& path, DnsStatTotals& out, std::string
     // length the header claims — a version 1 file is 44 bytes and must not be
     // refused just because this build writes 92.
     char buffer[kRecordSize];
-    const size_t got = std::fread(buffer, 1, sizeof(buffer), file);
-    std::fclose(file);
+    const size_t got = fread(buffer, 1, sizeof(buffer), file);
+    fclose(file);
     if (got < kHeaderBytes) {
         if (why) *why = "unexpected size";
         return false;
     }
-    const uint32_t payload = getU32(std::string(buffer, kHeaderBytes), kPayloadSizeOffset);
+    const uint32_t payload = getU32(string(buffer, kHeaderBytes), kPayloadSizeOffset);
     const size_t size = kHeaderBytes + payload + kChecksumBytes;
     if (size > got) {
         if (why) *why = "truncated file";
         return false;
     }
-    return decode(std::string(buffer, size), out, why);
+    return decode(string(buffer, size), out, why);
 }
 
-bool DnsStatStore::remove(const std::string& path)
+bool DnsStatStore::remove(const string& path)
 {
     return std::remove(path.c_str()) == 0;
 }
 
-bool DnsStatStore::exists(const std::string& path)
+bool DnsStatStore::exists(const string& path)
 {
     struct stat st {};
     return stat(path.c_str(), &st) == 0;

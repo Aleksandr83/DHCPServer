@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace files {
 
@@ -11,8 +13,8 @@ namespace {
 const char* TAG = "FileSource";
 }
 
-FileSource::FileSource(std::string path)
-    : path_(std::move(path))
+FileSource::FileSource(string path)
+    : path_(move(path))
 {
     struct stat st = {};
     if (stat(path_.c_str(), &st) == 0) {

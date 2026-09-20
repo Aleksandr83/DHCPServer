@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="security">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certificates — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="security_certificates.title">Certificates</h1>
+
+        <div class="card">
+            <p class="hint" data-i18n="security_certificates.desc">HTTPS uses a pair of files: a certificate and a private key.</p>
+            <p class="hint" id="cert-state"></p>
+            <p class="hint" id="cert-note"></p>
+        </div>
+
+        <div class="card">
+            <label data-i18n="security_certificates.storage">Storage</label>
+            <select id="cert-storage" onchange="changeStorage()"></select>
+            <p class="hint" data-i18n="security_certificates.storage_hint">The pair lives in the certs folder of the chosen volume.</p>
+            <p class="hint" id="cert-storage-state"></p>
+        </div>
+
+        <div class="card">
+            <h3 data-i18n="security_certificates.cert">Certificate</h3>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.subject">Name (subject)</span>
+                <span class="status-value" id="cert-subject">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.sans">Alternative names (SAN)</span>
+                <span class="status-value" id="cert-sans">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.valid_from">Valid from</span>
+                <span class="status-value" id="cert-valid-from">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.valid_until">Valid until</span>
+                <span class="status-value" id="cert-valid-until">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.days">Days left</span>
+                <span class="status-value" id="cert-days">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.cert_file">Certificate file</span>
+                <span class="status-value" id="cert-file">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.key_file">Key file</span>
+                <span class="status-value" id="cert-key-file">--</span>
+            </div>
+            <div class="status-row">
+                <span class="status-label" data-i18n="security_certificates.path">Path</span>
+                <span class="status-value" id="cert-path">--</span>
+            </div>
+
+            <button class="btn btn-primary" id="cert-generate" onclick="generateCertificate()" data-i18n="security_certificates.generate">Generate</button>
+            <button class="btn" id="cert-download" onclick="downloadCertificate()" data-i18n="security_certificates.download">Download certificate</button>
+            <button class="btn btn-danger" id="cert-delete" onclick="deleteCertificate()" data-i18n="security_certificates.delete">Delete</button>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // Certificates page (Settings -> Security -> Certificates). It owns the
+        // pair of files HTTPS runs on: on which volume they live, whether they
+        // are still usable, and the three actions on them.
+        //
+        // What it deliberately cannot do is show or fetch the private key: the
+        // device has no endpoint that would hand it out (see CertStore.h). The
+        // Download button asks for /api/security/certificates/download, which
+        // reads `server.crt` and never opens `server.key`.
+        //
+        // The pair is the input of a listener that is already running, so an
+        // action that changes it cannot be answered with "done" alone: the device
+        // reports `https_restart` and switches TLS *after* the answer has left (a
+        // listener must not be closed from inside its own request). The page
+        // therefore waits and reads the state again — and that read may fail
+        // once, because the connection it runs on is the one being replaced.
+        const kRestartWaitMs = 1500;   // the switch runs 400 ms after the answer
+        const kReadAttempts = 3;       // a replaced listener refuses a first try
+        const kReadRetryMs = 1000;
+
+        let certData = null;
+        let certNoteKey = '';
+        // Set while the last read failed: the state line then carries that key, so
+        // a language switch re-renders it as a sentence instead of leaving behind
+        // the key rendered before the dictionary arrived.
+        let certFailKey = '';
+
+        // Certificate dates are UTC (X.509 carries them that way) while the device
+        // clock is local time, so the two are not the same number: the date is
+        // printed as UTC with the unit spelled out instead of being silently
+        // shifted into the browser's timezone.
+        function certDate(epoch) {
+            const sec = Number(epoch) || 0;
+            if (sec <= 0) return '--';
+            const iso = new Date(sec * 1000).toISOString();
+            return iso.slice(0, 16).replace('T', ' ') + ' UTC';
+        }
+
+        function certVolume(id) {
+            return ((certData && certData.volumes) || []).find(v => v.id === id) || null;
+        }
+
+        function certVolumeName(id) {
+            if (id === 'sdcard') return tr('security_certificates.vol_sdcard');
+            if (id === 'internal') return tr('security_certificates.vol_internal');
+            return id || '--';
+        }
+
+        function certSet(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+
+        // The note survives a language switch: the key is what is stored, not the
+        // sentence already rendered in the previous language.
+        function certNote(key) {
+            certNoteKey = key || '';
+            certSet('cert-note', certNoteKey ? tr(certNoteKey) : '');
+        }
+
+        // The state line is one sentence about the chosen volume, built from the
+        // state the device reports (the cert_state.* words) plus what it says
+        // about the volume itself. It is plain text on purpose: the wording says
+        // which state the pair is in, so a colour would only repeat it.
+        function renderCertState() {
+            const el = document.getElementById('cert-state');
+            if (!el) return;
+            if (certFailKey) {                      // the read failed, not the volume
+                el.textContent = tr(certFailKey);
+                return;
+            }
+            if (!certData) return;                  // nothing read yet
+            if (certData.storage === 'none') {
+                el.textContent = tr('cert_state.no_store');
+                return;
+            }
+            el.textContent = tr('security_certificates.state_prefix') + ' ' +
+                             certVolumeName(certData.storage) + ': ' +
+                             tr('cert_state.' + (certData.state || 'unknown'));
+        }
+
+        function renderCertVolumes() {
+            const select = document.getElementById('cert-storage');
+            if (!select) return;
+            const wanted = (certData && certData.storage) || '';
+            select.innerHTML = '';
+            ((certData && certData.volumes) || []).forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.id;
+                opt.textContent = certVolumeName(v.id) + ' (' + v.mount + ')';
+                opt.selected = v.id === wanted;
+                select.appendChild(opt);
+            });
+            // A build without a volume for the pair has nothing to choose, and a
+            // picker offering a choice the device cannot take is worse than no
+            // picker at all.
+            select.disabled = !certData || certData.volumes.length === 0;
+
+            const current = certVolume(wanted);
+            certSet('cert-storage-state', !current ? '' :
+                tr('security_certificates.vol_state') + ': ' +
+                (current.present ? tr('security_certificates.vol_has_pair')
+                                 : tr('security_certificates.vol_no_pair')));
+        }
+
+        // ─── The name and the period of the next certificate ───
+        // Both belong to the operator and both are asked for in the dialog that
+        // the Create button opens: the page carries the state of the pair it
+        // already has, and the settings a new one would be made with live in the
+        // request, not on the page. The name is what a browser has to be asked to
+        // accept; the period is how long that acceptance lasts. The device keeps
+        // the name, so it comes back as the value the dialog opens with.
+        /** @brief What the dialog offers, taken from the device's own answer. */
+        function certChoices() {
+            const cert = (certData && certData.cert) || {};
+            return {
+                name: cert.name || '',
+                // An empty field means a name the device chose, and it is the one
+                // that knows it (`default_name`) — the page does not write the
+                // constant down a second time.
+                defaultName: cert.default_name || cert.name || '',
+                years: String(cert.validity_years || ''),
+                options: (cert.validity_options || []).map(y => ({
+                    value: String(y),
+                    label: certValidityLabel(Number(y)),
+                })),
+            };
+        }
+
+        /** @brief The name a request would carry: what is typed, else the default. */
+        function certNameOf(typed, choices) {
+            return typed || choices.defaultName;
+        }
+
+        /** @brief The decision the dialog is about to make, as one sentence. */
+        function certNewSentence(typed, years, choices) {
+            const cert = (certData && certData.cert) || {};
+            const period = Number(years) > 0
+                ? ' \u2014 ' + tr('security_certificates.new_validity') + ': ' +
+                  certValidityLabel(Number(years))
+                : '';
+            return tr('security_certificates.new_subject') + ': ' +
+                   certNameOf(typed, choices) + ', ' + (cert.ip || '') + period;
+        }
+
+        // A period is written as a whole phrase from the dictionary ("5 лет",
+        // "5 years"), because a counted noun needs plural forms — there is one key
+        // per offered period. A period the dictionary does not know yet (the device
+        // table moved ahead of the page) is shown as a number with the bare unit
+        // instead of a missing key.
+        function certValidityLabel(years) {
+            const key = 'security_certificates.validity_' + years;
+            const text = tr(key);
+            return text === key
+                ? years + ' ' + tr('security_certificates.years_unit')
+                : text;
+        }
+
+        function renderCertInfo() {
+            const cert = (certData && certData.cert) || {};
+            const present = !!cert.present;
+            certSet('cert-subject', cert.subject || '--');
+            certSet('cert-sans', cert.sans || '--');
+            certSet('cert-valid-from', certDate(cert.not_before));
+            certSet('cert-valid-until', certDate(cert.not_after));
+            // The days are counted by the device (certDaysLeft) and only for a
+            // pair that parsed: a "0" next to an unreadable file would be read as
+            // "expired", which it is not.
+            certSet('cert-days', cert.valid
+                ? String(cert.days_left) + ' ' + tr('security_certificates.days_unit')
+                : '--');
+            certSet('cert-file', present ? formatBytes(cert.cert_bytes) : '--');
+            certSet('cert-key-file', present ? formatBytes(cert.key_bytes) : '--');
+            certSet('cert-path', cert.path || '--');
+
+            // The buttons follow the state of the pair: a Download of a file that
+            // is not there and a Delete of nothing are both refused by the device,
+            // so offering them would only produce an error message.
+            const available = !!certData && certData.storage !== 'none' && !!certData.available;
+            const generate = document.getElementById('cert-generate');
+            const download = document.getElementById('cert-download');
+            const del = document.getElementById('cert-delete');
+            if (generate) generate.disabled = !available;
+            if (download) download.disabled = !present;
+            if (del) del.disabled = !available || !present;
+        }
+
+        function renderCertificates() {
+            renderCertState();
+            renderCertVolumes();
+            renderCertInfo();
+            certSet('cert-note', certNoteKey ? tr(certNoteKey) : '');
+        }
+
+        async function loadCertificates(attempts) {
+            const tries = attempts || 1;
+            for (let i = 0; i < tries; i++) {
+                try {
+                    certFailKey = '';
+                    certData = await fetchJSON('/api/security/certificates');
+                    renderCertificates();
+                    return true;
+                } catch (e) {
+                    // The most likely reason after a certificate change is the
+                    // listener being replaced under this very page: that is worth
+                    // another try, and only then a word to the operator.
+                    if (i + 1 < tries) await sleep(kReadRetryMs);
+                }
+            }
+            certFailKey = 'security_certificates.read_failed';
+            renderCertState();
+            certNote('security_certificates.read_failed_hint');
+            return false;
+        }
+
+        async function certAction(body, okKey) {
+            let result = null;
+            try {
+                result = await postJSON('/api/security/certificates', body);
+            } catch (e) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('common.unknown_error'),
+                                   hideCancel: true });
+                return;
+            }
+            if (result && result.status === 'error') {
+                // The device's own words become the hint: its reasons are specific
+                // ("the volume /sdcard is not available", "the device clock is not
+                // set yet") and each names what to do next.
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                await loadCertificates(kReadAttempts);
+                return;
+            }
+            certNote(okKey);
+            if (result && result.https_restart) {
+                // HTTPS was on, so the pair it serves was just replaced: the new
+                // one is picked up by a restart that is already on its way.
+                certNote('security_certificates.https_switch');
+                await sleep(kRestartWaitMs);
+            }
+            await loadCertificates(kReadAttempts);
+        }
+
+        async function generateCertificate() {
+            if (!certData) return;
+            const cert = certData.cert || {};
+            const choices = certChoices();
+            // Generating replaces the pair on the chosen volume, and the device's
+            // answer would be the only trace of what was overwritten — so the
+            // settings are asked for here, and the line above them says what
+            // pressing Create will do as they change.
+            const answer = await showFieldDialog({
+                title: tr('security_certificates.generate'),
+                hintFor: (v) => certNewSentence(v.text, v.select, choices),
+                textLabel: tr('security_certificates.name'),
+                textValue: choices.name,
+                textHint: tr('security_certificates.name_hint'),
+                selectLabel: tr('security_certificates.validity'),
+                selectOptions: choices.options,
+                selectValue: choices.years,
+                selectHint: tr('security_certificates.validity_hint'),
+                warn: cert.present
+                    ? tr('security_certificates.generate_confirm')
+                    : tr('security_certificates.generate_new'),
+                okLabel: tr('security_certificates.generate'),
+            });
+            if (!answer) return;
+            const body = { action: 'generate' };
+            // An empty field is not an empty name: it is the device's default one,
+            // and it is sent as a name so that clearing the field means exactly what
+            // the line in the dialog said it means.
+            const name = certNameOf(answer.text, choices);
+            if (name) body.name = name;
+            const years = Number(answer.select);
+            if (Number.isFinite(years) && years > 0) body.years = years;
+            await certAction(body, 'security_certificates.generated');
+        }
+
+        async function deleteCertificate() {
+            const answer = await showDialog({
+                title: tr('security_certificates.delete'),
+                hint: tr('security_certificates.delete_confirm'),
+                okLabel: tr('security_certificates.delete'),
+                danger: true,
+            });
+            if (answer !== true) return;
+            await certAction({ action: 'delete' }, 'security_certificates.deleted');
+        }
+
+        async function downloadCertificate() {
+            let resp = null;
+            try {
+                resp = await apiFetch('/api/security/certificates/download');
+            } catch (e) {
+                resp = null;
+            }
+            if (!resp || !resp.ok) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('security_certificates.download_failed'),
+                                   hideCancel: true });
+                return;
+            }
+            // The answer is the PEM text of the certificate; the file name is
+            // fixed here as it is on the device, so the two cannot drift apart.
+            const blob = new Blob([await resp.text()], { type: 'application/x-pem-file' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'server.crt';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            certNote('security_certificates.downloaded');
+        }
+
+        async function changeStorage() {
+            const select = document.getElementById('cert-storage');
+            if (!select || !certData) return;
+            const target = select.value;
+            if (!target || target === certData.storage) return;
+
+            // The pair can be carried over, and the operator is the one who
+            // decides: moving a running HTTPS server to an empty folder would
+            // leave it without a certificate to serve. Three answers, because "no"
+            // here means two different things — "switch anyway, do not copy" and
+            // "cancel, change nothing at all".
+            let copy = false;
+            const from = certVolume(certData.storage);
+            const to = certVolume(target);
+            if (from?.present && to && !to.present) {
+                const answer = await showDialog({
+                    title: tr('security_certificates.copy_title'),
+                    hint: certVolumeName(from.id) + ' \u2192 ' + certVolumeName(to.id) +
+                          '. ' + tr('security_certificates.copy_hint'),
+                    okLabel: tr('security_certificates.copy_ok'),
+                    extraLabel: tr('security_certificates.copy_skip'),
+                });
+                if (answer === null) {
+                    renderCertVolumes();       // cancelled: the picker goes back
+                    return;
+                }
+                copy = answer === true;
+            }
+            await certAction({ action: 'storage', storage: target, copy: copy },
+                             'security_certificates.storage_saved');
+        }
+
+        loadCertificates();
+
+        // Everything on this page is built with tr(), which returns the key until
+        // the dictionary is loaded, so the render runs again on every language
+        // switch — the picker labels, the state line and the note included.
+        document.addEventListener('i18n-applied', renderCertificates);
+    </script>
+</body>
+</html>

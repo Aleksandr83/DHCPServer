@@ -27,45 +27,166 @@
 
             <button class="btn btn-primary" onclick="saveSecuritySettings()" data-i18n="security.save">Save</button>
         </div>
+
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="security.https_title">HTTPS</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="auth-https" onchange="httpsChanged()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="security.https_hint">The certificate and its key are managed on the Certificates page (Settings -> Security). The address of the interface becomes https:// once the switch is on.</p>
+            <p class="hint" id="auth-https-state"></p>
+            <p class="hint" id="auth-https-note"></p>
+        </div>
     </main>
 
     <div id="footer-placeholder"></div>
     <script src="../js/app.js"></script>
     <script>
+        // Security settings page (Settings -> Security -> General). The HTTPS
+        // switch lives here because it belongs to the same stored object as the
+        // login and the lockout; its certificate is a page of its own
+        // (certs.html), and that page is where a pair is made.
+        //
+        // The device owns the switch: it applies it only when the certificate can
+        // serve it, and the answer carries the reason when it cannot. A switch
+        // that silently stayed on with no listener behind it is exactly the state
+        // the operator would notice by losing the interface.
+        let securityState = null;
+        let httpsNoteKey = '';
+        let httpsSaving = false;
+        // What the device said when the page was opened. The warning belongs to a
+        // switch the operator flipped here, not to one that was already on before
+        // he arrived; keeping it as "at load" is also what lets the sentence
+        // survive the read-back that follows the save and a language switch.
+        let httpsAtLoad = null;
+
+        function httpsStateText() {
+            const el = document.getElementById('auth-https-state');
+            if (!el || !securityState) return;
+            const state = tr('cert_state.' + (securityState.https_status || 'unknown'));
+            el.textContent = securityState.https_available
+                ? tr('security.https_state') + ': ' + state
+                : tr('security.https_cannot') + ': ' + state;
+        }
+
+        // The note is kept as a key, not as a rendered sentence: a language switch
+        // has to be able to say the same thing in the new language, and the key is
+        // the only form that survives the switch.
+        function httpsNote(key) {
+            httpsNoteKey = key || '';
+            const el = document.getElementById('auth-https-note');
+            if (el) el.textContent = httpsNoteKey ? tr(httpsNoteKey) : '';
+        }
+
         async function loadSecuritySettings() {
             const data = await fetchJSON('/api/security/settings');
+            securityState = data;
             document.getElementById('auth-username').value = data.username || '';
             document.getElementById('auth-password').value = '';
             document.getElementById('auth-max-attempts').value = data.max_attempts || 5;
             document.getElementById('auth-lockout-period').value = data.lockout_period || 300;
+            const https = document.getElementById('auth-https');
+            https.checked = !!data.https_enabled;
+            if (httpsAtLoad === null) httpsAtLoad = !!data.https_enabled;
+            // The switch is locked only when there is nothing to switch ON and it
+            // is already off. A switch that is on stays usable even if the
+            // certificate went missing: leaving the operator unable to turn HTTPS
+            // off would be the worse state of the two.
+            https.disabled = !data.https_available && !data.https_enabled;
+            httpsStateText();
         }
 
-        async function saveSecuritySettings() {
+        // The warning appears with the switch the operator flips, and stays while
+        // it is on: turning HTTPS on changes the address of the interface, and the
+        // browser will complain about a certificate it has not been told to
+        // trust. A switch that was already on when the page opened says nothing
+        // — the operator did that himself, possibly long ago.
+        //
+        // The sentence is drawn on its own, because it is also redrawn when the
+        // dictionary is applied, and a language switch must not save anything.
+        function refreshHttpsNote() {
+            const https = document.getElementById('auth-https');
+            const wasOn = httpsAtLoad === true;
+            if (https.checked && !wasOn) {
+                httpsNote('security.https_on_note');
+            } else if (httpsNoteKey !== 'security.https_read_failed') {
+                httpsNote('');
+            }
+        }
+
+        // The switch saves itself: it is the only field of its own card, so
+        // flipping it *is* the intent to apply it, and the Save button above
+        // belongs to the login card and was easy to walk past (stage 166). The
+        // request still carries the whole form — the device fills in defaults for
+        // whatever it is not sent, so a partial request would reset the fields
+        // above — and a quick double flip must not start two switches.
+        async function httpsChanged() {
+            if (httpsSaving) return;
+            refreshHttpsNote();
+            await saveSecuritySettings({ quiet: true });
+        }
+
+        // `quiet` is set when the switch saves itself: the "saved" dialog would
+        // interrupt on every flip and say nothing new. A refusal always speaks,
+        // whatever called it — the reason is the whole point of that answer.
+        async function saveSecuritySettings(options) {
+            const quiet = !!(options && options.quiet);
             const payload = {
                 username: document.getElementById('auth-username').value,
                 max_attempts: parseInt(document.getElementById('auth-max-attempts').value) || 5,
                 lockout_period: parseInt(document.getElementById('auth-lockout-period').value) || 300,
+                https_enabled: document.getElementById('auth-https').checked,
             };
             const pass = document.getElementById('auth-password').value;
             if (pass) payload.password = pass;
 
-            const result = await postJSON('/api/security/settings', payload);
+            // The switch is held while the request is in flight: it shows that
+            // the device is being asked, and it keeps a second flip from sending
+            // a second switch for the same certificate.
+            const https = document.getElementById('auth-https');
+            httpsSaving = true;
+            https.disabled = true;
+            let result = null;
+            try {
+                result = await postJSON('/api/security/settings', payload);
+            } finally {
+                httpsSaving = false;
+            }
             // The answer is read here like on every other page: a device that
             // refuses the change (a password too short, a user name it will not
-            // take) must not be reported as a success. This page used to ignore
-            // the answer and say "saved" no matter what came back.
+            // take, an HTTPS switch it cannot serve) must not be reported as a
+            // success. This page used to ignore the answer and say "saved" no
+            // matter what came back.
             if (result && result.status === 'error') {
                 await showDialog({ title: tr('common.error'),
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
-                return;
+            } else if (!quiet) {
+                await showDialog({ title: tr('security.saved'),
+                                   hideCancel: true });
             }
-            await showDialog({ title: tr('security.saved'),
-                               hideCancel: true });
+            // Read back either way: a refused switch must leave the control
+            // showing what is really listening, not what was asked for — and the
+            // read is also what unlocks it again.
+            await loadSecuritySettings();
         }
 
         // Load settings on page load
-        loadSecuritySettings();
+        loadSecuritySettings().catch(() => {
+            // The reason a settings read failed is worth saying: without it the
+            // page looks like any other page whose fields happen to be empty.
+            httpsNote('security.https_read_failed');
+        });
+
+        // The state line and the note are built with tr(), which returns the key
+        // until the dictionary is loaded, so both are re-rendered on a switch.
+        document.addEventListener('i18n-applied', () => {
+            httpsStateText();
+            refreshHttpsNote();
+        });
     </script>
 </body>
 </html>

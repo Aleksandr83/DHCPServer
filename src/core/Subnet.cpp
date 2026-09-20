@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+using namespace std;
+
 namespace dhcp {
 namespace core {
 
@@ -25,7 +27,7 @@ bool isSpace(char c)
 
 } // namespace
 
-bool Subnet::parseIp4(const std::string& text, uint32_t& out)
+bool Subnet::parseIp4(const string& text, uint32_t& out)
 {
     size_t begin = 0;
     size_t end = text.size();
@@ -106,15 +108,15 @@ int Subnet::prefixLength(uint32_t mask)
     return kIpv4Bits - hostBits(mask);
 }
 
-std::string Subnet::toString(uint32_t addr)
+string Subnet::toString(uint32_t addr)
 {
     char buf[kIp4TextLen];
-    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
                   static_cast<unsigned>((addr >> (3 * kOctetBits)) & kLowByteMask),
                   static_cast<unsigned>((addr >> (2 * kOctetBits)) & kLowByteMask),
                   static_cast<unsigned>((addr >> kOctetBits) & kLowByteMask),
                   static_cast<unsigned>(addr & kLowByteMask));
-    return std::string(buf);
+    return string(buf);
 }
 
 } // namespace core

@@ -38,16 +38,18 @@
                              app.js reveals it when /api/status reports files_enabled. -->
                         <a href="/pages/files.html" id="nav-files" data-i18n="nav.files" style="display:none;">Files</a>
                         <!-- Security is a group of its own inside Settings: it has
-                             more than one page now (General and the allow-list),
-                             and the allow-list used to sit under DHCP where it had
-                             nothing to do with handing out addresses. Clicking the
-                             group expands it in place (app.js: toggleSubmenu). -->
+                             more than one page now (General, the allow-list and the
+                             certificates), and the allow-list used to sit under DHCP
+                             where it had nothing to do with handing out addresses.
+                             Clicking the group expands it in place (app.js:
+                             toggleSubmenu). -->
                         <div class="nav-submenu">
                             <button type="button" class="nav-submenu-toggle"
                                     onclick="toggleSubmenu(event)" data-i18n="nav.security">Security</button>
                             <div class="nav-submenu-list">
                                 <a href="/pages/security.html" data-i18n="nav.security_general">General</a>
                                 <a href="/pages/security_allowed.html" data-i18n="nav.security_allowed">Allowed computers</a>
+                                <a href="/pages/certs.html" data-i18n="nav.security_certificates">Certificates</a>
                             </div>
                         </div>
                         <a href="/pages/settings_import.html" data-i18n="nav.settings_import">Import</a>

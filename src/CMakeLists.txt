@@ -14,6 +14,7 @@ set(DHCPSERVER_SRC_DIRS
     "web"
     "storage"
     "files"
+    "security"
     "led"
     "menu")
 
@@ -23,6 +24,7 @@ set(DHCPSERVER_SRC_DIRS
 set(DHCPSERVER_REQUIRES
     esp_http_client
     esp_http_server
+    esp_https_server
     esp_netif
     lwip
     esp_eth

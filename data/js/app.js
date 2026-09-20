@@ -255,12 +255,28 @@ function uiDialog() {
     modal.className = 'modal-backdrop';
     modal.id = 'ui-modal';
     modal.style.display = 'none';
+    // The markup carries every row a dialog may need — a hint line, a labelled
+    // text field with a clear button, a labelled list, a warning line under them —
+    // and each call displays only the rows it fills. Two rows are always there:
+    // the title and the buttons.
     modal.innerHTML =
         '<div class="modal-card" role="dialog" aria-modal="true">' +
         '<h3 id="ui-modal-title"></h3>' +
         '<p class="hint" id="ui-modal-hint" style="display:none;"></p>' +
-        '<input type="text" id="ui-modal-input" style="display:none;" maxlength="' +
-        kNameInputMaxLen + '">' +
+        '<div class="modal-field" id="ui-modal-input-field" style="display:none;">' +
+        '<label for="ui-modal-input" id="ui-modal-input-label"></label>' +
+        '<div class="field-with-clear">' +
+        '<input type="text" id="ui-modal-input" maxlength="' + kNameInputMaxLen + '">' +
+        '<button type="button" class="field-clear" id="ui-modal-clear">&#215;</button>' +
+        '</div>' +
+        '<p class="hint" id="ui-modal-input-hint" style="display:none;"></p>' +
+        '</div>' +
+        '<div class="modal-field" id="ui-modal-select-field" style="display:none;">' +
+        '<label for="ui-modal-select" id="ui-modal-select-label"></label>' +
+        '<select id="ui-modal-select"></select>' +
+        '<p class="hint" id="ui-modal-select-hint" style="display:none;"></p>' +
+        '</div>' +
+        '<p class="hint" id="ui-modal-warn" style="display:none;"></p>' +
         '<div class="modal-actions">' +
         '<button class="btn" id="ui-modal-cancel"></button>' +
         '<button class="btn" id="ui-modal-extra" style="display:none;"></button>' +
@@ -268,13 +284,21 @@ function uiDialog() {
         '</div></div>';
     document.body.appendChild(modal);
 
-    document.getElementById('ui-modal-ok').onclick = () => {
-        const input = document.getElementById('ui-modal-input');
-        closeDialog(input.style.display === 'none' ? true : input.value.trim());
+    // A button that would clear an empty field has nothing to say, so it appears
+    // with the first character typed and goes away with the last one.
+    const input = document.getElementById('ui-modal-input');
+    input.oninput = () => showDialogClear(input.value.length > 0);
+    document.getElementById('ui-modal-clear').onclick = () => {
+        input.value = '';
+        // The field is emptied the same way typing would empty it, so whoever
+        // listens to it reacts — the clear button itself, and the sentence of a
+        // multi-field dialog that has to follow the text.
+        input.dispatchEvent(new Event('input'));
+        input.focus();
     };
     document.getElementById('ui-modal-extra').onclick = () => closeDialog('extra');
     document.getElementById('ui-modal-cancel').onclick = () => closeDialog(null);
-    document.getElementById('ui-modal-input').onkeydown = (e) => {
+    input.onkeydown = (e) => {
         if (e.key === 'Enter') document.getElementById('ui-modal-ok').click();
         if (e.key === 'Escape') closeDialog(null);
     };
@@ -285,6 +309,32 @@ function uiDialog() {
     return modal;
 }
 
+/** @brief The clear button of the text field, drawn only while there is text. */
+function showDialogClear(show) {
+    const button = document.getElementById('ui-modal-clear');
+    if (button) button.style.display = show ? '' : 'none';
+}
+
+/** @brief One line of a dialog: `key` is its element id, an empty text hides it. */
+function showDialogLine(key, text) {
+    const el = document.getElementById(key);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.display = text ? '' : 'none';
+}
+
+/** @brief The list of a dialog as a value/label pair per option. */
+function showDialogOptions(select, options, wanted) {
+    select.innerHTML = '';
+    (options || []).forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        select.appendChild(opt);
+    });
+    select.value = wanted || '';
+}
+
 function closeDialog(result) {
     const modal = document.getElementById('ui-modal');
     if (modal) modal.style.display = 'none';
@@ -293,20 +343,36 @@ function closeDialog(result) {
     if (resolve) resolve(result);
 }
 
+/** @brief What the OK button of the open dialog answers (`true` when it only confirms). */
+function setDialogOk(answer) {
+    document.getElementById('ui-modal-ok').onclick = () => closeDialog(answer());
+}
+
 function showDialog({ title, hint, value, okLabel, cancelLabel, danger,
                       withInput, extraLabel, hideCancel }) {
     const modal = uiDialog();
     const input = document.getElementById('ui-modal-input');
-    const hintEl = document.getElementById('ui-modal-hint');
     const ok = document.getElementById('ui-modal-ok');
     const extra = document.getElementById('ui-modal-extra');
 
     document.getElementById('ui-modal-title').textContent = title;
-    hintEl.textContent = hint || '';
-    hintEl.style.display = hint ? '' : 'none';
+    showDialogLine('ui-modal-hint', hint);
 
-    input.style.display = withInput ? '' : 'none';
+    // This entry point asks one question, so it uses two rows: the text field
+    // (when there is something to type) and the buttons.
+    const inputField = document.getElementById('ui-modal-input-field');
+    inputField.style.display = withInput ? '' : 'none';
+    // The dialog carries a label for the multi-field call, but here the title
+    // already names what is typed, and an empty label would leave a gap.
+    document.getElementById('ui-modal-input-label').style.display = 'none';
+    document.getElementById('ui-modal-input-hint').style.display = 'none';
     input.value = withInput ? (value || '') : '';
+    // Each call takes the field over: a dialog that was opened earlier must not
+    // keep rewriting this one's hint line as the operator types.
+    input.oninput = () => showDialogClear(withInput && input.value.length > 0);
+    showDialogClear(withInput && input.value.length > 0);
+    document.getElementById('ui-modal-select-field').style.display = 'none';
+    document.getElementById('ui-modal-warn').style.display = 'none';
 
     ok.textContent = okLabel || tr('common.ok');
     ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
@@ -318,8 +384,79 @@ function showDialog({ title, hint, value, okLabel, cancelLabel, danger,
     extra.textContent = extraLabel || '';
     extra.style.display = extraLabel ? '' : 'none';
 
+    setDialogOk(() => withInput ? input.value.trim() : true);
+
     modal.style.display = 'flex';
     if (withInput) {
+        input.focus();
+        input.select();
+    } else {
+        ok.focus();
+    }
+    return new Promise(resolve => { uiDialogResolve = resolve; });
+}
+
+/* A dialog that asks for several settings of one action at once (the certificate
+   page: under which name and for how long the pair is about to be issued). It
+   answers `{ text, select }` on OK and `null` on every way out — Cancel, Escape —
+   because a dialog that was closed decided nothing.
+
+   `hintFor(values)` is called with the fields as they stand, on every change as
+   well as on opening: the line above them says what pressing OK will do, and such
+   a line has to follow the typing or it describes the previous decision. */
+function showFieldDialog({ title, hintFor, textLabel, textValue, textHint,
+                           selectLabel, selectOptions, selectValue, selectHint,
+                           warn, okLabel }) {
+    const modal = uiDialog();
+    const input = document.getElementById('ui-modal-input');
+    const select = document.getElementById('ui-modal-select');
+
+    const values = () => ({ text: input.value.trim(), select: select.value });
+
+    document.getElementById('ui-modal-title').textContent = title;
+
+    const textField = document.getElementById('ui-modal-input-field');
+    const hasText = !!textLabel;
+    textField.style.display = hasText ? '' : 'none';
+    const inputLabel = document.getElementById('ui-modal-input-label');
+    inputLabel.textContent = textLabel || '';
+    inputLabel.style.display = '';
+    showDialogLine('ui-modal-input-hint', hasText ? textHint : '');
+    input.value = textValue || '';
+    showDialogClear(hasText && input.value.length > 0);
+
+    const selectField = document.getElementById('ui-modal-select-field');
+    const hasSelect = !!(selectOptions && selectOptions.length > 0);
+    selectField.style.display = hasSelect ? '' : 'none';
+    document.getElementById('ui-modal-select-label').textContent = selectLabel || '';
+    showDialogLine('ui-modal-select-hint', hasSelect ? selectHint : '');
+    showDialogOptions(select, selectOptions, selectValue);
+
+    showDialogLine('ui-modal-warn', warn);
+
+    // The sentence comes after both fields are filled: it is written from what
+    // they hold, so it has to be the last thing drawn above the buttons.
+    const refresh = () => { if (hintFor) showDialogLine('ui-modal-hint', hintFor(values())); };
+    refresh();
+
+    input.oninput = () => {
+        showDialogClear(input.value.length > 0);
+        refresh();
+    };
+    select.onchange = refresh;
+
+    const ok = document.getElementById('ui-modal-ok');
+    ok.textContent = okLabel || tr('common.ok');
+    ok.className = 'btn btn-primary';
+    const cancel = document.getElementById('ui-modal-cancel');
+    cancel.textContent = tr('common.cancel');
+    cancel.style.display = '';
+    document.getElementById('ui-modal-extra').style.display = 'none';
+
+    setDialogOk(values);
+
+    modal.style.display = 'flex';
+    if (hasText) {
         input.focus();
         input.select();
     } else {

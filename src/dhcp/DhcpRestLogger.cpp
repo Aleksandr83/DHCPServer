@@ -6,6 +6,8 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 
+using namespace std;
+
 static const char* TAG = "DhcpRest";
 
 namespace dhcp {
@@ -17,26 +19,26 @@ void DhcpRestLogger::setEnabled(bool enabled)
     updateSenderState();
 }
 
-void DhcpRestLogger::setUrl(const std::string& url)
+void DhcpRestLogger::setUrl(const string& url)
 {
     url_ = url;
     updateSenderState();
 }
 
-void DhcpRestLogger::setAuth(bool enabled, const std::string& user,
-                             const std::string& pass)
+void DhcpRestLogger::setAuth(bool enabled, const string& user,
+                             const string& pass)
 {
     authEnabled_ = enabled;
     authUser_ = user;
     authPassword_ = pass;
 }
 
-void DhcpRestLogger::logEvent(const std::string& event,
-                              const std::string& mac,
-                              const std::string& ip,
-                              const std::string& mask,
-                              const std::string& gateway,
-                              const std::string& dns,
+void DhcpRestLogger::logEvent(const string& event,
+                              const string& mac,
+                              const string& ip,
+                              const string& mask,
+                              const string& gateway,
+                              const string& dns,
                               int32_t leaseTime)
 {
     if (!queue_ || !enabled_ || url_.empty()) return;
@@ -121,7 +123,7 @@ void DhcpRestLogger::sendRecord(const Record& rec)
 {
     if (url_.empty()) return;
 
-    const std::string payload = buildJson(rec);
+    const string payload = buildJson(rec);
 
     esp_http_client_config_t cfg = {};
     cfg.url = url_.c_str();
@@ -181,11 +183,11 @@ void DhcpRestLogger::sendRecord(const Record& rec)
     esp_http_client_cleanup(client);
 }
 
-std::string DhcpRestLogger::buildJson(const Record& rec) const
+string DhcpRestLogger::buildJson(const Record& rec) const
 {
     // Matches the server contract in Plan/ServerPrompt.md:
     // {event, mac, ip, mask, gateway, dns, lease_time}
-    std::string json = "{\"event\":\"";
+    string json = "{\"event\":\"";
     json += rec.event;
     json += "\",\"mac\":\"";
     json += rec.mac;
@@ -198,7 +200,7 @@ std::string DhcpRestLogger::buildJson(const Record& rec) const
     json += "\",\"dns\":\"";
     json += rec.dns;
     json += "\",\"lease_time\":";
-    json += std::to_string(rec.leaseTime);
+    json += to_string(rec.leaseTime);
     json += "}";
     return json;
 }

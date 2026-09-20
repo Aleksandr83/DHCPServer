@@ -43,13 +43,13 @@ SPIFFS partition for web content.
 
 **Flash size:** 4 MB (0x400000)
 
-## Layout
+### Layout
 
 | # | Name        | Type    | SubType    | Offset    | Size       | Description                |
 |---|-------------|---------|------------|-----------|------------|----------------------------|
-| 0 | phy_init    | data    | phy        | 0x00F000  | 0x001000   | RF calibration data        |
-| 1 | otadata     | data    | ota        | 0x010000  | 0x002000   | OTA boot selection         |
-| 2 | nvs         | data    | nvs        | 0x012000  | 0x006000   | NVS (WiFi, config, etc.)   |
+| 0 | nvs         | data    | nvs        | 0x009000  | 0x006000   | NVS (WiFi, config, etc.)   |
+| 1 | phy_init    | data    | phy        | 0x00F000  | 0x001000   | RF calibration data        |
+| 2 | otadata     | data    | ota        | 0x010000  | 0x002000   | OTA boot selection         |
 | 3 | ota_0       | app     | ota_0      | 0x020000  | 0x180000   | OTA app slot 0 (1.5 MB)    |
 | 4 | ota_1       | app     | ota_1      | 0x1A0000  | 0x180000   | OTA app slot 1 (1.5 MB)    |
 | 5 | spiffs      | data    | spiffs     | 0x320000  | 0x0E0000   | Web interface files (896 KB) |
@@ -57,6 +57,22 @@ SPIFFS partition for web content.
 **Total used:** 0x400000 (4 MB)
 
 ## Partition Details
+
+The subsections below describe the **legacy ESP32** table unless their heading or
+text says otherwise; what the ESP32-P4 differs in is noted as it comes up.
+
+### nvs (0x009000, 24 KB)
+- Non-volatile storage for application configuration.
+- Stores:
+  - WiFi SSID/password
+  - DHCP server settings (IP range, lease time)
+  - Static MAC→IP bindings (max 512 bytes)
+  - Allowed computers — the DHCP allow-list (max 1024 bytes, 25 entries)
+  - DNS server settings
+  - Security/authentication config, including the HTTPS switch, the certificate
+    volume and the certificate name (`sec_https`, `sec_cert_vol`, `sec_cert_name`)
+  - DNS cache data (max 512 bytes)
+- Accessed via the `nvs_flash` API through `Config` class.
 
 ### phy_init (0x00F000, 4 KB)
 - Stores RF calibration data.
@@ -67,18 +83,6 @@ SPIFFS partition for web content.
 - Stores the current OTA boot partition selection.
 - Written by `esp_ota_set_boot_partition()` during OTA updates.
 - Bootloader reads this to determine which app slot to boot.
-
-### nvs (0x012000, 24 KB)
-- Non-volatile storage for application configuration.
-- Stores:
-  - WiFi SSID/password
-  - DHCP server settings (IP range, lease time)
-  - Static MAC→IP bindings (max 512 bytes)
-  - Allowed computers — the DHCP allow-list (max 1024 bytes, 25 entries)
-  - DNS server settings
-  - Security/authentication config
-  - DNS cache data (max 512 bytes)
-- Accessed via the `nvs_flash` API through `Config` class.
 
 ### ota_0 (0x020000, 1.5 MB)
 - First OTA application slot.
@@ -94,21 +98,41 @@ SPIFFS partition for web content.
 
 ### spiffs (0x320000, 896 KB)
 - SPIFFS (SPI Flash File System) partition.
-- Stores all web interface files:
-  - `index.html` - Main page
-  - `header.html` - Shared header
-  - `footer.html` - Shared footer
-  - `css/style.css` - Dark theme styles
-  - `js/app.js` - SPA logic
-  - `i18n/ru.json` - Russian translations
-  - `i18n/en.json` - English translations
-  - `pages/dhcp_setup.html` - DHCP configuration
-  - `pages/dns_setup.html` - DNS configuration
-  - `pages/security.html` - Security settings
-  - `pages/version.html` - Version info
-  - `pages/firmware_update.html` - OTA update page
+- Stores the web interface files — the whole `data/` tree, uploaded as one SPIFFS
+  image (28 files at this revision):
+  - `index.html`, `login.html` - SPA shell and login page
+  - `header.html`, `footer.html` - shared header and footer
+  - `css/style.css`, `js/app.js` - dark theme and SPA logic
+  - `i18n/ru.json`, `i18n/en.json` - translations
+  - `pages/*.html` - one file per page (20 of them), among them
+    `pages/certs.html` for the HTTPS pair
 - Mounted at `/spiffs` by the application.
 - Automatically formatted if mount fails.
+- On the **ESP32-P4** the same content lives in a 1 MB SPIFFS partition at
+  `0xA20000`: the mount point, the image (`scripts/upload_web_p4.ps1`) and the
+  behaviour are the same.
+
+### fat (0xB20000, ~21 MB — ESP32-P4 only)
+- FAT data partition with wear levelling (`esp_vfs_fat_spiflash_mount_rw_wl`
+  through `FatFileSystem("fat", "fat", "/fat")`), mounted at `/fat`.
+- The only read-write volume of the device, and it exists on the ESP32-P4 alone:
+  the legacy ESP32 table has no FAT partition, so that build can neither keep the
+  internal DNS cache on flash nor hold a certificate pair internally.
+- Holds generated data only:
+  - `cache.dat` — the built-in (PSRAM) DNS cache: its own routes
+    (`/api/dns/internal-cache/*`) save, load and reset it, and it is written
+    before a planned restart
+  - `Statistica.dat` — the main-page counters of that cache, read back at boot and
+    written before a planned restart (it has no route of its own)
+  - `logs/Errors.log` — the error log the terminal and the file explorer read
+  - `certs/server.crt`, `certs/server.key` — the HTTPS pair when the internal
+    volume is chosen on Settings → Security → Certificates (a mounted card keeps
+    its own pair at `/sdcard/certs/`)
+- No web interface file is stored here: uploading `data/` rewrites the SPIFFS
+  partition only, which is exactly why the certificate pair is not kept on SPIFFS.
+- The volume is mounted by the file manager and reformatted on demand by its own
+  mount options; the file API refuses to format it (`/api/files/*` formats only
+  the card), because a wipe here takes the cache and the certificate with it.
 
 ## Config file
 
@@ -134,6 +158,8 @@ spiffs,       data, spiffs,   0xA20000,  0x100000,
 fat,          data, fat,      0xB20000,  0x14E0000,
 ```
 
-> **Note:** NVS lives at offset 0x9000; the bootloader and partition-table
-> metadata occupy the first 0x9000 bytes of flash. In the ESP32 layout table
-> above the NVS offset was misprinted as 0x012000 — 0x9000 is authoritative.
+> **Note:** NVS lives at offset 0x9000, right after the bootloader and the
+> partition table, which occupy the first 0x9000 bytes of flash. Both layouts
+> above have to match `partitions/dhcp_partitions.csv` and
+> `partitions/dhcp_partitions_p4.csv` — the build reads those files, not this
+> page.

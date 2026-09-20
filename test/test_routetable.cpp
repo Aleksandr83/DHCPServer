@@ -9,6 +9,10 @@
  * stage-136 defect was a limit of 81 next to a table of 82, which silently cost
  * the route registered last (`/pages/version.html`, the page that answered 404).
  *
+ * Two more rules are checked against the project tree itself, because nothing
+ * else can see their violations: every file in `data/` has a route in that table,
+ * and every one of those paths is short enough for SPIFFS to open.
+ *
  * Build (MinGW):
  *   g++ -std=c++17 -Wall -Wextra -Werror -DDHCP_TEST_HOST \
  *       -Dapp_main=esp_test_app_main -I. \
@@ -16,9 +20,12 @@
  *       -o test_routetable
  */
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <dirent.h>
@@ -53,6 +60,13 @@ WebRoute route(const char* uri, RouteMethod method = RouteMethod::Get,
     return WebRoute{ uri, method, handler };
 }
 
+/**
+ * The parts of the project the two tree checks read, both relative to the test's
+ * working directory (the project root): the route table and the served files.
+ */
+const char* const kRoutesFile = "src/web/WebServer.cpp";
+const char* const kDataDir = "data";
+
 /** Index of the first entry that repeats an earlier one, or kNone. */
 size_t firstRepeat(const WebRoute* routes, size_t count)
 {
@@ -69,15 +83,15 @@ size_t firstRepeat(const WebRoute* routes, size_t count)
  * POSIX `dirent` rather than `<filesystem>`: the other host tests in this project
  * already read directories this way, and MinGW has it.
  */
-void collectFiles(const std::string& dir, const std::string& prefix,
-                  std::vector<std::string>& out)
+void collectFiles(const string& dir, const string& prefix,
+                  vector<string>& out)
 {
     DIR* d = opendir(dir.c_str());
     if (!d) return;
     while (struct dirent* e = readdir(d)) {
-        const std::string name = e->d_name;
+        const string name = e->d_name;
         if (name == "." || name == "..") continue;
-        const std::string path = dir + "/" + name;
+        const string path = dir + "/" + name;
         struct stat st;
         if (stat(path.c_str(), &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
@@ -87,6 +101,46 @@ void collectFiles(const std::string& dir, const std::string& prefix,
         }
     }
     closedir(d);
+}
+
+/** The whole file `path` as one string, or an empty one when it cannot be read. */
+string readWholeFile(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return string();
+    string out;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+    fclose(f);
+    return out;
+}
+
+/**
+ * The longest path SPIFFS can open on this project — `CONFIG_SPIFFS_OBJ_NAME_LEN`
+ * read from the sdkconfig files next to the test, minus the terminating NUL
+ * (`SPIFFS_OBJ_NAME_LEN` counts it, so 32 leaves 31), or 0 when no sdkconfig is
+ * there. Read rather than written down so that a changed configuration moves the
+ * limit the test checks instead of silently disagreeing with it.
+ */
+size_t spiffsMaxPathLen()
+{
+    DIR* d = opendir(".");
+    if (!d) return 0;
+    size_t limit = 0;
+    while (struct dirent* e = readdir(d)) {
+        const string name = e->d_name;
+        if (name.size() < 9 || name.compare(0, 9, "sdkconfig") != 0) continue;
+        const string cfg = readWholeFile(name.c_str());
+        const string key = "CONFIG_SPIFFS_OBJ_NAME_LEN=";
+        const size_t at = cfg.find(key);
+        if (at == string::npos) continue;   // e.g. sdkconfig.defaults
+        const size_t value = strtoul(cfg.c_str() + at + key.size(), nullptr, 10);
+        if (value == 0) continue;
+        if (limit == 0 || value < limit) limit = value;
+    }
+    closedir(d);
+    return limit == 0 ? 0 : limit - 1;
 }
 
 } // namespace
@@ -197,12 +251,12 @@ static int test_handler_slots_are_derived()
     // are built FIRST and completely: `c_str()` pointers into a vector that
     // still grows would be dangling, and the test would compare freed memory
     // (which is exactly what it did before this loop was split in two).
-    std::vector<std::string> uris;
+    vector<string> uris;
     for (int i = 0; i < 82; i++) {
-        uris.push_back("/api/route" + std::to_string(i));
+        uris.push_back("/api/route" + to_string(i));
     }
-    std::vector<WebRoute> many;
-    for (const std::string& uri : uris) {
+    vector<WebRoute> many;
+    for (const string& uri : uris) {
         many.push_back(route(uri.c_str()));
     }
     for (size_t i = 0; i < many.size(); i++) {
@@ -246,38 +300,28 @@ static int test_limit_smaller_than_table_loses_the_last_route()
  */
 static int test_every_web_file_has_a_route()
 {
-    static const char* kRoutesFile = "src/web/WebServer.cpp";
-    static const char* kDataDir = "data";
-
-    FILE* f = fopen(kRoutesFile, "rb");
-    if (!f) {
+    const string src = readWholeFile(kRoutesFile);
+    if (src.empty()) {
         printf("SKIP: %s not found — run this test from the project root\n", kRoutesFile);
         return 0;
-    }
-    std::string src;
-    {
-        char buf[4096];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) src.append(buf, n);
-        fclose(f);
     }
 
     // A table row is `{ "/path", ...` at the start of a line (after indentation);
     // the rest of the file — comments, log strings — is not mistaken for a route.
-    std::vector<std::string> routes;
+    vector<string> routes;
     size_t pos = 0;
     while (pos < src.size()) {
         const size_t eol = src.find('\n', pos);
-        const std::string line = src.substr(pos, (eol == std::string::npos)
-                                              ? std::string::npos : eol - pos);
-        pos = (eol == std::string::npos) ? src.size() : eol + 1;
+        const string line = src.substr(pos, (eol == string::npos)
+                                              ? string::npos : eol - pos);
+        pos = (eol == string::npos) ? src.size() : eol + 1;
 
         size_t b = 0;
         while (b < line.size() && (line[b] == ' ' || line[b] == '\t' || line[b] == '\r')) b++;
         if (line.compare(b, 3, "{ \"") != 0) continue;
         const size_t uriStart = b + 3;
         const size_t uriEnd = line.find('"', uriStart);
-        if (uriEnd != std::string::npos) {
+        if (uriEnd != string::npos) {
             routes.push_back(line.substr(uriStart, uriEnd - uriStart));
         }
     }
@@ -287,14 +331,14 @@ static int test_every_web_file_has_a_route()
         return 0;
     }
 
-    std::vector<std::string> files;
+    vector<string> files;
     collectFiles(kDataDir, "", files);
     TEST_ASSERT_TRUE(!files.empty());        // data/ must exist when the routes do
 
     size_t missing = 0;
-    for (const std::string& path : files) {
+    for (const string& path : files) {
         bool found = false;
-        for (const std::string& route : routes) {
+        for (const string& route : routes) {
             if (route == path) { found = true; break; }
         }
         if (!found) {
@@ -303,6 +347,50 @@ static int test_every_web_file_has_a_route()
         }
     }
     TEST_ASSERT_EQ(missing, 0u);
+    return 0;
+}
+
+/**
+ * Every path of the web interface must fit the SPIFFS object-name limit.
+ *
+ * `CONFIG_SPIFFS_OBJ_NAME_LEN = 32` counts the terminating NUL, so at most 31
+ * characters *including* the leading slash can be opened at runtime. A longer
+ * path is written into the image by `spiffsgen.py` without a word of complaint,
+ * so the build is happy and the file is really there — and then the same file
+ * breaks in two ways at once: its page answers 404 (`staticFileHandler` cannot
+ * open it) and its upload over `POST /api/web/file` fails with "Cannot open
+ * file", which the web interface shows as the opaque "1 files failed". It
+ * happened twice: `/pages/dhcp_static_bindings.html` (32 chars, 2026-08-09,
+ * renamed to `/pages/dhcp_static.html`) and `/pages/security_certificates.html`
+ * (33 chars, stage 160 — the lesson of 2026-08-09 forgotten, renamed to
+ * `/pages/certs.html`).
+ *
+ * Nothing else in the project can see this: the mock server serves the files
+ * from the host, the route table matches by name rather than by length, and the
+ * device only reports the two failures above, which name the path but not the
+ * reason.
+ */
+static int test_web_paths_fit_the_spiffs_name_limit()
+{
+    const size_t maxLen = spiffsMaxPathLen();
+    if (maxLen == 0) {
+        printf("SKIP: no sdkconfig with CONFIG_SPIFFS_OBJ_NAME_LEN — run this test from the project root\n");
+        return 0;
+    }
+
+    vector<string> files;
+    collectFiles(kDataDir, "", files);
+    TEST_ASSERT_TRUE(!files.empty());        // data/ must exist when the routes do
+
+    size_t tooLong = 0;
+    for (const string& path : files) {
+        if (path.size() > maxLen) {
+            printf("FAIL: %s (%u chars) is longer than SPIFFS opens (%u) — it will 404 and refuse an upload\n",
+                   path.c_str(), (unsigned)path.size(), (unsigned)maxLen);
+            tooLong++;
+        }
+    }
+    TEST_ASSERT_EQ(tooLong, 0u);
     return 0;
 }
 
@@ -320,6 +408,7 @@ void app_main()
     failures += test_handler_slots_are_derived();
     failures += test_limit_smaller_than_table_loses_the_last_route();
     failures += test_every_web_file_has_a_route();
+    failures += test_web_paths_fit_the_spiffs_name_limit();
 
     if (failures == 0) {
         printf("All RouteTable tests PASSED!\n");

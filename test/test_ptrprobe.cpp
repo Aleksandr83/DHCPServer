@@ -19,6 +19,8 @@
  * the interesting cases are bytes in and bytes out, which needs no device.
  */
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -32,7 +34,7 @@
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_EQ(a, b)    do { if ((a) != (b)) { printf("FAIL: %s:%d: %s == %s (%lld != %lld)\n", __FILE__, __LINE__, #a, #b, (long long)(a), (long long)(b)); return 1; } } while(0)
-#define TEST_ASSERT_STR_EQ(a, b) do { if (std::string(a) != std::string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, std::string(a).c_str(), std::string(b).c_str()); return 1; } } while(0)
+#define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
 
 using dhcp::dhcp::PtrProbe;
 
@@ -43,7 +45,7 @@ uint32_t ipNet(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
     const uint8_t bytes[4] = { a, b, c, d };
     uint32_t out = 0;
-    std::memcpy(&out, bytes, 4);
+    memcpy(&out, bytes, 4);
     return out;
 }
 
@@ -72,7 +74,7 @@ public:
     {
         const char* labels[] = { "42", "1", "168", "192", "in-addr", "arpa" };
         for (const char* label : labels) {
-            const size_t n = std::strlen(label);
+            const size_t n = strlen(label);
             add(static_cast<int>(n));
             for (size_t i = 0; i < n; i++) add(static_cast<unsigned char>(label[i]));
         }
@@ -95,7 +97,7 @@ public:
     {
         const char* labels[] = { "42", "1", "168", "192", "in-addr", "arpa" };
         for (const char* label : labels) {
-            const size_t n = std::strlen(label);
+            const size_t n = strlen(label);
             add(static_cast<int>(n));
             for (size_t i = 0; i < n; i++) add(static_cast<unsigned char>(label[i]));
         }
@@ -115,19 +117,19 @@ public:
     }
 
     /** Append the RDATA of a PTR: a dotted name written out in full. */
-    Answer& ptrValue(const std::string& dotted)
+    Answer& ptrValue(const string& dotted)
     {
         const size_t start = buf_.size();
         size_t pos = 0;
         while (pos <= dotted.size()) {
             const size_t dot = dotted.find('.', pos);
-            const std::string label = dotted.substr(pos, (dot == std::string::npos)
-                                                             ? std::string::npos : dot - pos);
+            const string label = dotted.substr(pos, (dot == string::npos)
+                                                             ? string::npos : dot - pos);
             if (!label.empty()) {
                 buf_.push_back(static_cast<uint8_t>(label.size()));
                 buf_.insert(buf_.end(), label.begin(), label.end());
             }
-            if (dot == std::string::npos) break;
+            if (dot == string::npos) break;
             pos = dot + 1;
         }
         buf_.push_back(0);
@@ -141,7 +143,7 @@ public:
     size_t size() const { return buf_.size(); }
 
 private:
-    std::vector<uint8_t> buf_;
+    vector<uint8_t> buf_;
     size_t rdataPos_ = 0;
 };
 
@@ -156,16 +158,16 @@ static int test_query_bytes()
     const auto q = PtrProbe::buildQuery(ip, 0x1234);
     TEST_ASSERT_FALSE(q.empty());
 
-    const std::string bytes(reinterpret_cast<const char*>(q.data()), q.size());
+    const string bytes(reinterpret_cast<const char*>(q.data()), q.size());
     TEST_ASSERT_EQ(q[0], 0x12);            // id, big endian
     TEST_ASSERT_EQ(q[1], 0x34);
     TEST_ASSERT_EQ(q[2], 0x01);            // RD
     TEST_ASSERT_EQ(q[5], 0x01);            // QDCOUNT = 1
     TEST_ASSERT_EQ(q[6], 0x00);            // ANCOUNT = 0
-    TEST_ASSERT_TRUE(bytes.find(std::string("\x02""42\x01""1\x03""168\x03""192")) !=
-                     std::string::npos);
-    TEST_ASSERT_TRUE(bytes.find("in-addr") != std::string::npos);
-    TEST_ASSERT_TRUE(bytes.find("arpa") != std::string::npos);
+    TEST_ASSERT_TRUE(bytes.find(string("\x02""42\x01""1\x03""168\x03""192")) !=
+                     string::npos);
+    TEST_ASSERT_TRUE(bytes.find("in-addr") != string::npos);
+    TEST_ASSERT_TRUE(bytes.find("arpa") != string::npos);
     TEST_ASSERT_EQ(q[q.size() - 5], 0x00); // root label ends the name
     TEST_ASSERT_EQ(q[q.size() - 4], 0x00);
     TEST_ASSERT_EQ(q[q.size() - 3], 0x0C); // QTYPE = PTR
@@ -179,9 +181,9 @@ static int test_query_bytes()
 
     // Every octet is decimal-encoded, including 0 and 255.
     const auto edge = PtrProbe::buildQuery(ipNet(0, 255, 10, 1), 7);
-    const std::string edgeBytes(reinterpret_cast<const char*>(edge.data()), edge.size());
-    TEST_ASSERT_TRUE(edgeBytes.find(std::string("\x01""1\x02""10\x03""255\x01""0")) !=
-                     std::string::npos);
+    const string edgeBytes(reinterpret_cast<const char*>(edge.data()), edge.size());
+    TEST_ASSERT_TRUE(edgeBytes.find(string("\x01""1\x02""10\x03""255\x01""0")) !=
+                     string::npos);
     return 0;
 }
 

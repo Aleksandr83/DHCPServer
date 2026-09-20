@@ -10,6 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace dns {
 
@@ -42,8 +44,8 @@ void reportProgress(unsigned long done, unsigned long total, void*)
 
 } // namespace
 
-CacheAutosave::CacheAutosave(InternalDnsCache& cache, std::string path)
-    : cache_(cache), path_(std::move(path))
+CacheAutosave::CacheAutosave(InternalDnsCache& cache, string path)
+    : cache_(cache), path_(move(path))
 {
 }
 
@@ -64,8 +66,8 @@ bool CacheAutosave::clockIsSet()
 uint16_t CacheAutosave::currentMonthDays()
 {
     if (!clockIsSet()) return 0;             // unknown: the clamp uses 31
-    const std::time_t now = std::time(nullptr);
-    std::tm tmv{};
+    const time_t now = std::time(nullptr);
+    tm tmv{};
 #if defined(_WIN32)
     gmtime_s(&tmv, &now);                    // the host test builds under MinGW
 #else
@@ -195,7 +197,7 @@ void CacheAutosave::saveNow()
 
     if (ok) {
         jobs.finish(kJobId, core::JobState::Done,
-                    std::to_string(entries) + " entries");
+                    to_string(entries) + " entries");
         ESP_LOGI(TAG, "autosave wrote %u entries",
                  static_cast<unsigned>(entries));
     } else {

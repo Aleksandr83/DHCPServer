@@ -1,9 +1,11 @@
 #include "UploadRange.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace files {
 
-std::string UploadRange::check(uint64_t partSize, uint64_t offset, uint64_t chunk,
+string UploadRange::check(uint64_t partSize, uint64_t offset, uint64_t chunk,
                                bool hasTotal, uint64_t total, UploadRange& out)
 {
     UploadRange range;
@@ -30,23 +32,23 @@ std::string UploadRange::check(uint64_t partSize, uint64_t offset, uint64_t chun
     if (total == 0) return "total must be greater than zero";
 
     if (offset != partSize) {
-        return "offset " + std::to_string(offset) +
-               " does not match the partial file (" + std::to_string(partSize) +
+        return "offset " + to_string(offset) +
+               " does not match the partial file (" + to_string(partSize) +
                " bytes on the device)";
     }
 
     if (offset >= total) {
-        return "offset " + std::to_string(offset) + " is at or past the end of " +
-               std::to_string(total) + " bytes";
+        return "offset " + to_string(offset) + " is at or past the end of " +
+               to_string(total) + " bytes";
     }
 
     range.offset = offset;
     range.total = total;
 
     if (range.endOffset() > total) {
-        return "body of " + std::to_string(chunk) + " bytes at offset " +
-               std::to_string(offset) + " runs past the end of " +
-               std::to_string(total) + " bytes";
+        return "body of " + to_string(chunk) + " bytes at offset " +
+               to_string(offset) + " runs past the end of " +
+               to_string(total) + " bytes";
     }
 
     out = range;

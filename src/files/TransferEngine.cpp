@@ -5,6 +5,8 @@
 
 #include "../storage/PathUtil.h"
 
+using namespace std;
+
 namespace dhcp {
 namespace files {
 
@@ -14,8 +16,8 @@ using storage::PathUtil;
 
 /** @brief One directory pair of the walk: where it comes from, where it goes. */
 struct DirPair {
-    std::string src;
-    std::string dst;
+    string src;
+    string dst;
 };
 
 /** @brief Totals of one source entry (a file, or a whole tree). */
@@ -26,7 +28,7 @@ struct Measure {
 };
 
 /** @brief Append @p name to a normalized directory path. */
-std::string joinRel(const std::string& dir, const std::string& name)
+string joinRel(const string& dir, const string& name)
 {
     return (dir == "/") ? ("/" + name) : (dir + "/" + name);
 }
@@ -49,7 +51,7 @@ public:
     IFileOps& ops() { return ops_; }
     const TransferRequest& req() const { return req_; }
     TransferReport& report() { return report_; }
-    std::string& detail() { return detail_; }
+    string& detail() { return detail_; }
 
     /** @brief Publish progress (throttled unless @p force). */
     void progress(bool force)
@@ -71,7 +73,7 @@ public:
     bool stopped() const { return report_.cancelled; }
 
     /** @brief Record one failure; the first one is the one the UI reports. */
-    void fail(const std::string& path, FileStatus status, const std::string& why)
+    void fail(const string& path, FileStatus status, const string& why)
     {
         ++report_.failed;
         if (!report_.error.empty()) return;
@@ -86,14 +88,14 @@ private:
     TransferReport& report_;
     ITransferObserver& observer_;
     uint64_t lastReported_ = 0;
-    std::string detail_;
+    string detail_;
 };
 
 /** @brief Adds up one directory while walking it (no listing is materialized). */
 class MeasureVisitor : public IDirVisitor {
 public:
-    MeasureVisitor(Measure& measure, std::vector<std::string>& queue, std::string dir)
-        : measure_(measure), queue_(queue), dir_(std::move(dir)) {}
+    MeasureVisitor(Measure& measure, vector<string>& queue, string dir)
+        : measure_(measure), queue_(queue), dir_(move(dir)) {}
 
     bool visit(const FileEntry& entry) override
     {
@@ -109,8 +111,8 @@ public:
 
 private:
     Measure& measure_;
-    std::vector<std::string>& queue_;
-    std::string dir_;
+    vector<string>& queue_;
+    string dir_;
 };
 
 /**
@@ -121,7 +123,7 @@ private:
  * thousand files in a single directory is walked with one entry in memory at a
  * time, which is also why @ref IFileOps::scan exists (see @ref IDirVisitor).
  */
-FileStatus measureEntry(Runner& r, const std::string& top, Measure& out)
+FileStatus measureEntry(Runner& r, const string& top, Measure& out)
 {
     FileEntry entry;
     const FileStatus st = r.ops().stat(r.req().srcVolume, top, entry, &r.detail());
@@ -134,13 +136,13 @@ FileStatus measureEntry(Runner& r, const std::string& top, Measure& out)
     }
 
     ++out.dirs;
-    std::vector<std::string> queue;   // directories still to walk, parents first
+    vector<string> queue;   // directories still to walk, parents first
     queue.push_back(top);
 
     for (size_t i = 0; i < queue.size(); ++i) {
         // The path is copied before the walk: the visitor appends to the same
         // vector, so an element of it must not be held as a reference meanwhile.
-        const std::string dir = queue[i];
+        const string dir = queue[i];
         r.report().current = dir;
         const uint32_t before = out.files + out.dirs;
         MeasureVisitor visitor(out, queue, dir);
@@ -156,7 +158,7 @@ FileStatus measureEntry(Runner& r, const std::string& top, Measure& out)
 }
 
 /** @brief Copies one file, watching for space, cancellation and read errors. */
-bool copyFile(Runner& r, const std::string& src, const std::string& dst)
+bool copyFile(Runner& r, const string& src, const string& dst)
 {
     FileEntry entry;
     if (r.ops().stat(r.req().srcVolume, src, entry, &r.detail()) == FileStatus::Ok &&
@@ -170,14 +172,14 @@ bool copyFile(Runner& r, const std::string& src, const std::string& dst)
         }
     }
 
-    std::unique_ptr<IFileSource> in;
+    unique_ptr<IFileSource> in;
     FileStatus st = r.ops().openRead(r.req().srcVolume, src, in, &r.detail());
     if (st != FileStatus::Ok) {
         r.fail(src, st, r.detail());
         return false;
     }
 
-    std::unique_ptr<IFileSink> out;
+    unique_ptr<IFileSink> out;
     st = r.ops().createWriter(r.req().dstVolume, dst, out, &r.detail());
     if (st != FileStatus::Ok) {
         r.fail(src, st, r.detail());
@@ -224,12 +226,12 @@ bool copyFile(Runner& r, const std::string& src, const std::string& dst)
 /** @brief Copies the contents of one directory into an existing directory. */
 class TreeVisitor : public IDirVisitor {
 public:
-    TreeVisitor(Runner& r, std::vector<DirPair>& queue, std::string src, std::string dst)
-        : r_(r), queue_(queue), src_(std::move(src)), dst_(std::move(dst)) {}
+    TreeVisitor(Runner& r, vector<DirPair>& queue, string src, string dst)
+        : r_(r), queue_(queue), src_(move(src)), dst_(move(dst)) {}
 
     bool visit(const FileEntry& entry) override
     {
-        std::string dstChild;
+        string dstChild;
         if (!PathUtil::normalizeChild(dst_, entry.name, dstChild)) {
             // The name came off the volume, so it is valid there, but it may not
             // be a name this API can address. Refusing it is the honest answer:
@@ -240,7 +242,7 @@ public:
             return true;
         }
 
-        const std::string srcChild = joinRel(src_, entry.name);
+        const string srcChild = joinRel(src_, entry.name);
         if (entry.isDir) {
             const FileStatus st = r_.ops().mkdir(r_.req().dstVolume, dstChild);
             if (st != FileStatus::Ok && st != FileStatus::AlreadyExists) {
@@ -262,9 +264,9 @@ public:
 
 private:
     Runner& r_;
-    std::vector<DirPair>& queue_;
-    std::string src_;
-    std::string dst_;
+    vector<DirPair>& queue_;
+    string src_;
+    string dst_;
     bool ok_ = true;
 };
 
@@ -274,7 +276,7 @@ private:
  * @p dstTop must already exist as a directory when the source is one: the
  * caller creates it, because it also decides what a taken name means.
  */
-bool copyEntry(Runner& r, const std::string& srcTop, const std::string& dstTop,
+bool copyEntry(Runner& r, const string& srcTop, const string& dstTop,
                bool srcIsDir)
 {
     if (!srcIsDir) {
@@ -282,15 +284,15 @@ bool copyEntry(Runner& r, const std::string& srcTop, const std::string& dstTop,
         return copyFile(r, srcTop, dstTop);
     }
 
-    std::vector<DirPair> queue;
+    vector<DirPair> queue;
     queue.push_back({srcTop, dstTop});
     bool ok = true;
     for (size_t i = 0; i < queue.size(); ++i) {
         if (r.stopped()) return false;
         // See measureEntry: the visitor appends to this very vector, so both
         // paths are copied out before the directory is walked.
-        const std::string srcDir = queue[i].src;
-        const std::string dstDir = queue[i].dst;
+        const string srcDir = queue[i].src;
+        const string dstDir = queue[i].dst;
         TreeVisitor visitor(r, queue, srcDir, dstDir);
         const FileStatus st = r.ops().scan(r.req().srcVolume, srcDir, visitor, &r.detail());
         if (st != FileStatus::Ok) {
@@ -313,16 +315,16 @@ void finishReport(TransferReport& report)
 }
 
 /** @brief Move inside one volume: `rename()`, no byte is copied. */
-void runInstant(Runner& r, const std::string& dstDir)
+void runInstant(Runner& r, const string& dstDir)
 {
     for (const auto& raw : r.req().paths) {
         if (r.cancelRequested()) return;
 
-        std::string src;
+        string src;
         if (!PathUtil::normalize(raw, src)) continue;
 
-        const std::string name = PathUtil::basename(src);
-        std::string target;
+        const string name = PathUtil::basename(src);
+        string target;
         if (!PathUtil::normalizeChild(dstDir, name, target)) {
             r.fail(src, FileStatus::InvalidPath, "the destination name is not usable");
             continue;
@@ -380,7 +382,7 @@ const char* transferPhaseName(TransferPhase phase)
 }
 
 FileStatus TransferEngine::validate(IFileOps& ops, const TransferRequest& req,
-                                    std::string* detail)
+                                    string* detail)
 {
     if (req.paths.empty()) {
         if (detail) *detail = "no entries were selected";
@@ -391,14 +393,14 @@ FileStatus TransferEngine::validate(IFileOps& ops, const TransferRequest& req,
         return FileStatus::InvalidPath;
     }
 
-    std::string dstDir;
+    string dstDir;
     if (!PathUtil::normalize(req.dstPath, dstDir)) {
         if (detail) *detail = "the destination path is not valid";
         return FileStatus::InvalidPath;
     }
 
     for (const auto& raw : req.paths) {
-        std::string path;
+        string path;
         if (!PathUtil::normalize(raw, path)) {
             // Name the offender: "invalid path" alone leaves the operator with a
             // file they can see, a button that refuses and no idea why.
@@ -455,22 +457,22 @@ FileStatus TransferEngine::validate(IFileOps& ops, const TransferRequest& req,
 }
 
 FileStatus TransferEngine::conflicts(IFileOps& ops, const TransferRequest& req,
-                                     std::vector<std::string>& names,
-                                     std::string* detail)
+                                     vector<string>& names,
+                                     string* detail)
 {
     names.clear();
 
     const FileStatus st = validate(ops, req, detail);
     if (st != FileStatus::Ok) return st;
 
-    std::string dstDir;
+    string dstDir;
     PathUtil::normalize(req.dstPath, dstDir);
 
     for (const auto& raw : req.paths) {
-        std::string path;
+        string path;
         if (!PathUtil::normalize(raw, path)) continue;
 
-        std::string target;
+        string target;
         if (!PathUtil::normalizeChild(dstDir, PathUtil::basename(path), target)) continue;
 
         FileEntry entry;
@@ -503,7 +505,7 @@ void TransferEngine::run(IFileOps& ops, const TransferRequest& req,
         return;
     }
 
-    std::string dstDir;
+    string dstDir;
     PathUtil::normalize(req.dstPath, dstDir);
     report.dstPath = dstDir;
 
@@ -522,10 +524,10 @@ void TransferEngine::run(IFileOps& ops, const TransferRequest& req,
     // step exists to prevent. Entries that will be skipped are not measured —
     // they are not copied.
     for (const auto& raw : req.paths) {
-        std::string path;
+        string path;
         if (!PathUtil::normalize(raw, path)) continue;
 
-        std::string target;
+        string target;
         if (PathUtil::normalizeChild(dstDir, PathUtil::basename(path), target)) {
             FileEntry entry;
             if (req.conflict == TransferConflict::Skip &&
@@ -567,11 +569,11 @@ void TransferEngine::run(IFileOps& ops, const TransferRequest& req,
     for (const auto& raw : req.paths) {
         if (report.cancelled) break;
 
-        std::string path;
+        string path;
         if (!PathUtil::normalize(raw, path)) continue;
 
-        const std::string name = PathUtil::basename(path);
-        std::string target;
+        const string name = PathUtil::basename(path);
+        string target;
         if (!PathUtil::normalizeChild(dstDir, name, target)) {
             r.fail(path, FileStatus::InvalidPath, "the destination name is not usable");
             continue;

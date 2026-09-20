@@ -13,6 +13,8 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
+using namespace std;
+
 static const char* TAG = "DnsCache";
 
 // DNS query types (used to filter cached answers by the queried type).
@@ -37,26 +39,26 @@ constexpr int kHttpRedirectLimit = 400;        // and ends here (exclusive)
 constexpr int kHttpNotFound = 404;             // "no such record" — a normal miss
 constexpr uint8_t kQueueStopToken = 0xFF;      // wake the worker to stop it
 constexpr unsigned kDropLogEvery = 50;         // log every Nth dropped record
-bool parseLookupIps(const std::string& body, std::vector<std::string>& ips)
+bool parseLookupIps(const string& body, vector<string>& ips)
 {
-    const std::string needle = "\"ips\"";
+    const string needle = "\"ips\"";
     const size_t k = body.find(needle);
-    if (k == std::string::npos) return false;
+    if (k == string::npos) return false;
     const size_t colon = body.find(':', k + needle.size());
-    if (colon == std::string::npos) return false;
+    if (colon == string::npos) return false;
     const size_t open = body.find('[', colon + 1);
-    if (open == std::string::npos) return false;
+    if (open == string::npos) return false;
     const size_t close = body.find(']', open + 1);
-    if (close == std::string::npos) return false;
+    if (close == string::npos) return false;
 
-    const std::string arr = body.substr(open + 1, close - open - 1);
+    const string arr = body.substr(open + 1, close - open - 1);
     size_t q = 0;
     while (q < arr.size()) {
         const size_t openQ = arr.find('"', q);
-        if (openQ == std::string::npos) break;
+        if (openQ == string::npos) break;
         const size_t closeQ = arr.find('"', openQ + 1);
-        if (closeQ == std::string::npos) break;
-        const std::string ip = arr.substr(openQ + 1, closeQ - openQ - 1);
+        if (closeQ == string::npos) break;
+        const string ip = arr.substr(openQ + 1, closeQ - openQ - 1);
         if (!ip.empty()) ips.push_back(ip);
         q = closeQ + 1;
     }
@@ -125,7 +127,7 @@ void DnsCache::setTerminalLogging(bool enabled)
     terminalLogging_ = enabled;
 }
 
-void DnsCache::setUrl(const std::string& url)
+void DnsCache::setUrl(const string& url)
 {
     url_ = url;
     // Normalize: strip trailing slashes so the resource path appends cleanly.
@@ -134,8 +136,8 @@ void DnsCache::setUrl(const std::string& url)
     ESP_LOGI(TAG, "Cache URL set to: %s", url_.c_str());
 }
 
-void DnsCache::setAuth(bool enabled, const std::string& user,
-                       const std::string& pass)
+void DnsCache::setAuth(bool enabled, const string& user,
+                       const string& pass)
 {
     authEnabled_ = enabled;
     authUser_ = user;
@@ -146,18 +148,18 @@ void DnsCache::setAuth(bool enabled, const std::string& user,
 
 // ─── Helpers ────────────────────────────────────────
 
-std::string DnsCache::normalizeDomain(const std::string& domain)
+string DnsCache::normalizeDomain(const string& domain)
 {
-    std::string d = domain;
+    string d = domain;
     for (auto& c : d) c = static_cast<char>(tolower((unsigned char)c));
     if (!d.empty() && d.back() == '.') d.pop_back();
     return d;
 }
 
-std::string DnsCache::urlEncode(const std::string& s)
+string DnsCache::urlEncode(const string& s)
 {
     const char* hex = "0123456789ABCDEF";
-    std::string out;
+    string out;
     for (unsigned char c : s) {
         if (isalnum(c) || c == '.' || c == '-' || c == '_' || c == '~') {
             out += static_cast<char>(c);
@@ -204,19 +206,19 @@ void DnsCache::notifyLookupOutcome(int64_t elapsedMs)
     }
 }
 
-bool DnsCache::doLookupAndParse(const std::string& domain, uint16_t type,
-                                std::vector<std::string>& result)
+bool DnsCache::doLookupAndParse(const string& domain, uint16_t type,
+                                vector<string>& result)
 {
     if (!enabled_ || url_.empty()) return false;
 
-    const std::string d = normalizeDomain(domain);
+    const string d = normalizeDomain(domain);
     if (d.empty()) return false;
 
     // Resource-style URL: GET {url}/{domain}
-    const std::string url = url_ + "/" + urlEncode(d);
+    const string url = url_ + "/" + urlEncode(d);
     if (terminalLogging_) ESP_LOGI(TAG, "Cache lookup GET: %s type=%u", url.c_str(), type);
 
-    std::string body;
+    string body;
     const int status = doLookup(url, body);
     if (status == 0) return false;              // transport failure (already WARN)
     if (status == kHttpNotFound) {                        // not found / expired — normal miss
@@ -235,9 +237,9 @@ bool DnsCache::doLookupAndParse(const std::string& domain, uint16_t type,
     // The server keys by domain only, so keep only answers matching the
     // queried type (A -> IPv4, AAAA -> IPv6) — answering e.g. an A record
     // to an AAAA query is rejected by strict resolvers.
-    std::vector<std::string> filtered;
+    vector<string> filtered;
     for (const auto& ip : result) {
-        const bool isV6 = ip.find(':') != std::string::npos;
+        const bool isV6 = ip.find(':') != string::npos;
         if ((type == DNS_TYPE_AAAA) ? isV6 : !isV6) filtered.push_back(ip);
     }
     result.swap(filtered);
@@ -255,7 +257,7 @@ bool DnsCache::doLookupAndParse(const std::string& domain, uint16_t type,
 
 // Dedup helpers: track domains with an in-flight lookup so a burst of
 // queries for the same domain fires only ONE GET to the cache server.
-bool DnsCache::markPending(const std::string& d)
+bool DnsCache::markPending(const string& d)
 {
     portENTER_CRITICAL(&pendingLock_);
     for (int i = 0; i < pendingCount_; ++i) {
@@ -275,7 +277,7 @@ bool DnsCache::markPending(const std::string& d)
     return true;
 }
 
-void DnsCache::clearPending(const std::string& d)
+void DnsCache::clearPending(const string& d)
 {
     portENTER_CRITICAL(&pendingLock_);
     for (int i = 0; i < pendingCount_; ++i) {
@@ -290,7 +292,7 @@ void DnsCache::clearPending(const std::string& d)
     portEXIT_CRITICAL(&pendingLock_);
 }
 
-void DnsCache::submitLookup(const std::string& domain, uint16_t type,
+void DnsCache::submitLookup(const string& domain, uint16_t type,
                             uint8_t token)
 {
     if (!enabled_ || !readEnabled_ || url_.empty()) {
@@ -306,7 +308,7 @@ void DnsCache::submitLookup(const std::string& domain, uint16_t type,
         return;
     }
 
-    const std::string d = normalizeDomain(domain);
+    const string d = normalizeDomain(domain);
     if (d.empty()) return;
 
     // Dedup: skip if a lookup for this domain is already in flight.
@@ -418,7 +420,7 @@ void DnsCache::lookupWorkerLoop()
         if (terminalLogging_) ESP_LOGI(TAG, "Cache lookup WORKER: domain=%s type=%u token=%u",
                                        req.domain, req.type, req.token);
         const int64_t t0 = esp_timer_get_time();
-        std::vector<std::string> result;
+        vector<string> result;
         const bool hit = doLookupAndParse(req.domain, req.type, result);
         const int64_t elapsedMs = (esp_timer_get_time() - t0) / 1000;
         notifyLookupOutcome(elapsedMs);
@@ -433,7 +435,7 @@ void DnsCache::lookupWorkerLoop()
             LookupResult res;
             res.token = req.token;
             res.hit = hit;
-            std::string joined;
+            string joined;
             for (size_t i = 0; i < result.size(); ++i) {
                 if (i) joined += ',';
                 joined += result[i];
@@ -463,7 +465,7 @@ bool DnsCache::drainLookupResult(LookupResult& out)
     return n == static_cast<ssize_t>(sizeof(out));
 }
 
-int DnsCache::doLookup(const std::string& url, std::string& respBody)
+int DnsCache::doLookup(const string& url, string& respBody)
 {
     CacheRespCapture respCap;
     esp_http_client_config_t cfg = {};
@@ -539,8 +541,8 @@ int DnsCache::doLookup(const std::string& url, std::string& respBody)
 
 // ─── Store (async, fire-and-forget) ─────────────────
 
-void DnsCache::store(const std::string& domain, uint16_t type,
-                     const std::vector<std::string>& ips)
+void DnsCache::store(const string& domain, uint16_t type,
+                     const vector<string>& ips)
 {
     if (!enabled_ || !writeEnabled_ || url_.empty()) {
         if (terminalLogging_) {
@@ -559,13 +561,13 @@ void DnsCache::store(const std::string& domain, uint16_t type,
         return;
     }
 
-    const std::string d = normalizeDomain(domain);
+    const string d = normalizeDomain(domain);
     if (d.empty()) return;
 
     CacheStoreRecord rec;
     rec.type = type;
     strncpy(rec.domain, d.c_str(), sizeof(rec.domain) - 1);
-    std::string joined;
+    string joined;
     for (size_t i = 0; i < ips.size(); ++i) {
         if (i) joined += ',';
         joined += ips[i];
@@ -653,9 +655,9 @@ void DnsCache::cacheSenderTask(void* arg)
 void DnsCache::sendStore(const CacheStoreRecord& rec)
 {
     if (url_.empty()) return;
-    const std::string payload = buildStoreJson(rec);
+    const string payload = buildStoreJson(rec);
     // Resource-style URL: PUT {url}/{domain}
-    const std::string url = url_ + "/" + urlEncode(rec.domain);
+    const string url = url_ + "/" + urlEncode(rec.domain);
 
     if (terminalLogging_) ESP_LOGI(TAG, "Cache store: PUT %s domain=%s type=%u auth=%s",
                                    url.c_str(), rec.domain, rec.type,
@@ -723,19 +725,19 @@ void DnsCache::sendStore(const CacheStoreRecord& rec)
     esp_http_client_cleanup(client);
 }
 
-std::string DnsCache::buildStoreJson(const CacheStoreRecord& rec) const
+string DnsCache::buildStoreJson(const CacheStoreRecord& rec) const
 {
     // The server takes the domain from the URL path, so the body carries
     // only the record data: {"ips":[...],"type":N}.
-    std::string json = "{\"ips\":[";
+    string json = "{\"ips\":[";
     // ips is stored comma-separated; split back into a JSON array.
-    const std::string list(rec.ips);
+    const string list(rec.ips);
     size_t start = 0;
     bool first = true;
     while (start <= list.size()) {
         size_t comma = list.find(',', start);
-        if (comma == std::string::npos) comma = list.size();
-        const std::string ip = list.substr(start, comma - start);
+        if (comma == string::npos) comma = list.size();
+        const string ip = list.substr(start, comma - start);
         if (!ip.empty()) {
             if (!first) json += ',';
             json += '"';
@@ -747,7 +749,7 @@ std::string DnsCache::buildStoreJson(const CacheStoreRecord& rec) const
         start = comma + 1;
     }
     json += "],\"type\":";
-    json += std::to_string(rec.type);
+    json += to_string(rec.type);
     json += "}";
     return json;
 }

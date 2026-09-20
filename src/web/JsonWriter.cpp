@@ -1,5 +1,7 @@
 #include "JsonWriter.h"
 
+using namespace std;
+
 namespace {
 
 // Rule 39: the same control-character limit the file name rules use.
@@ -15,7 +17,7 @@ void JsonWriter::separate()
     if (!body_.empty()) body_ += ',';
 }
 
-void JsonWriter::str(const std::string& key, const std::string& value)
+void JsonWriter::str(const string& key, const string& value)
 {
     separate();
     body_ += '"';
@@ -25,16 +27,16 @@ void JsonWriter::str(const std::string& key, const std::string& value)
     body_ += '"';
 }
 
-void JsonWriter::num(const std::string& key, int64_t value)
+void JsonWriter::num(const string& key, int64_t value)
 {
     separate();
     body_ += '"';
     body_ += escape(key);
     body_ += "\":";
-    body_ += std::to_string(value);
+    body_ += to_string(value);
 }
 
-void JsonWriter::boolean(const std::string& key, bool value)
+void JsonWriter::boolean(const string& key, bool value)
 {
     separate();
     body_ += '"';
@@ -43,7 +45,7 @@ void JsonWriter::boolean(const std::string& key, bool value)
     body_ += value ? "true" : "false";
 }
 
-void JsonWriter::literal(const std::string& key, const std::string& json)
+void JsonWriter::literal(const string& key, const string& json)
 {
     separate();
     body_ += '"';
@@ -52,9 +54,9 @@ void JsonWriter::literal(const std::string& key, const std::string& json)
     body_ += json;
 }
 
-std::string JsonWriter::escape(const std::string& in)
+string JsonWriter::escape(const string& in)
 {
-    std::string out;
+    string out;
     out.reserve(in.size() + 8);
     for (char c : in) {
         switch (c) {

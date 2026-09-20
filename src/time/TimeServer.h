@@ -4,6 +4,7 @@
 #include "ITimeServer.h"
 #include "TimeLogger.h"
 
+#include <functional>
 #include <string>
 #include <cstdint>
 
@@ -91,6 +92,26 @@ public:
     /** @brief Re-read the external NTP server/interval and restart SNTP. */
     void restartSync();
 
+    // ─── Clock-set notification ─────────────────────
+    /**
+     * @brief What the callback of @ref setOnClockSet looks like.
+     *
+     * @warning It must not block: the SNTP notification runs in the context of
+     * the network task, whose stack has no room for file I/O or a server start.
+     * A listener that needs that work has to hand it to a task of its own.
+     */
+    using ClockSetCallback = std::function<void()>;
+
+    /**
+     * @brief Report that the device clock became a real date, not an epoch.
+     *
+     * Called once per successful synchronisation and once per manual clock
+     * setting, because a certificate is a statement about time: whoever judges
+     * a stored pair has to be told when the clock arrives instead of deciding
+     * with the epoch it was born with.
+     */
+    void setOnClockSet(ClockSetCallback cb) { onClockSet_ = std::move(cb); }
+
     // ─── Access control (LAN hardening) ─────────────
     /**
      * @brief (Re)apply the "own subnet only" filter and the per-client rate
@@ -132,6 +153,8 @@ private:
     static void onSyncNotification(struct timeval* tv);
     /** @brief Shared instance used by the static SNTP callback. */
     static TimeServer* s_instance;
+    /** @brief Tell the registered listener that the clock is usable now. */
+    void notifyClockSet();
 
     static constexpr int kPort = 123;
     static constexpr uint8_t kStratum = 3;
@@ -156,6 +179,7 @@ private:
     volatile bool synced_ = false;
 
     bool sntpStarted_ = false;
+    ClockSetCallback onClockSet_;
     std::string serverName_ = "pool.ntp.org";
     uint32_t syncIntervalSec_ = 86400;  // 24 h
     std::string timezoneName_ = "Europe/Moscow"; // zone id (display only)

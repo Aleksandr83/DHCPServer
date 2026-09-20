@@ -21,6 +21,8 @@
 #include "lwip/etharp.h"
 #include "lwip/prot/etharp.h"
 
+using namespace std;
+
 static const char* TAG = "DnsServer";
 
 // ─── DNS protocol constants ─────────────────────────
@@ -325,8 +327,8 @@ void DnsServer::persistJobTask(void* arg)
             // streamed while writing: the entry count is patched into the header
             // at the very end, so the bytes that end up on the card are only
             // known once the file is closed.
-            std::string md5err;
-            const std::string md5 = core::Md5::file(self->kCacheDatPath, &md5err);
+            string md5err;
+            const string md5 = core::Md5::file(self->kCacheDatPath, &md5err);
             if (md5.empty()) {
                 ESP_LOGW(TAG, "cache saved but its checksum could not be read (%s)",
                          md5err.c_str());
@@ -422,7 +424,7 @@ void DnsServer::stop()
     ESP_LOGI(TAG, "DNS server stopped");
 }
 
-std::string DnsServer::stateString() const
+string DnsServer::stateString() const
 {
     switch (state_) {
         case DnsServerState::RUNNING: return "running";
@@ -436,7 +438,7 @@ std::string DnsServer::stateString() const
 // Local hosts management
 // ─────────────────────────────────────────────────────
 
-void DnsServer::addLocalHost(const std::string& domain, const std::string& ip)
+void DnsServer::addLocalHost(const string& domain, const string& ip)
 {
     localHosts_[domain].push_back(ip);
     ESP_LOGI(TAG, "Local host: %s -> %s", domain.c_str(), ip.c_str());
@@ -563,7 +565,7 @@ DnsServer::CacheFileMd5 DnsServer::checkCacheFileMd5()
     out.hasStored = !out.storedMd5.empty();
     if (!out.fileExists) return out;
 
-    std::string err;
+    string err;
     out.fileMd5 = core::Md5::file(kCacheDatPath, &err);
     out.readable = !out.fileMd5.empty();
     if (!out.readable) {
@@ -574,7 +576,7 @@ DnsServer::CacheFileMd5 DnsServer::checkCacheFileMd5()
     return out;
 }
 
-bool DnsServer::storeCacheFileMd5(const std::string& md5)
+bool DnsServer::storeCacheFileMd5(const string& md5)
 {
     auto cfg = core::Config::instance().getDns();
     if (cfg.cacheInternalFileMd5 == md5) {
@@ -603,7 +605,7 @@ void DnsServer::statsJobTask(void* arg)
 {
     auto* self = static_cast<DnsServer*>(arg);
     RestartSaveJobState::Verdict verdict = RestartSaveJobState::Verdict::Failed;
-    std::string detail;
+    string detail;
     if (self) verdict = self->writeStatsNow(detail);
 
     ::dhcp::core::JobRegistry::instance().finish(
@@ -645,7 +647,7 @@ DnsServer::RestartSave DnsServer::startStatsSaveJob()
             break;   // Started (or Failed, handled below)
     }
 
-    // Much less than the persist job below: three numbers, one std::string and
+    // Much less than the persist job below: three numbers, one string and
     // one stdio call, against megabytes of records walked there.
     BaseType_t res = xTaskCreate(statsJobTask, "stats_save", DNS_STATS_TASK_STACK_BYTES, this,
                                  tskIDLE_PRIORITY + 1, &statsTaskHandle_);
@@ -709,7 +711,7 @@ bool DnsServer::saveStatsBeforeRestart()
     return waitForStatsJob(kPersistStallMs);
 }
 
-RestartSaveJobState::Verdict DnsServer::writeStatsNow(std::string& detail)
+RestartSaveJobState::Verdict DnsServer::writeStatsNow(string& detail)
 {
     detail.clear();
     if (!core::Config::instance().getDns().cacheInternalSaveStats) {
@@ -739,7 +741,7 @@ RestartSaveJobState::Verdict DnsServer::writeStatsNow(std::string& detail)
     totals.evictScanUs = ic.evictScanUs;
     totals.evictScanNodes = ic.evictScanNodes;
 
-    std::string why;
+    string why;
     // Retry once, from a clean slate, and report both attempts to the error log
     // (the operator asked for exactly that; see DnsStatStore::saveWithRetry).
     if (!DnsStatStore::saveWithRetry(DnsStatStore::kPath, totals, &why,
@@ -765,7 +767,7 @@ bool DnsServer::restoreStatsFromFile()
     if (!core::Config::instance().getDns().cacheInternalSaveStats) return false;
 
     DnsStatTotals totals;
-    std::string why;
+    string why;
     if (!DnsStatStore::load(DnsStatStore::kPath, totals, &why)) {
         // A device that never saved anything has no file: normal, not an error.
         ESP_LOGI(TAG, "no statistics to restore (%s)", why.c_str());
@@ -900,7 +902,7 @@ void DnsServer::setDhcpServer(::dhcp::dhcp::IDhcpServer* dhcp)
     dhcpServer_ = dhcp;
 }
 
-std::string DnsServer::resolveClientMac(uint32_t clientIpNet) const
+string DnsServer::resolveClientMac(uint32_t clientIpNet) const
 {
     char mac[MAC_TEXT_LEN] = {0};
     uint8_t bytes[6] = {0};
@@ -914,19 +916,19 @@ std::string DnsServer::resolveClientMac(uint32_t clientIpNet) const
         struct eth_addr* eth = nullptr;
         const ip4_addr_t* ipRet = nullptr;  // lwIP asserts both out-params are non-NULL
         if (etharp_find_addr(nif, &ip4, &eth, &ipRet) >= 0 && eth) {
-            std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+            snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                           eth->addr[0], eth->addr[1], eth->addr[2],
                           eth->addr[3], eth->addr[4], eth->addr[5]);
-            return std::string(mac);
+            return string(mac);
         }
     }
 
     // 2) DHCP lease table fallback.
     if (dhcpServer_ && dhcpServer_->getMacByIp(clientIpNet, bytes)) {
-        std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+        snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                       bytes[0], bytes[1], bytes[2],
                       bytes[3], bytes[4], bytes[5]);
-        return std::string(mac);
+        return string(mac);
     }
 
     return "";
@@ -974,8 +976,8 @@ void DnsServer::serverLoop()
 
     // Buffers on the heap (not the task stack) so a 4096-byte DNS message
     // does not overflow the 8K stack.
-    std::vector<uint8_t> buf(DNS_MAX_MSG_SIZE);
-    std::vector<uint8_t> response(DNS_MAX_MSG_SIZE);
+    vector<uint8_t> buf(DNS_MAX_MSG_SIZE);
+    vector<uint8_t> response(DNS_MAX_MSG_SIZE);
 
     while (!stopRequested_) {
         fd_set readfds;
@@ -1042,12 +1044,12 @@ void DnsServer::serverLoop()
                     char clientIp[IP4_TEXT_LEN];
                     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp,
                               sizeof(clientIp));
-                    const std::string clientMac =
+                    const string clientMac =
                         resolveClientMac(pf.client.sin_addr.s_addr);
                     // Extract A/AAAA answers and store the resolved mapping
                     // in the external cache (fire-and-forget ring buffer +
                     // sender task), so future queries hit the cache.
-                    std::vector<std::string> answerIps;
+                    vector<string> answerIps;
                     uint32_t answerTtl = 0;
                     parseForwardAnswer(response.data(),
                                        static_cast<size_t>(rl), answerIps,
@@ -1124,13 +1126,13 @@ void DnsServer::serverLoop()
 
                     // Cache hit — answer the client from the cache.
                     // Split the comma-separated IPs.
-                    std::vector<std::string> ips;
-                    const std::string list(res.ips);
+                    vector<string> ips;
+                    const string list(res.ips);
                     size_t start = 0;
                     while (start <= list.size()) {
                         size_t comma = list.find(',', start);
-                        if (comma == std::string::npos) comma = list.size();
-                        const std::string ip = list.substr(start, comma - start);
+                        if (comma == string::npos) comma = list.size();
+                        const string ip = list.substr(start, comma - start);
                         if (!ip.empty()) ips.push_back(ip);
                         if (comma == list.size()) break;
                         start = comma + 1;
@@ -1160,7 +1162,7 @@ void DnsServer::serverLoop()
                     char clientIp[IP4_TEXT_LEN];
                     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp,
                               sizeof(clientIp));
-                    const std::string clientMac =
+                    const string clientMac =
                         resolveClientMac(pf.client.sin_addr.s_addr);
                     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
                                      DnsLogSource::CACHE, true, ips[0]);
@@ -1188,7 +1190,7 @@ void DnsServer::serverLoop()
             queryCount_++;
 
             // Parse query
-            std::string domain;
+            string domain;
             uint16_t qtype = 0, qclass = 0, qid = 0;
             if (!parseQuery(buf.data(), static_cast<size_t>(recvLen),
                             domain, qtype, qclass, qid)) {
@@ -1220,15 +1222,15 @@ void DnsServer::serverLoop()
             }
 
             // Client MAC: ARP cache first, DHCP lease table fallback.
-            const std::string clientMac = resolveClientMac(from.sin_addr.s_addr);
+            const string clientMac = resolveClientMac(from.sin_addr.s_addr);
 
             // Step 1: Search local hosts (user-assigned). DNS names are
             // case-insensitive and may arrive with a trailing root dot, so
             // normalize before the map lookup.
             bool found = false;
             bool fromLocal = false;
-            std::vector<std::string> resolvedIps;
-            std::string lookupDomain = domain;
+            vector<string> resolvedIps;
+            string lookupDomain = domain;
             for (auto& c : lookupDomain) c = static_cast<char>(tolower((unsigned char)c));
             if (!lookupDomain.empty() && lookupDomain.back() == '.') {
                 lookupDomain.pop_back();
@@ -1244,7 +1246,7 @@ void DnsServer::serverLoop()
                 // falls back to A/AAAA.
                 if (qtype == DNS_TYPE_A || qtype == DNS_TYPE_AAAA) {
                     for (const auto& ip : it->second) {
-                        bool isV6 = ip.find(':') != std::string::npos;
+                        bool isV6 = ip.find(':') != string::npos;
                         if (qtype == DNS_TYPE_AAAA ? isV6 : !isV6) {
                             resolvedIps.push_back(ip);
                         }
@@ -1456,7 +1458,7 @@ void DnsServer::expirePendingSlot(int idx)
 
     char clientIp[IP4_TEXT_LEN];
     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp, sizeof(clientIp));
-    const std::string clientMac = resolveClientMac(pf.client.sin_addr.s_addr);
+    const string clientMac = resolveClientMac(pf.client.sin_addr.s_addr);
     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
                      DnsLogSource::FORWARDED, false, "");
     // Always logged (not gated by terminal logging): a silent forward timeout
@@ -1464,7 +1466,7 @@ void DnsServer::expirePendingSlot(int idx)
     ESP_LOGW(TAG, "DNS forward timeout: %s type=%u from %s",
              pf.domain.c_str(), pf.qtype, clientIp);
 
-    std::vector<uint8_t> nx(DNS_MAX_MSG_SIZE);
+    vector<uint8_t> nx(DNS_MAX_MSG_SIZE);
     size_t len = buildNxdomain(nx.data(), nx.size(), pf.qid, pf.domain,
                                pf.qtype, pf.qclass);
     if (len > 0) {
@@ -1524,7 +1526,7 @@ bool DnsServer::startForward(int idx, uint64_t now)
 // ─────────────────────────────────────────────────────
 
 bool DnsServer::parseQuery(const uint8_t* buf, size_t len,
-                            std::string& domain, uint16_t& type,
+                            string& domain, uint16_t& type,
                             uint16_t& cls, uint16_t& id)
 {
     if (len < DnsMessage::kHeaderBytes) return false;
@@ -1559,7 +1561,7 @@ bool DnsServer::parseQuery(const uint8_t* buf, size_t len,
 // minimum TTL over the A/AAAA answers so the resolved mapping can be stored
 // in the built-in cache together with its lifetime.
 void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
-                                   std::vector<std::string>& ips,
+                                   vector<string>& ips,
                                    uint32_t& ttlSec)
 {
     ttlSec = 0;
@@ -1594,7 +1596,7 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
         bool ipAnswer = false;
         if (type == DNS_TYPE_A && rdlen == 4) {
             char ip[IP4_TEXT_LEN];
-            std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
+            snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
                           buf[offset], buf[offset + 1],
                           buf[offset + 2], buf[offset + 3]);
             if (logTerminal_) ESP_LOGI(TAG, "parseForwardAnswer: A %s", ip);
@@ -1623,9 +1625,9 @@ void DnsServer::parseForwardAnswer(const uint8_t* buf, size_t len,
 // ─────────────────────────────────────────────────────
 
 size_t DnsServer::buildAnswer(uint8_t* buf, size_t bufSize,
-                               uint16_t id, const std::string& domain,
+                               uint16_t id, const string& domain,
                                uint16_t type, uint16_t cls,
-                               const std::vector<std::string>& ips,
+                               const vector<string>& ips,
                                uint32_t ttl)
 {
     size_t pos = 0;
@@ -1667,7 +1669,7 @@ size_t DnsServer::buildAnswer(uint8_t* buf, size_t bufSize,
 
         // TYPE: derive from the address format (A for IPv4, AAAA for IPv6)
         // so a host is answered with whatever records it actually has.
-        bool isV6 = ip.find(':') != std::string::npos;
+        bool isV6 = ip.find(':') != string::npos;
         uint16_t rrType = isV6 ? DNS_TYPE_AAAA : DNS_TYPE_A;
         buf[pos++] = (rrType >> 8) & 0xFF;
         buf[pos++] = rrType & 0xFF;
@@ -1699,7 +1701,7 @@ size_t DnsServer::buildAnswer(uint8_t* buf, size_t bufSize,
 }
 
 size_t DnsServer::buildNxdomain(uint8_t* buf, size_t bufSize,
-                                 uint16_t id, const std::string& domain,
+                                 uint16_t id, const string& domain,
                                  uint16_t type, uint16_t cls)
 {
     size_t pos = 0;
@@ -1732,14 +1734,14 @@ size_t DnsServer::buildNxdomain(uint8_t* buf, size_t bufSize,
 // Domain name encoding / decoding
 // ─────────────────────────────────────────────────────
 
-size_t DnsServer::encodeDomainName(uint8_t* dst, const std::string& domain)
+size_t DnsServer::encodeDomainName(uint8_t* dst, const string& domain)
 {
     size_t pos = 0;
     size_t labelStart = 0;
 
     while (labelStart < domain.length()) {
         size_t dotPos = domain.find('.', labelStart);
-        size_t labelLen = (dotPos == std::string::npos)
+        size_t labelLen = (dotPos == string::npos)
                           ? domain.length() - labelStart
                           : dotPos - labelStart;
 
@@ -1749,7 +1751,7 @@ size_t DnsServer::encodeDomainName(uint8_t* dst, const std::string& domain)
         memcpy(dst + pos, domain.c_str() + labelStart, labelLen);
         pos += labelLen;
 
-        if (dotPos == std::string::npos) break;
+        if (dotPos == string::npos) break;
         labelStart = dotPos + 1;
     }
 
@@ -1757,7 +1759,7 @@ size_t DnsServer::encodeDomainName(uint8_t* dst, const std::string& domain)
     return pos;
 }
 
-std::string DnsServer::decodeDomainName(const uint8_t* data, size_t len,
+string DnsServer::decodeDomainName(const uint8_t* data, size_t len,
                                         size_t& offset)
 {
     // Decode a (possibly compressed) DNS name with strict bounds checking.
@@ -1767,7 +1769,7 @@ std::string DnsServer::decodeDomainName(const uint8_t* data, size_t len,
     constexpr size_t kMaxNameLen = 255;   // RFC 1035 maximum
     constexpr size_t kMaxPointers = 32;   // compression-pointer hops per name
 
-    std::string domain;
+    string domain;
     bool offsetSet = false;
     size_t pos = offset;
     size_t jumps = 0;

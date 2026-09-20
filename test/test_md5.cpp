@@ -13,6 +13,8 @@
 //
 // The harness always exits with 0 — the proof is the printed text.
 
+using namespace std;
+
 #ifdef DHCP_TEST_HOST
 
 #include <cstdio>
@@ -26,29 +28,29 @@ using dhcp::core::Md5;
 
 static int g_fail = 0;
 
-static void check(bool ok, const std::string& what)
+static void check(bool ok, const string& what)
 {
     if (ok) {
-        std::printf("  ok   %s\n", what.c_str());
+        printf("  ok   %s\n", what.c_str());
     } else {
-        std::printf("  FAIL %s\n", what.c_str());
+        printf("  FAIL %s\n", what.c_str());
         ++g_fail;
     }
 }
 
-static void checkEq(const std::string& got, const std::string& want,
-                    const std::string& what)
+static void checkEq(const string& got, const string& want,
+                    const string& what)
 {
     if (got == want) {
-        std::printf("  ok   %s\n", what.c_str());
+        printf("  ok   %s\n", what.c_str());
     } else {
-        std::printf("  FAIL %s\n        got  %s\n        want %s\n",
+        printf("  FAIL %s\n        got  %s\n        want %s\n",
                     what.c_str(), got.c_str(), want.c_str());
         ++g_fail;
     }
 }
 
-static std::string hashOf(const std::string& s)
+static string hashOf(const string& s)
 {
     Md5 md5;
     md5.update(s.data(), s.size());
@@ -56,28 +58,28 @@ static std::string hashOf(const std::string& s)
 }
 
 // The deterministic payload the boundary table below was generated from.
-static std::string pattern(size_t n)
+static string pattern(size_t n)
 {
-    std::string s(n, '\0');
+    string s(n, '\0');
     for (size_t i = 0; i < n; i++) {
         s[i] = static_cast<char>((i * 37 + 11) & 0xFF);
     }
     return s;
 }
 
-static std::string tempBase()
+static string tempBase()
 {
-    const char* tmp = std::getenv("TEMP");
-    if (!tmp || !*tmp) tmp = std::getenv("TMP");
+    const char* tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
     if (!tmp || !*tmp) tmp = ".";
-    return std::string(tmp);
+    return string(tmp);
 }
 
 // ─── RFC 1321 test suite (appendix A.5) ─────────────────────────────
 
 static void test_rfc1321_vectors()
 {
-    std::printf("test_rfc1321_vectors\n");
+    printf("test_rfc1321_vectors\n");
     struct Vec { const char* text; const char* md5; };
     const Vec vectors[] = {
         {"", "d41d8cd98f00b204e9800998ecf8427e"},
@@ -92,8 +94,8 @@ static void test_rfc1321_vectors()
          "57edf4a22be3c955ac49da2e2107b67a"},
     };
     for (const Vec& v : vectors) {
-        const std::string name = std::string("RFC 1321: \"") +
-                                 (std::strlen(v.text) > 20 ? "<long>" : v.text) + "\"";
+        const string name = string("RFC 1321: \"") +
+                                 (strlen(v.text) > 20 ? "<long>" : v.text) + "\"";
         checkEq(hashOf(v.text), v.md5, name);
     }
 
@@ -110,7 +112,7 @@ static void test_rfc1321_vectors()
 
 static void test_block_boundaries()
 {
-    std::printf("test_block_boundaries\n");
+    printf("test_block_boundaries\n");
     struct Vec { size_t len; const char* md5; };
     const Vec vectors[] = {
         {0, "d41d8cd98f00b204e9800998ecf8427e"},
@@ -133,15 +135,15 @@ static void test_block_boundaries()
     };
     for (const Vec& v : vectors) {
         checkEq(hashOf(pattern(v.len)), v.md5,
-                "length " + std::to_string(v.len) + " (one shot)");
+                "length " + to_string(v.len) + " (one shot)");
     }
 }
 
 static void test_chunking_does_not_change_the_digest()
 {
-    std::printf("test_chunking_does_not_change_the_digest\n");
-    const std::string data = pattern(4109);
-    const std::string want = "c09a1ed7a42dba1a1d9969f666ebf661";
+    printf("test_chunking_does_not_change_the_digest\n");
+    const string data = pattern(4109);
+    const string want = "c09a1ed7a42dba1a1d9969f666ebf661";
 
     const size_t chunks[] = {1, 3, 7, 63, 64, 65, 127, 128, 4096};
     for (size_t c : chunks) {
@@ -152,7 +154,7 @@ static void test_chunking_does_not_change_the_digest()
             md5.update(data.data() + off, take);
             off += take;
         }
-        checkEq(md5.hex(), want, "4109 bytes in " + std::to_string(c) + "-byte chunks");
+        checkEq(md5.hex(), want, "4109 bytes in " + to_string(c) + "-byte chunks");
     }
 
     // A zero-length update in the middle must not disturb the stream (the file
@@ -167,7 +169,7 @@ static void test_chunking_does_not_change_the_digest()
     // still be fed and produce the digest of the longer message.
     Md5 again;
     again.update(data.data(), 200);
-    const std::string twice1 = again.hex();
+    const string twice1 = again.hex();
     checkEq(again.hex(), twice1, "hex() is idempotent");
     again.update(data.data() + 200, data.size() - 200);
     checkEq(again.hex(), want, "the object still works after hex()");
@@ -177,20 +179,20 @@ static void test_chunking_does_not_change_the_digest()
 
 static void test_file_helper()
 {
-    std::printf("test_file_helper\n");
-    const std::string path = tempBase() + "/dhcpserver_md5_test.bin";
-    const std::string data = pattern(4109);
-    const std::string want = "c09a1ed7a42dba1a1d9969f666ebf661";
+    printf("test_file_helper\n");
+    const string path = tempBase() + "/dhcpserver_md5_test.bin";
+    const string data = pattern(4109);
+    const string want = "c09a1ed7a42dba1a1d9969f666ebf661";
 
-    FILE* f = std::fopen(path.c_str(), "wb");
+    FILE* f = fopen(path.c_str(), "wb");
     if (!f) {
         check(false, "could not create " + path);
         return;
     }
-    std::fwrite(data.data(), 1, data.size(), f);
-    std::fclose(f);
+    fwrite(data.data(), 1, data.size(), f);
+    fclose(f);
 
-    std::string err;
+    string err;
     checkEq(Md5::file(path.c_str(), &err), want, "the digest of a file equals the digest of its bytes");
     check(err.empty(), "no error for a readable file");
 
@@ -205,9 +207,9 @@ static void test_file_helper()
 
     // An empty file is a legal file, and its digest is the one of the empty
     // message — not the same thing as "unreadable".
-    const std::string empty = tempBase() + "/dhcpserver_md5_empty.bin";
-    FILE* g = std::fopen(empty.c_str(), "wb");
-    if (g) std::fclose(g);
+    const string empty = tempBase() + "/dhcpserver_md5_empty.bin";
+    FILE* g = fopen(empty.c_str(), "wb");
+    if (g) fclose(g);
     err.clear();
     checkEq(Md5::file(empty.c_str(), &err), "d41d8cd98f00b204e9800998ecf8427e",
             "an empty file hashes as the empty message");
@@ -215,19 +217,19 @@ static void test_file_helper()
 
     // A file big enough to need several read chunks, hashed against the same
     // bytes fed in one go.
-    const std::string big = tempBase() + "/dhcpserver_md5_big.bin";
-    const std::string bigData = pattern(20000);
-    FILE* h = std::fopen(big.c_str(), "wb");
+    const string big = tempBase() + "/dhcpserver_md5_big.bin";
+    const string bigData = pattern(20000);
+    FILE* h = fopen(big.c_str(), "wb");
     if (h) {
-        std::fwrite(bigData.data(), 1, bigData.size(), h);
-        std::fclose(h);
+        fwrite(bigData.data(), 1, bigData.size(), h);
+        fclose(h);
     }
     checkEq(Md5::file(big.c_str()), hashOf(bigData),
             "20000 bytes spanning several 4 KB reads");
 
-    std::remove(path.c_str());
-    std::remove(empty.c_str());
-    std::remove(big.c_str());
+    remove(path.c_str());
+    remove(empty.c_str());
+    remove(big.c_str());
 }
 
 int main()
@@ -238,9 +240,9 @@ int main()
     test_file_helper();
 
     if (g_fail != 0) {
-        std::printf("FAILED (%d checks)\n", g_fail);
+        printf("FAILED (%d checks)\n", g_fail);
     } else {
-        std::printf("PASSED!\n");
+        printf("PASSED!\n");
     }
     return 0;
 }
