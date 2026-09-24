@@ -76,6 +76,16 @@ public:
     static esp_err_t handleGetCertificateDownload(httpd_req* req);
     static esp_err_t handlePostOtaUpload(httpd_req* req);
     static esp_err_t handlePostWebFile(httpd_req* req);
+    /**
+     * @brief Make the device's web tree equal to the uploaded folder (stage 169).
+     *
+     * Body: `{"paths":[…],"delete":true|false}` — a dry run unless `delete` is
+     * true; the answer names what a prune would remove (`extra`) and what it did
+     * remove (`deleted`). Removes every file on `/spiffs` the list does not hold;
+     * an empty list is refused and every name has to pass the upload's own
+     * validation (see `WebPrune`).
+     */
+    static esp_err_t handlePostWebSync(httpd_req* req);
     static esp_err_t handlePostTestConnection(httpd_req* req);
     static esp_err_t handleGetSettingsExport(httpd_req* req);
     static esp_err_t handlePostSettingsImport(httpd_req* req);

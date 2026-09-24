@@ -26,7 +26,7 @@ CONFIG_ETH_USE_SPI_ETHERNET=n
 # CPU frequency: leave unset so ESP-IDF picks 400 MHz on silicon rev >= v1.3,
 # or 360 MHz automatically on earlier silicon. If your module cannot run
 # 400 MHz, add:  CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
-CONFIG_FW_MIN_DATETIME="2026-09-20 10:00:00"
+CONFIG_FW_MIN_DATETIME="2026-09-22 08:00:00"
 
 # HTTPS for the web interface and on-device certificate generation (stage 156).
 CONFIG_ESP_HTTPS_SERVER_ENABLE=y

@@ -162,35 +162,99 @@ bool DnsStatStore::save(const string& path, const DnsStatTotals& totals, string*
     return true;
 }
 
-bool DnsStatStore::saveWithRetry(const string& path, const DnsStatTotals& totals,
-                                 string* why, core::ErrorLogCore* log)
+bool DnsStatStore::verify(const string& path, const DnsStatTotals& totals, string* why)
 {
-    string first;
-    if (save(path, totals, &first)) return true;
+    const string want = encode(totals);
 
-    if (log) log->submit(core::LogLevel::Error, "stats",
-                         "statistics could not be saved to " + path + " (" + first + ")");
-
-    // Start over from nothing: a leftover .tmp, or the destination itself, may be
-    // the very reason the first attempt failed.
-    const bool removedDest = std::remove(path.c_str()) == 0;
-    std::remove((path + ".tmp").c_str());
-    if (log) log->submit(core::LogLevel::Warn, "stats",
-                         "retrying " + path + (removedDest ? " (the file was removed first)"
-                                                          : " (there was no file to remove)"));
-
-    string second;
-    if (save(path, totals, &second)) {
-        if (log) log->submit(core::LogLevel::Warn, "stats",
-                             "the second attempt saved " + path);
-        return true;
+    FILE* file = fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        if (why) *why = "the file is not there";
+        return false;
     }
 
-    if (log) log->submit(core::LogLevel::Error, "stats",
-                         "the second attempt failed too (" + second +
-                             ") — there is no statistics file now");
-    if (why) *why = second;
-    return false;
+    // One byte more than a record is read, so a file that is *longer* than what
+    // was written cannot pass just because its first 92 bytes happen to match.
+    char got[kRecordSize + 1];
+    const size_t n = fread(got, 1, sizeof(got), file);
+    // The buffer was filled and the file was not over: "more than N bytes" is the
+    // honest way to say it, and the operator reads these words in a dialog.
+    const bool more = (n == sizeof(got)) && (fgetc(file) != EOF);
+    fclose(file);
+
+    if (n != want.size() || memcmp(got, want.data(), want.size()) != 0) {
+        if (why) {
+            *why = (n == want.size())
+                       ? "the content of the file differs from what was written"
+                       : "the file holds " + string(more ? "more than " : "") +
+                             to_string(n) + " bytes instead of " + to_string(want.size());
+        }
+        return false;
+    }
+    return true;
+}
+
+RestartSaveVerify::Outcome DnsStatStore::saveWithRetry(const string& path,
+                                                       const DnsStatTotals& totals,
+                                                       string* why, core::ErrorLogCore* log,
+                                                       const PhaseHandler& phase)
+{
+    // The policy reports every attempt before the next one starts, which is what
+    // makes the log read in the order things happened: the failure, the decision
+    // to retry, and then the retry's own outcome.
+    string lastWhy;
+    const auto report = [&](int attempt, RestartSaveVerify::AttemptResult result,
+                            const string& reason) {
+        if (!reason.empty()) lastWhy = reason;
+        if (log == nullptr) return;
+
+        if (result == RestartSaveVerify::AttemptResult::Ok) {
+            if (attempt > 1) {
+                log->submit(core::LogLevel::Warn, "stats",
+                            "the second attempt saved " + path);
+            }
+            return;
+        }
+        const bool mismatch = (result == RestartSaveVerify::AttemptResult::Mismatch);
+        if (attempt == 1) {
+            log->submit(core::LogLevel::Error, "stats",
+                        mismatch
+                            ? "the statistics file does not hold what was written (" + reason + ")"
+                            : "statistics could not be saved to " + path + " (" + reason + ")");
+            // Start over from nothing: a leftover .tmp, or the destination
+            // itself, may be the very reason the first attempt failed.
+            log->submit(core::LogLevel::Warn, "stats",
+                        "retrying " + path + " (the file is removed first)");
+            return;
+        }
+        log->submit(core::LogLevel::Error, "stats",
+                    mismatch
+                        ? "the second attempt wrote a file that still differs (" + reason +
+                              ") — there is no usable statistics file now"
+                        : "the second attempt failed too (" + reason +
+                              ") — there is no statistics file now");
+    };
+
+    const auto attempt = [&](int n, string& reason) {
+        // The retry starts from a clean slate (the operator's rule, kept from
+        // stage 123): a leftover `.tmp`, or the destination itself, may be what
+        // the first attempt tripped over.
+        if (n > 1) {
+            std::remove(path.c_str());
+            std::remove((path + ".tmp").c_str());
+        }
+        if (!save(path, totals, &reason)) return RestartSaveVerify::AttemptResult::Failed;
+        // The write is done and the file is about to be read back: the caller is
+        // told, so the page can show "checking" rather than the save's last word.
+        if (phase) phase(true);
+        const bool holds = verify(path, totals, &reason);
+        if (phase) phase(false);
+        if (!holds) return RestartSaveVerify::AttemptResult::Mismatch;
+        return RestartSaveVerify::AttemptResult::Ok;
+    };
+
+    const RestartSaveVerify::Outcome outcome = RestartSaveVerify::run(attempt, report);
+    if (why && outcome != RestartSaveVerify::Outcome::Ok) *why = lastWhy;
+    return outcome;
 }
 
 bool DnsStatStore::load(const string& path, DnsStatTotals& out, string* why)

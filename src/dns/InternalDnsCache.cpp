@@ -1,5 +1,7 @@
 #include "InternalDnsCache.h"
 
+#include "CacheFileReader.h"
+
 #include <cstring>
 #include <cctype>
 #include <cstdio>
@@ -35,15 +37,22 @@ constexpr uint32_t kMinCacheSizeMb = 1;        // smallest arena the page accept
 constexpr uint32_t kMaxCacheSizeMb = 20;       // fits cache.dat on the FAT volume
 constexpr size_t kBucketGranularityBytes = 4096;  // one bucket head per this much
 constexpr uint32_t kMinBuckets = 1024;         // fewer than this is pointless
-constexpr size_t kCacheFileHeaderBytes = 16;   // magic, version, count, reserved
-constexpr char kCacheFileMagic[] = "DCC1";
-constexpr size_t kCacheFileMagicBytes = 4;
-constexpr size_t kCacheFileVersionOffset = 4;
-constexpr size_t kCacheFileCountOffset = 8;
-constexpr size_t kCacheFileReservedOffset = 12;
-constexpr size_t kCacheFileTailBytes = 8;      // qtype, counts, remaining TTL
-constexpr uint32_t kMaxPlausibleEntries = 2000000;  // ~20 MB of records
+// The file format itself — magic, version, record layout — lives in
+// CacheFileReader (stage 169): a planned restart now reads the saved file back
+// with the very reader the boot-time restore uses, so the two can never disagree
+// about what a `cache.dat` is. What stays here are the node pool's own limits,
+// and the four `static_assert`s below pin them to the reader's copy, so the
+// writer could not produce a record the format does not describe.
 constexpr uint64_t kProgressEvery = 64;
+
+static_assert(kMaxA == CacheFileReader::kMaxA,
+              "the pool and the file format must agree on the IPv4 addresses of a record");
+static_assert(kMaxAAAA == CacheFileReader::kMaxAaaa,
+              "the pool and the file format must agree on the IPv6 addresses of a record");
+static_assert(kTypeA == CacheFileReader::kTypeA,
+              "the pool and the file format must agree on the QTYPE of an IPv4 answer");
+static_assert(kTypeAaaa == CacheFileReader::kTypeAaaa,
+              "the pool and the file format must agree on the QTYPE of an IPv6 answer");
 // Rule 39: FNV-1a, the same hash the DHCP names use — offset basis and prime.
 constexpr uint32_t kFnvOffsetBasis = 2166136261u;
 constexpr uint32_t kFnvPrime = 16777619u;        // report progress every N entries
@@ -593,30 +602,17 @@ void InternalDnsCache::clear()
 // Persistence (cache.dat on FAT)
 // ─────────────────────────────────────────────────────
 //
-// Binary layout (little-endian):
-//   header (16 B): magic "DCC1" (4) | u32 version | u32 entryCount | u32 reserved(0)
-//   per entry:
-//     u8  nameLen, name[nameLen]
-//     u16 qtype
-//     u8  nA, u8 nAAAA
-//     u32 ttlRemainingSec
-//     u32 uses            (version 3; version 2 has it as u64, version 1 none)
-//     nA  × 4 B  (IPv4, network byte order)
-//     nAAAA × 16 B (IPv6)
-//
-// Three versions are read. Version 1 was written before the usage counter
-// existed (its records come back with uses == 0); version 2 carried an 8-byte
-// counter, from the time the field in memory was 64-bit; version 3 writes the
-// 4 bytes the field actually has now (stage 126 made it uint32_t). Writing 4
-// bytes costs backward compatibility in one direction — an older firmware
-// refuses the newer file, since it cannot know what the shorter record means —
-// and saves ~230 KB in a full 20 MB snapshot. The value is clamped to
-// UINT32_MAX on load, so a version 2 file with a larger counter still loads.
+// The layout of the file — header, record fields, the three versions that are
+// read and what the version 3 change costs — is described next to the reader
+// that owns it now (`CacheFileReader`, stage 169). What is left here is the
+// writing half: the header, the records and the entry count patched in at the
+// end, all spelled in the reader's constants so the two halves of the format
+// cannot drift apart.
 namespace {
-constexpr uint32_t kFileVersion = 3;         // written now (4-byte usage counter)
-constexpr uint32_t kFileVersionMin = 1;      // readable: 1, 2 and 3
-constexpr uint32_t kFileVersionUses64 = 2;   // up to this version the counter is 8 B
-constexpr uint32_t kMaxNameSave = 127;
+
+// The file format belongs to CacheFileReader (stage 169); this short alias keeps
+// the writing half below readable without copying a single number into this file.
+using CacheFmt = CacheFileReader;
 
 void putU32(uint8_t* d, uint32_t v)
 {
@@ -632,14 +628,9 @@ uint32_t getU32(const uint8_t* s)
            (static_cast<uint32_t>(s[2]) << 16) |
            (static_cast<uint32_t>(s[3]) << 24);
 }
-// Only reading needs the 64-bit helper: version 2 files carry an 8-byte usage
-// counter, while what this build writes (version 3) is 4 bytes.
-uint64_t getU64(const uint8_t* s)
-{
-    uint64_t v = 0;
-    for (int i = 0; i < 8; i++) v |= static_cast<uint64_t>(s[i]) << (8 * i);
-    return v;
-}
+// The 64-bit reader a version 2 record needs now lives next to the format, in
+// CacheFileReader — this file only writes version 3 (a 4-byte counter) and reads
+// the two header fields it reports in fileInfo().
 } // namespace
 
 bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
@@ -717,11 +708,11 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
 
     // Header: magic "DCC1" | version u32 | entryCount u32 | reserved u32.
     // entryCount is patched at the end with the exact number actually written.
-    uint8_t hdr[kCacheFileHeaderBytes];
-    memcpy(hdr, kCacheFileMagic, kCacheFileMagicBytes);
-    putU32(hdr + kCacheFileVersionOffset, kFileVersion);
-    putU32(hdr + kCacheFileCountOffset, 0);
-    putU32(hdr + kCacheFileReservedOffset, 0);
+    uint8_t hdr[CacheFmt::kHeaderBytes];
+    memcpy(hdr, CacheFmt::kMagic, CacheFmt::kMagicBytes);
+    putU32(hdr + CacheFmt::kVersionOffset, CacheFmt::kVersion);
+    putU32(hdr + CacheFmt::kCountOffset, 0);
+    putU32(hdr + CacheFmt::kReservedOffset, 0);
     if (fwrite(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
         fclose(f);
         heap_caps_free(snap);
@@ -742,7 +733,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
             unlock();
         }
         const size_t nameLen = strlen(n.name);
-        if (nameLen == 0 || nameLen > kMaxNameSave) continue;
+        if (nameLen == 0 || nameLen > CacheFmt::kMaxNameBytes) continue;
 
         uint32_t ttlRem = n.ttl;
         if (!ignoreTtl_ && n.ttl != 0) {
@@ -761,7 +752,7 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         if (fwrite(&nameLenU8, 1, 1, f) != 1) { ok = false; break; }
         if (fwrite(n.name, 1, nameLen, f) != nameLen) { ok = false; break; }
 
-        uint8_t tail[kCacheFileTailBytes];  // qtype(2) + nA(1) + nAAAA(1) + ttl(4)
+        uint8_t tail[CacheFmt::kTailBytes];  // qtype(2) + nA(1) + nAAAA(1) + ttl(4)
         tail[0] = static_cast<uint8_t>(n.qtype & 0xFF);
         tail[1] = static_cast<uint8_t>((n.qtype >> 8) & 0xFF);
         tail[2] = static_cast<uint8_t>(n.nA);
@@ -820,95 +811,57 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
     if (entriesLoaded) *entriesLoaded = 0;
     if (!path || !*path) return false;
     if (!arena_) return false;
-    FILE* f = fopen(path, "rb");
-    if (!f) return false;
 
-    uint8_t hdr[kCacheFileHeaderBytes];
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
-        fclose(f);
-        return false;
-    }
-    const uint32_t ver = (memcmp(hdr, kCacheFileMagic, kCacheFileMagicBytes) == 0)
-                              ? getU32(hdr + kCacheFileVersionOffset) : 0;
-    if (ver < kFileVersionMin || ver > kFileVersion) {
-        ESP_LOGW(TAG, "loadFromFile: %s has unsupported header", path);
-        fclose(f);
-        return false;
-    }
-    const uint32_t want = getU32(hdr + kCacheFileCountOffset);
-    if (want > kMaxPlausibleEntries) {  // sanity bound (~20 MB / min record)
-        ESP_LOGW(TAG, "loadFromFile: %s header count %u implausible", path,
-                 (unsigned)want);
-        fclose(f);
-        return false;
-    }
-
+    // The file is read by the same reader a planned restart checks it with
+    // (stage 169): a check that used a different parser could pass on a file
+    // this restore then refuses, which would be the worst of both worlds.
     size_t loaded = 0;
-    for (uint32_t i = 0; i < want; i++) {
-        uint8_t nameLen;
-        if (fread(&nameLen, 1, 1, f) != 1) break;
-        if (nameLen == 0 || nameLen > kMaxNameSave) break;
-        char name[128];
-        if (fread(name, 1, nameLen, f) != nameLen) break;
-        name[nameLen] = '\0';
-        uint8_t tail[kCacheFileTailBytes];
-        if (fread(tail, 1, kCacheFileTailBytes, f) != kCacheFileTailBytes) break;
-        const uint16_t qtype = static_cast<uint16_t>(tail[0] | (tail[1] << 8));
-        const uint8_t nA = tail[2];
-        const uint8_t nAAAA = tail[3];
-        const uint32_t ttlRem = getU32(tail + 4);
-        if (nA > kMaxA || nAAAA > kMaxAAAA) break;
+    const CacheFileRead read = CacheFileReader::read(
+        path, [&](const CacheFileRecord& rec, uint32_t index, uint32_t count) {
+            // The reader hands the addresses over as the bytes the file holds
+            // (it knows nothing of lwIP), so the text is made here — the same
+            // text `store()` writes into a node.
+            vector<string> ips;
+            ips.reserve(rec.addrs.size());
+            char buf[INET6_ADDRSTRLEN];
+            for (const string& raw : rec.addrs) {
+                const bool ipv6 = (rec.qtype == CacheFileReader::kTypeAaaa);
+                const void* addr = raw.data();
+                if (inet_ntop(ipv6 ? AF_INET6 : AF_INET, addr, buf, sizeof(buf))) {
+                    ips.push_back(buf);
+                }
+            }
+            if (ips.empty()) return;   // nothing to insert; the reader already validated the shape
 
-        // Versions 2 and 3 carry the usage counter, in 8 and 4 bytes
-        // respectively; version 1 files simply have none, and their records
-        // come back counted as never used.
-        uint64_t uses = 0;
-        if (ver >= kFileVersionUses64) {
-            if (ver >= 3) {
-                uint8_t usesBuf[4];
-                if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
-                uses = getU32(usesBuf);
-            } else {
-                uint8_t usesBuf[8];
-                if (fread(usesBuf, 1, sizeof(usesBuf), f) != sizeof(usesBuf)) break;
-                uses = getU64(usesBuf);
-            }
-        }
+            // A restore writes the saved counter as it is — store() would count
+            // the load itself as a use and inflate every record by one.
+            storeInternal(rec.name, rec.qtype, ips, rec.ttlRemaining,
+                          /*countUse=*/false, rec.uses);
+            loaded++;
 
-        vector<string> ips;
-        bool entryOk = true;
-        if (qtype == 1) {
-            for (uint8_t j = 0; j < nA; j++) {
-                uint32_t a4;
-                if (fread(&a4, 1, 4, f) != 4) { entryOk = false; break; }
-                char buf[INET_ADDRSTRLEN];
-                if (inet_ntop(AF_INET, &a4, buf, sizeof(buf))) ips.push_back(buf);
+            // Report progress periodically.
+            if (progress && ((index + 1) % kProgressEvery == 0 || (index + 1) == count)) {
+                progress(static_cast<uint32_t>(index + 1), count, progressCtx);
             }
-        } else if (qtype == 28) {
-            for (uint8_t j = 0; j < nAAAA; j++) {
-                uint8_t a6[16];
-                if (fread(a6, 1, 16, f) != 16) { entryOk = false; break; }
-                char buf[INET6_ADDRSTRLEN];
-                if (inet_ntop(AF_INET6, a6, buf, sizeof(buf))) ips.push_back(buf);
-            }
-        } else {
+        });
+
+    switch (read.status) {
+        case CacheFileStatus::NotFound:
+        case CacheFileStatus::BadHeader:
+        case CacheFileStatus::UnsupportedVersion:
+        case CacheFileStatus::ImplausibleCount:
+            ESP_LOGW(TAG, "loadFromFile: %s refused (%s)", path, read.why.c_str());
+            return false;
+        default:
+            // Ok, and also a file that ended early: a partial restore is what
+            // this path has always done with one (the boot log says how many
+            // records came back), and the restart check is where a torn file is
+            // named as such.
             break;
-        }
-        if (!entryOk || ips.empty()) break;
-        // A restore writes the saved counter as it is — store() would count
-        // the load itself as a use and inflate every record by one.
-        storeInternal(name, qtype, ips, ttlRem, /*countUse=*/false, uses);
-        loaded++;
-
-        // Report progress periodically.
-        if (progress && (loaded % kProgressEvery == 0 || loaded == want)) {
-            progress(static_cast<uint32_t>(loaded), want, progressCtx);
-        }
     }
 
-    fclose(f);
     if (entriesLoaded) *entriesLoaded = loaded;
-    if (progress) progress(static_cast<uint32_t>(loaded), want, progressCtx);
+    if (progress) progress(static_cast<uint32_t>(loaded), read.headerCount, progressCtx);
     ESP_LOGI(TAG, "Cache loaded from %s: %u entries", path, (unsigned)loaded);
     return true;
 }
@@ -924,11 +877,11 @@ InternalDnsCache::FileInfo InternalDnsCache::fileInfo(const char* path) const
     const long sz = ftell(f);
     info.size = (sz > 0) ? static_cast<size_t>(sz) : 0;
     fseek(f, 0, SEEK_SET);
-    uint8_t hdr[kCacheFileHeaderBytes];
+    uint8_t hdr[CacheFmt::kHeaderBytes];
     if (fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
-        memcmp(hdr, kCacheFileMagic, kCacheFileMagicBytes) == 0) {
-        info.version = getU32(hdr + kCacheFileVersionOffset);
-        info.entries = getU32(hdr + kCacheFileCountOffset);
+        memcmp(hdr, CacheFmt::kMagic, CacheFmt::kMagicBytes) == 0) {
+        info.version = getU32(hdr + CacheFmt::kVersionOffset);
+        info.entries = getU32(hdr + CacheFmt::kCountOffset);
     }
     fclose(f);
     return info;

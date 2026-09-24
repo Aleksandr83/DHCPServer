@@ -11,8 +11,13 @@
  * Build (MinGW):
  *   g++ -std=c++17 -Wall -Wextra -Werror -DDHCP_TEST_HOST \
  *       -Dapp_main=esp_test_app_main -I test/stubs -I. \
- *       test/test_internalcache.cpp src/dns/InternalDnsCache.cpp host_main.cpp \
+ *       test/test_internalcache.cpp src/dns/InternalDnsCache.cpp \
+ *       src/dns/CacheFileReader.cpp host_main.cpp \
  *       -o test_internalcache -lws2_32
+ *
+ * `host_main.cpp` must return 0 from `main()` for this file: its `app_main` is
+ * `void`, so an `int`-returning shim would read an undefined value (the harness
+ * keeps two shims for exactly that reason).
  *
  * Without `DHCP_TEST_HOST` the file compiles to an `app_main` that does nothing:
  * an on-device test build cannot drive the fake clock or ask for a PSRAM arena
@@ -32,6 +37,7 @@ using namespace std;
 #include <esp_timer.h>   // host stub: testClockUs() moves the clock
 
 #include "../src/dns/InternalDnsCache.h"
+#include "../src/dns/CacheFileReader.h"
 
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
 #define TEST_ASSERT_FALSE(cond) do { if ((cond)) { printf("FAIL: %s:%d: !%s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
@@ -39,6 +45,8 @@ using namespace std;
 #define TEST_ASSERT_STR_EQ(a, b) do { if (string(a) != string(b)) { printf("FAIL: %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, string(a).c_str(), string(b).c_str()); return 1; } } while(0)
 
 using dhcp::dns::InternalDnsCache;
+using dhcp::dns::CacheFileReader;
+using dhcp::dns::CacheFileCheck;
 
 namespace {
 
@@ -652,6 +660,64 @@ static int test_eviction_scan_is_measured()
     return 0;
 }
 
+/** The read-back check a planned restart runs (stage 169) — `CacheFileReader` —
+ *  has to pass on the file this cache writes, and must not pass on one that was
+ *  cut short. That is the whole difference between "saveToFile returned" and
+ *  "the volume holds what was saved", and it is checked here on the writer's own
+ *  output rather than on a file assembled by hand. */
+static int test_saved_file_passes_the_restart_check()
+{
+    resetClock();
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+    c.store("example.com", 1, ipA("93.184.216.34"), 60);
+    c.store("example.net", 1, ipA("93.184.216.35"), 60);
+
+    const char* path = "test_cache_check.dat";
+    remove(path);
+    size_t written = 0;
+    TEST_ASSERT_TRUE(c.saveToFile(path, &written));
+    TEST_ASSERT_EQ(written, 2u);
+
+    const CacheFileCheck good = CacheFileReader::check(path, written);
+    TEST_ASSERT_TRUE(good.ok);
+    TEST_ASSERT_EQ(good.records, 2u);
+
+    // The count the save reported is part of the check: a file that holds fewer
+    // records than were written is not the file that was written.
+    const CacheFileCheck wrong_count = CacheFileReader::check(path, written + 1);
+    TEST_ASSERT_FALSE(wrong_count.ok);
+    TEST_ASSERT_TRUE(wrong_count.why.find("2 records") != string::npos);
+
+    // A file cut short is a torn write, and a torn write must not pass.
+    string bytes;
+    {
+        FILE* in = fopen(path, "rb");
+        TEST_ASSERT_TRUE(in != nullptr);
+        char buf[512];
+        size_t n = 0;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) bytes.append(buf, n);
+        fclose(in);
+    }
+    TEST_ASSERT_TRUE(bytes.size() > 1);
+    bytes.resize(bytes.size() - 1);
+
+    const char* cut = "test_cache_check_cut.dat";
+    remove(cut);
+    {
+        FILE* out = fopen(cut, "wb");
+        TEST_ASSERT_TRUE(out != nullptr);
+        fwrite(bytes.data(), 1, bytes.size(), out);
+        fclose(out);
+    }
+    const CacheFileCheck torn = CacheFileReader::check(cut, written);
+    TEST_ASSERT_FALSE(torn.ok);
+
+    remove(cut);
+    remove(path);
+    return 0;
+}
+
 void app_main()
 {
     printf("Running InternalDnsCache tests...\n");
@@ -672,6 +738,7 @@ void app_main()
     failures += test_ignore_ttl();
     failures += test_hit_reports_its_time_split();
     failures += test_eviction_scan_is_measured();
+    failures += test_saved_file_passes_the_restart_check();
 
     if (failures == 0) {
         printf("All InternalDnsCache tests PASSED!\n");

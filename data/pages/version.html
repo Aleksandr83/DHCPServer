@@ -198,10 +198,27 @@
 
         // Same rule as the firmware Upload button: with nothing selected there
         // is nothing to send (one request per file), so the button is disabled
-        // instead of being clickable and answering with an alert.
+        // instead of being clickable and answering with an alert. The folder also
+        // has to *be* the web tree: without `index.html` there is no home page, so
+        // such a folder is not accepted at all (stage 169 — picking the wrong
+        // folder, `bin`, sent 28 wrong files once).
+        function pickedWebFiles() {
+            return Array.from(webuiInput.files || []);
+        }
+
+        // The path inside the chosen folder ("data/pages/x.html" → "pages/x.html"),
+        // by the same rule the upload itself uses.
+        function pickedRelPath(f) {
+            return (f.webkitRelativePath || f.name).replace(/^[^/]*\//, '');
+        }
+
+        function pickHasIndex(files) {
+            return files.some(f => pickedRelPath(f) === kWebIndexName);
+        }
+
         function refreshWebUiUploadState() {
-            webuiUploadBtn.disabled =
-                !(webuiInput.files && webuiInput.files.length > 0);
+            const files = pickedWebFiles();
+            webuiUploadBtn.disabled = files.length === 0 || !pickHasIndex(files);
         }
 
         refreshWebUiUploadState();   // the markup already starts out disabled
@@ -237,8 +254,21 @@
         });
         webuiInput.addEventListener('change', () => {
             webuiStatus('');   // the old result no longer applies
+            const files = pickedWebFiles();
+            if (files.length && !pickHasIndex(files)) {
+                // Not the web tree: the folder is taken back (label, button and
+                // input), and the reason is said out loud. Sending it would
+                // replace page after page on the device with files that have
+                // nothing to do with the interface (stage 169).
+                webuiPick = null;
+                webuiInput.value = '';   // picking the same folder again must fire again
+                webuiName.setAttribute('data-i18n', 'webupdate.no_folder');
+                applyTranslations();
+                webuiStatus('<p class="status-err">' + tr('webupdate.not_a_folder') + '</p>');
+                refreshWebUiUploadState();
+                return;
+            }
             refreshWebUiUploadState();
-            const files = Array.from(webuiInput.files || []);
             if (files.length) {
                 const first = files[0].webkitRelativePath || files[0].name;
                 webuiPick = {
@@ -253,9 +283,67 @@
             }
         });
 
+        // ── Making the device's tree equal to the folder ──
+        // The upload path only ever writes: a page dropped from `data/` used to
+        // stay on the device for good, holding its bytes while its route had gone
+        // away with the firmware. The operator needs the device serviceable from a
+        // browser alone — no cable, no flash — so the update ends here (stage 169):
+        // the device is told which files the folder holds, lists what it would
+        // remove, asks, and removes it. Only after a **complete** upload: pruning
+        // after a partial one would delete the files that failed to arrive.
+        const kSyncListMax = 12;   // names shown in the question; the rest is "…"
+
+        async function syncWebTree(files) {
+            const paths = files.map(pickedRelPath);
+            let check = null;
+            try {
+                check = await postJSON('/api/web/sync', { paths: paths });
+            } catch (e) {
+                return { ok: false, html: '<p class="status-err">' +
+                             tr('webupdate.sync_failed') + ': ' + e.message + '</p>' };
+            }
+            const extra = (check && check.extra) || [];
+            if (!extra.length) {
+                return { ok: true, html: '<p class="status-ok">' +
+                             tr('webupdate.extra_none') + '</p>' };
+            }
+
+            const shown = extra.slice(0, kSyncListMax).join('\n') +
+                          (extra.length > kSyncListMax ? '\n…' : '');
+            const answer = await showDialog({
+                title: tr('webupdate.extra_title'),
+                hint: tr('webupdate.extra_hint') + '\n\n' + shown,
+                okLabel: tr('webupdate.extra_delete'),
+                cancelLabel: tr('common.cancel'),
+                danger: true,
+            });
+            if (!answer) {
+                return { ok: false, html: '<p class="status-warn">' +
+                             tr('webupdate.extra_kept') + '</p>' };
+            }
+
+            let done = null;
+            try {
+                done = await postJSON('/api/web/sync', { paths: paths, delete: true });
+            } catch (e) {
+                return { ok: false, html: '<p class="status-err">' +
+                             tr('webupdate.sync_failed') + ': ' + e.message + '</p>' };
+            }
+            const deleted = (done && done.deleted) || [];
+            const notDeleted = (done && done.failed) || [];
+            let line = '<p class="' + (notDeleted.length ? 'status-err' : 'status-ok') + '">' +
+                       tr('webupdate.extra_deleted') + ': ' + deleted.length;
+            if (notDeleted.length) {
+                line += ' · ' + tr('webupdate.extra_failed') + ': ' + notDeleted.join(', ');
+            }
+            return { ok: notDeleted.length === 0, html: line + '</p>' };
+        }
+
         async function uploadWebUi() {
-            const files = Array.from(webuiInput.files || []);
-            if (!files.length) return;   // not reachable while the button is disabled
+            const files = pickedWebFiles();
+            // Not reachable while the button is disabled, and still checked here:
+            // a folder without `index.html` is not the web tree (stage 169).
+            if (!files.length || !pickHasIndex(files)) return;
 
             const btn = webuiUploadBtn;
             const status = document.getElementById('webui-status');
@@ -323,7 +411,14 @@
             } else {
                 html += `<p class="status-err">${failCount} ${translations?.webupdate?.failed || 'files failed:'} ${failed.join(', ')}</p>`;
             }
-            webuiStatus(html, failCount === 0);
+            // The tree is made equal to the folder only when every file arrived:
+            // a prune after a partial upload would delete what did not make it
+            // (stage 169).
+            let sync = { ok: true, html: '' };
+            if (failCount === 0) {
+                sync = await syncWebTree(files);
+            }
+            webuiStatus(html + sync.html, failCount === 0 && sync.ok);
         }
 
         // Load version on page load

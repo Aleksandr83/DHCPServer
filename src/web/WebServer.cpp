@@ -283,7 +283,14 @@ bool WebServer::startHttps()
         return false;
     }
 
+    // IDF 6.1's HTTPD_SSL_CONFIG_DEFAULT() leaves the deprecated
+    // `use_secure_element` member of httpd_ssl_config_t out (esp_https_server.h),
+    // and the toolchain compiles with -Werror, so the macro cannot be expanded as
+    // it stands; the pragma has to sit on the expansion itself (stage 170).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
+#pragma GCC diagnostic pop
     config.httpd = makeConfig(kHttpsPort, kHttpsStackBytes, kHttpsMaxOpenSockets, kHttpsCtrlPort);
     config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
     config.port_secure = kHttpsPort;
@@ -505,6 +512,11 @@ const WebRoute WebServer::kRoutes[] = {
     { "/api/security/certificates/download", RouteMethod::Get, &WebServer::getCertificateDownloadHandler },
     { "/api/ota/upload",                  RouteMethod::Post,  &WebServer::postOtaUploadHandler },
     { "/api/web/file",                    RouteMethod::Post,  &WebServer::postWebFileHandler },
+    // The other half of a web update (stage 169): the folder's file list, and the
+    // device removes what the folder does not hold. A route of its own rather than
+    // a flag on the upload, because it decides what gets **deleted** and is asked
+    // for once, after every file is on the device.
+    { "/api/web/sync",                    RouteMethod::Post,  &WebServer::postWebSyncHandler },
     { "/api/test-connection",             RouteMethod::Post,  &WebServer::postTestConnectionHandler },
     { "/api/settings/export",             RouteMethod::Get,   &WebServer::getSettingsExportHandler },
     { "/api/settings/import",             RouteMethod::Post,  &WebServer::postSettingsImportHandler },

@@ -7,6 +7,7 @@
 #include "InternalDnsCache.h"
 #include "CacheAutosave.h"
 #include "RestartSaveJobState.h"
+#include "RestartSaveVerify.h"
 #include "../dhcp/IDhcpServer.h"
 
 #include <string>
@@ -180,6 +181,21 @@ public:
     struct StatsProgress {
         bool busy = false;   // the background write is running
         RestartSaveJobState::Verdict result = RestartSaveJobState::Verdict::None;
+        /// True while the job is reading the file back rather than writing it
+        /// (stage 169). The check of 92 bytes is over in microseconds, so a page
+        /// that polls twice a second will rarely see it — but it is the truth
+        /// about what the device is doing, and the line for it exists for the
+        /// case where it is caught.
+        bool checking = false;
+        /// True when the last finished job **read the file back and it matched**
+        /// (stage 169). It is how a page can say "the file was checked" without
+        /// guessing: a job that only wrote the file (or a firmware that does not
+        /// check at all) leaves this false, and `ok` alone would not tell the two
+        /// apart.
+        bool checked = false;
+        /// Where the file lives (`/fat/Statistica.dat`). The page shows it, so
+        /// the operator can see which file is being written and checked.
+        std::string path;
         /// Why the last job failed, in the device's words ("cannot publish the
         /// file"). It travels to the page because the terminal is not always
         /// there — the operator has no serial console, which is exactly how a
@@ -275,8 +291,14 @@ public:
      * whose entries have all expired, has simply nothing to write — and telling
      * the operator "the cache could not be saved" in that case is a lie a
      * boolean could not avoid (it was the sole reason for this enum).
+     *
+     * `Mismatch` (stage 169) is the third kind of bad news and the reason it is
+     * not folded into `Failed`: the file *was* written, but reading it back did
+     * not give what was written. The page asks the operator a different question
+     * about it ("the cache on the card does not match — reboot anyway?"), and the
+     * device retried the save once before saying so.
      */
-    enum class PersistResult { None, Ok, Empty, Failed };
+    enum class PersistResult { None, Ok, Empty, Mismatch, Failed };
 
     /**
      * @brief Progress of the running save/load job.
@@ -284,9 +306,26 @@ public:
     struct PersistProgress {
         bool     busy = false;   // a background job is running
         bool     isSave = false; // true=save, false=load
+        /// True while a restart-requested save is reading the file back instead
+        /// of writing it (stage 169). On a table of a few megabytes that pass
+        /// takes seconds, so the page says "checking" with its own progress
+        /// rather than freezing at the save's last percentage.
+        bool     checking = false;
+        /// True when the last finished job **read the file back and it matched**
+        /// (stage 169) — the same meaning as the statistics job's flag: a manual
+        /// save from the DNS page does not verify, so its `ok` is not a check.
+        bool     checked = false;
         PersistResult result = PersistResult::None;  // outcome of the last finished job
         uint32_t done = 0;       // records processed so far
         uint32_t total = 0;      // total records (0 until known)
+        /// Where the file lives (`/fat/cache.dat`), for the page's status line.
+        std::string path;
+        /// Why the last job ended that way, in the device's own words (empty
+        /// unless it failed or its content did not match). It travels to the page
+        /// for the same reason the statistics job's detail does: the operator
+        /// does not always have a terminal, and "the cache could not be saved"
+        /// without the reason is exactly what made him ask what went wrong.
+        std::string detail;
     };
 
     /**
@@ -485,6 +524,30 @@ private:
     void*  statsJobMutex_ = nullptr;     // SemaphoreHandle_t
     RestartSaveJobState statsJob_;
     TaskHandle_t statsTaskHandle_ = nullptr;
+
+    // ─── The read-back check a planned restart asks for (stage 169) ───
+    /// @brief Take (and clear) the restart's request for a verified cache save.
+    ///
+    /// The request is a flag rather than a parameter of startPersistJob(), for one
+    /// reason: the restart path may find a save already running (a manual one, or
+    /// the boot-time restore), and it is still *that* file the restart will keep —
+    /// so the job in flight has to be able to pick the request up. Jobs that were
+    /// not asked do not verify: the operator's rule names the two restart paths.
+    bool takePersistVerifyOwed();
+    /// @brief Report one verified-save attempt to the error log.
+    void reportCacheVerify(int attempt, RestartSaveVerify::AttemptResult result,
+                           const std::string& why);
+    /// @brief Mark the read-back phase of the cache job (progress endpoint).
+    void setPersistChecking(bool checking);
+    /// @brief Mark the read-back phase of the statistics job (progress endpoint).
+    void setStatsChecking(bool checking);
+
+    bool   persistVerifyOwed_ = false;   // guarded by persistJobMutex_
+    bool   persistChecking_ = false;     // ditto — the read-back pass is running
+    bool   persistChecked_ = false;      // ditto — the last save was read back and matched
+    std::string persistDetail_;          // ditto — why the last job ended that way
+    bool   statsChecking_ = false;       // guarded by statsJobMutex_
+    bool   statsChecked_ = false;        // ditto — the last write was read back and matched
 
     // External DNS server address
     uint32_t externalDnsIp_ = 0;

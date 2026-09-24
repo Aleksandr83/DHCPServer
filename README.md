@@ -29,7 +29,7 @@ On the page itself a row without a MAC is **not an entry**: its Enable checkbox 
 - **DNS Proxy** — pipeline: logging → local hosts → **internal (PSRAM) cache** → external cache (REST) → forwarding to external DNS
 - **Block non-A/AAAA forwarding** — optional toggle on DNS Setup: queries of any type other than A/AAAA that are not answered from local hosts get an immediate NODATA reply and are never sent to the external cache/upstream (the client falls back to A/AAAA)
 - **Internal DNS Cache** — on-device A/AAAA hash table in PSRAM (up to 20 MB, configurable; TTL-aware, ignore-TTL option), served before the external cache. Every record carries a **usage counter**: it grows by one for each answer served from the cache and for each answer stored, the **least used** record is evicted when the pool fills up, and the status reports the total and the most-used name (the cache file keeps the counters, format version 3; version 1 and 2 files are still read). The status line prints the average hit time next to the parts it is made of — waiting for the arena lock, the cache's own work, and the number of records a hit walked (stage 127; those totals survive a reboot with the statistics file)
-- **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot), and a planned restart no longer throws the working set away: with the "Save cache before reboot" switch on (**default**, next to "Save statistics before reboot" on the Internal Cache page) the device writes the whole table before restarting — from the Reboot button, a firmware update or the console's `reboot` — and loads it again at boot; every save also stores an **MD5 of the file** in NVS, and a file whose checksum does not match is refused (the boot restore logs it, the load button asks before overriding)
+- **Cache Persistence** — the built-in cache can be saved to/loaded from `cache.dat` on the FAT partition (background job with live progress; auto-restored on boot), and a planned restart no longer throws the working set away: with the "Save cache before reboot" switch on (**default**, next to "Save statistics before reboot" on the Internal Cache page) the device writes the whole table before restarting — from the Reboot button, a firmware update or the console's `reboot` — and loads it again at boot; every save also stores an **MD5 of the file** in NVS, and a file whose checksum does not match is refused (the boot restore logs it, the load button asks before overriding). A restart does not take the write on trust either (stage 169): the statistics file is read back and compared byte for byte, the cache file is parsed and its record count compared with the one the save reported, and a file that does not match is written **once more**. If it still does not match, the page says so with the device's own words and asks the operator — "cancel the reboot/update" or "go ahead anyway" — while a path without a page (a script's OTA upload, the terminal's `reboot`) writes the reason to `Errors.log` and carries on. The page also says **which of the two things the device is doing, and which file**: the write and the read-back are separate phases of the progress it polls (`checking`), the file is named by its path (`path`), and a finished read-back that matched is reported as such (`checked`, which is not the same as a successful save — the DNS page's own button writes without checking). So the status line reads "Saving the cache: /fat/cache.dat… 30 %", then "Checking the cache file: /fat/cache.dat… 70 % (700 / 1000)", then "The cache file was checked successfully.", then "Cache saved."; the statistics file gets the same four lines (`/fat/Statistica.dat`), with its "checking" line rarely visible because 92 bytes are read in microseconds — the step line names both halves while the job runs. Every one of those lines stays on screen for **at least two seconds** before the next one takes its place, including the last one of the sequence (the wait happens before a replacement, not after it), so none of them flashes by unread
 - **Cache Reset and Autosave** — the Reset button of the Internal Cache page
   drops every cached answer held in PSRAM (the file on the card is left
   alone); the cache can also save itself every N minutes, N hours or N days,
@@ -123,13 +123,14 @@ pio run -e esp32dev --target monitor
 
 ### Option B — ESP32-P4-ETH (native ESP-IDF)
 
-> ⚠️ PlatformIO's `espressif32` platform does **not** yet ship an ESP32-P4 MCU
-> or board definition (verified up to v7.0.1, which bundles ESP-IDF 6.0.1), so
-> the ESP32-P4 target is built with the **native ESP-IDF** toolchain (≥ v6.0).
-> No `[env:esp32-p4-eth]` exists in `platformio.ini` on purpose.
+> ⚠️ PlatformIO's `espressif32` platform does **not** ship an ESP32-P4 MCU
+> or board definition, so the ESP32-P4 target is built with the **native
+> ESP-IDF** toolchain. No `[env:esp32-p4-eth]` exists in `platformio.ini` on
+> purpose.
 
-**Prerequisites:** ESP-IDF 6.0+ with the RISC-V toolchain (`riscv32-esp-elf`)
-and the Waveshare ESP32-P4-ETH board (onboard Ethernet — no extra module).
+**Prerequisites:** ESP-IDF **v6.1** — the version the ESP32-P4 target is built
+and tested with — with the RISC-V toolchain (`riscv32-esp-elf`) and the
+Waveshare ESP32-P4-ETH board (onboard Ethernet — no extra module).
 
 ```powershell
 # 1. Select the ESP32-P4 target (applies sdkconfig.defaults.esp32p4)
@@ -154,7 +155,16 @@ idf.py -p COMx monitor
 > ℹ️ After this first cable flash, both parts can be updated **through the
 > browser**: the Version page uploads `build/DHCPServer.bin` over the air (OTA)
 > and replaces the SPIFFS content from a locally picked `data` folder — see
-> [Docs/ESP32-P4-ETH.md](Docs/ESP32-P4-ETH.md#ota-updates).
+> [Docs/ESP32-P4-ETH.md](Docs/ESP32-P4-ETH.md#ota-updates). The picker accepts a
+> folder only if it holds `index.html` (a wrong folder is refused with the reason
+> instead of being uploaded), and once every file has arrived the device is told
+> which files the folder holds and **removes the rest** (`POST /api/web/sync`),
+> after showing the operator exactly what will go — so the tree on the device
+> becomes the folder's tree and the interface is updatable remotely, without a
+> cable and without flashing the SPIFFS image. The same two calls are available
+> from a command line: `scripts\sync_web_p4.ps1 -Device <host>` is a dry run that
+> lists the extra files, `-Delete` removes them, and `-Upload` sends the folder
+> first (the prune is skipped when any file failed to arrive).
 
 > ℹ️ `idf.py set-target` already performs a full reconfigure and `idf.py build`
 > re-runs CMake when `CMakeLists.txt`/`sdkconfig*` change, so no separate step
@@ -305,6 +315,7 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/device/reboot/prepare` | Start the files a planned restart wants (statistics and cache, each as a background job) and report what each step decided |
 | POST | `/api/ota/upload` | Upload firmware (raw body; `multipart/form-data` also accepted; `?saved=1` = the restart files are already written, skip them) |
 | POST | `/api/web/file?path=<rel>` | Upload a web (SPIFFS) file |
+| POST | `/api/web/sync` | Make the device's web tree equal to an uploaded folder: dry run lists the extra files, `"delete":true` removes them |
 | GET | `/api/files/volumes` | Explorer volumes (id, mount point, mounted/present, capacity, last mount error) |
 | GET | `/api/files/list?volume=<id>&path=<dir>` | Directory listing + free space |
 | GET | `/api/files/download?volume=<id>&path=<file>` | Download a file (chunked; runs outside the server task, so a large download does not block other clients) |
@@ -328,8 +339,8 @@ All endpoints require HTTP Basic Authentication.
 | POST | `/api/jobs/cancel` | Ask an unfinished operation to stop (`{"id": …}`) |
 | POST | `/api/test-connection` | Test a REST endpoint from the device |
 | GET | `/api/dns/internal-cache/file` | `cache.dat` info (exists/size/entries) |
-| GET | `/api/dns/internal-cache/progress` | Background save/load job progress |
-| GET | `/api/dns/stats/progress` | Background statistics-write state and verdict (`busy`, `last_result`) |
+| GET | `/api/dns/internal-cache/progress` | Background save/load job progress (`busy`, `save`, `checking`, `done`, `total`, `percent`, `last_result`, `last_detail`) |
+| GET | `/api/dns/stats/progress` | Background statistics-write state and verdict (`busy`, `checking`, `last_result`, `last_detail`; `last_result` is `ok`/`skipped`/`mismatch`/`failed`) |
 | POST | `/api/dns/internal-cache/save` | Save the PSRAM cache to `cache.dat` (async) |
 | POST | `/api/dns/internal-cache/load` | Restore the cache from `cache.dat` (async) |
 | POST | `/api/dns/internal-cache/reset` | Drop every cached answer held in PSRAM (auth) |
@@ -430,18 +441,37 @@ DHCPServer/
 
 ## 🧪 Testing
 
-Tests live in `test/test_*.cpp`; each file defines its own entry point
-(`app_main`).
+Tests live in `test/test_*.cpp`; each file defines its own entry point — usually
+`app_main`, a few define `main()` themselves.
 
 Modules with no ESP-IDF dependency are compiled and run **on the PC** (fast,
 no board needed) — this is how `Subnet`, `TimeMath`, `PathUtil`,
 `MultipartExtractor` and the file-explorer JSON writers (`FileJson` /
-`JsonWriter`) are verified, with a small `host_main.cpp` shim that just calls
-`esp_test_app_main()`. Code that does touch ESP-IDF can be covered the same way
+`JsonWriter`) are verified. Code that does touch ESP-IDF is covered the same way
 when the run needs a controllable environment: `test/test_internalcache.cpp`
 builds against the stand-ins in `test/stubs` (capability allocator, a clock the
 test moves, a FreeRTOS mutex that does nothing, lwIP's `inet_pton`/`inet_ntop`)
-and asks for `-DDHCP_TEST_HOST`:
+and asks for `-DDHCP_TEST_HOST`.
+
+**One command runs the whole suite** — `scripts/run_host_tests.py`:
+
+```powershell
+& "$env:IDF_PYTHON_ENV_PATH\Scripts\python.exe" scripts\run_host_tests.py
+```
+
+It reads each test's own "Build (MinGW…)" recipe, adds the translation units
+that recipe forgets (`EXTRA_UNITS` in the script, and section 9 of
+`Plan/Memory.md`), picks the entry-point shim the file needs — a two-line file
+that calls `esp_test_app_main()`, whose symbol differs for `void`/`int` and for
+C or C++ linkage — compiles with `-fsyntax-only` first, so "does not compile" is
+told apart from "does not link", runs every test from the repository root and
+writes one log per test into `%TEMP%\dhcpserver_host_tests\logs`. Six tests are
+listed in the script as not buildable on a PC (they need ESP-IDF headers, or the
+board); anything else that fails to build makes the script exit non-zero. The
+compiler is MinGW `g++` (`C:\Qt\Tools\mingw1310_64\bin`, overridable with
+`--mingw <dir>` or `DHCPSERVER_MINGW`).
+
+A single test by hand looks like this (the shim is the one the script writes):
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -Dapp_main=esp_test_app_main -I. \
@@ -485,6 +515,9 @@ Test files:
 - `test/test_autosaveperiod.cpp` — the period of the cache autosave (minute, hour, day): the seconds of each unit and the stored indices (hour `0` and day `1` keep the meaning stage 153 gave them, minutes take the index the month left, and an index nobody ever wrote falls back to hours), the bound an interval is clamped into (60 minutes, 24 hours, and for days the length of the month that is running — 28 in February, 30 in September, `0`/40 meaning "not a month" gives 31), clamping `0 → 1` rather than refusing a settings file an older firmware wrote, seconds = interval × unit, one unit worth exactly its own number of the smaller ones, and a worst case that still fits the 32-bit countdown — every number pinned by a `static_assert` so that changing one stops the build — host-runnable
 - `test/test_errorlogcore.cpp` — the part of the error log that is plain C++: the stamp (a device whose clock is not set gets `t+152s`, never a 1970 date that looks like a fact), the truncation marker on a message too long for one queue item, the drain into a target, and the drop counter — a full queue or a target that refuses a line must be **reported inside the log**, because a log with silent holes is worse than none
 - `test/test_certstore.cpp` — the rules the certificates page and the API share, checked where they are defined: the mount point of the pair (`/fat` — the internal FAT partition, **not** the SPIFFS volume the web files live on, which a data re-flash would wipe), the file, folder and volume names a round trip through the page has to survive (a name that parsed back as the other volume would move the certificate silently), the ASN.1 time text (a date the calendar cannot hold, or a buffer one byte short, is refused rather than clamped), five years day for day, the ends of the list of periods and the values just outside it, the status of the pair (a file that does not parse is never reported as expired, a missing volume never as a missing certificate — on the page those send the operator to different places), how many days are left (the last partial day counts as one, an expired pair is 0 and never negative, and the count, the warning and the expiry itself agree), and the filter both the default name and a typed-in one have to pass — host-runnable, and most of its numbers are `static_assert`s so that changing one stops the build instead of silently changing what the device answers
+- `test/test_redirectpolicy.cpp` — the rules of the http→https redirect (stage 167): the condition is "a TLS listener is serving **and** the pair's deadline is in the future" (a listener without a judged pair, a deadline of `0`/`-1` and the very second of expiry are all refusals), `GET` and `HEAD` get `301` while every other method gets `308` so a POST arrives as a POST, and the name in `Location` is built from the request's own `Host` — the port the client used is replaced by the TLS one (`:443` is left implicit), an IPv6 literal keeps its brackets, and a name is taken whole or not at all (`isUsableHost()` refuses junk instead of cleaning it, which is what turned `Host: dns.lo\r\nX-Ignored: 1` into a redirect nobody asked for) — host-runnable
+- `test/test_restartsaveverify.cpp` — the policy both "write a file before the restart" jobs now follow (stage 169): one attempt writes the file *and* reads it back, `Ok` means the volume holds what was written, `Mismatch` that it does not and `Failed` that the write did not happen; a **mismatch is written exactly once more** and never twice, the verdict describes the volume as it is now (a mismatch followed by a failed write is `Failed`, the reverse is `Mismatch`), a missing attempt counts as a failure instead of a crash or a silence, and every attempt reaches the report callback — which is what puts both attempts and both reasons into `Errors.log` — host-runnable
+- `test/test_cachefilereader.cpp` — the reader of `cache.dat` and the read-back check a planned restart runs (stage 169), against files assembled **by hand** byte by byte (a builder shared with the reader would agree with it about a wrong layout): a whole file is read to the end with its records, indexes, remaining TTLs, usage counters and raw addresses; a file cut inside a record, a header promising one record while the file holds two, a foreign file, a file shorter than the header, a version from the future, an impossible record count, a zero-length name, a query type that is neither A nor AAAA and a record without an address are each refused with a reason a page can show; version 1 (no counter) and version 2 (an eight-byte one) still read; and `check()` fails on a file that holds fewer records than the save reported or no file at all — host-runnable
 
 > No `[env:esp32-p4-eth]` test target exists (the `espressif32` PIO platform
 > has no ESP32-P4 support) — test the ESP32 build, then flash the ESP32-P4

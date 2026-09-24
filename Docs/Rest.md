@@ -667,7 +667,11 @@ Progress of the running background save/load job (auth required).
 {
   "busy": true,
   "save": true,
+  "checking": false,
+  "checked": false,
+  "path": "/fat/cache.dat",
   "last_result": "",
+  "last_detail": "",
   "done": 256,
   "total": 512,
   "percent": 50
@@ -676,6 +680,16 @@ Progress of the running background save/load job (auth required).
 
 > `busy=false` means no job is running; `done`/`total` keep the last
 > finished job's values so the UI can show "finished at N entries".
+> `checking` (stage 169) is `true` while a **restart-requested** save is reading
+> the saved file back instead of writing it, and `done`/`total` then describe that
+> read — the page shows "checking the cache file: /fat/cache.dat … 45 %" instead
+> of sitting at the save's last "100 %" for the seconds a full table takes to
+> read. A save started from the Internal Cache page never sets it (that path does
+> not verify). `checked` tells whether the last finished job **read the file back
+> and it matched**, which `last_result: ok` alone does not: a manual save is also
+> `ok`, and a page that announced a check on that answer would claim something the
+> device never did. `path` is where the file lives (`/fat/cache.dat`), so the
+> status line can name it.
 > `last_result` is the verdict of the last finished job, and it is the only
 > thing that tells a written file from a failed write — `busy=false` alone says
 > only that the job ended:
@@ -684,6 +698,7 @@ Progress of the running background save/load job (auth required).
 > |---------------|---------|
 > | `ok` | the file is written (a save) or read (a load) |
 > | `empty` | the save found nothing live to write — an empty table, or one whose entries have all expired. **Not an error**, and the file on the card is left as it was |
+> | `mismatch` | the file was written, but reading it back did not give what was written (stage 169). The save a **planned restart** asks for is read back, and it is retried once before this verdict is published; a save started from the Internal Cache page is not checked, so this value is only ever reported for a restart save |
 > | `failed` | the write (or the read) failed, for instance because the volume is full |
 > | `""` | no job has finished in this boot yet |
 >
@@ -693,6 +708,12 @@ Progress of the running background save/load job (auth required).
 > verdict into a failure: a firmware that does not report one simply has nothing
 > to say, and inventing a verdict from a missing field is how a fresh device
 > ended up announcing a save that never failed.
+>
+> `last_detail` carries the device's **own words** about the last `failed` or
+> `mismatch` (`the file holds 1181 records, 1188 were written`), because the
+> operator does not always have a terminal and the question about losing the
+> cache is asked on the page. Empty on success. Added in stage 169; a client
+> that does not know the field simply does not show the reason.
 
 #### `POST /api/dns/internal-cache/save`
 
@@ -1268,6 +1289,103 @@ Full backup of all persisted settings as a single JSON document. Passwords are
 
 ---
 
+## POST /api/web/file
+
+Uploads ONE web-interface file into SPIFFS (auth required). The body is the raw
+file (`application/octet-stream`), and the destination — **relative to the SPIFFS
+root**, percent-encoded — travels in the query:
+
+```
+POST /api/web/file?path=pages%2Fcerts.html
+```
+
+The name has to pass the rule the prune compares with
+(`WebPrune::isAcceptableName`): letters, digits, `.`, `_` and `-` in every
+segment, no empty segment, no `.`/`..`, no leading `/`, at most 64 bytes. SPIFFS
+itself is stricter — its object name, the leading slash included, may be 31
+characters — and the route-table guard test watches that limit: a longer path
+builds, flashes and uploads happily and then answers `404`.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "path": "pages/certs.html", "bytes": 1234 }
+```
+
+**Errors:** `400` — no `path`, bad percent encoding or a name that is not a
+web-file name; `413` — the body is larger than 256 KB; `500` — the file could not
+be opened or the body did not arrive whole. A `500` says only "Cannot open file"
+or "Upload failed"; the reason (a full volume, an open-file limit) is written to
+the log, not into the body.
+
+The endpoint **only writes**: it never removes a file the folder no longer holds.
+That is what the next one is for.
+
+---
+
+## POST /api/web/sync
+
+Makes the device's web tree equal to an uploaded folder (stage 169): the client
+sends the list of files the folder holds, and the device removes everything else
+on the SPIFFS volume. This is how the interface is updated **remotely** — without
+a cable and without flashing the SPIFFS image — so that a page dropped from
+`data/` does not stay on the device for good.
+
+**Request body:**
+```json
+{ "paths": ["index.html", "pages/certs.html", "css/style.css"], "delete": false }
+```
+
+| field | meaning |
+|-------|---------|
+| `paths` | The folder's files, relative to the SPIFFS root. **Required and must not be empty**: to the comparison an empty list means "the folder holds nothing", and acting on that would wipe the interface off a device that is not next to the operator — such a request is refused with `400` |
+| `delete` | `false` or absent = **dry run**: nothing is removed, the answer lists what a prune would remove. `true` = remove them |
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "extra": ["pages/old.html", "esptool.exe"],
+  "deleted": [],
+  "failed": []
+}
+```
+
+| field | meaning |
+|-------|---------|
+| `extra` | Files the volume holds that `paths` does not, **in the volume's own spelling and order** — what a dry run asks the operator about |
+| `deleted` | What was actually removed (`delete: true` only) |
+| `failed` | What could not be removed; the device also writes each of those into `Errors.log`, because the operator may be a thousand kilometres away |
+
+Names are compared after stripping a leading `/` and a `spiffs/` prefix, and
+**case-sensitively**: the volume is case-sensitive, so `Index.html` is a different
+file from `index.html`. Every name in `paths` has to pass the upload's own rule
+(`isAcceptableName`) or the whole request is refused with `400` — a list that
+could not have been written by the upload must not decide what gets deleted.
+
+**Errors:** `400` — no `paths`, an empty list, or a name the upload would refuse;
+`500` — `/spiffs` is not readable.
+
+A client is expected to upload every file **first** and to prune only when all of
+them arrived: a prune after a partial upload would delete the files that failed to
+get there.
+
+The command-line client of both routes is `scripts/sync_web_p4.ps1`: without
+switches it is the dry run (`-Device <host>`), `-Delete` removes what it listed,
+`-Upload` sends the folder first, and it refuses a folder without `index.html` —
+the same rule the page enforces. It calls `curl.exe` with `-L -k`: with the
+device's HTTPS switch on and a usable certificate the plain request is answered
+with a `308` (stage 167), and a `308` preserves the method and the body, so the
+redirect is followed and the very same POST is re-sent; `-k` is there because the
+pair in the device is its own, self-signed one. Credentials are sent
+**preemptively** (an `Authorization` header, not `curl -u`): the device answers a
+failed check with `401` plus a challenge, and a client that waits for that
+challenge makes two attempts per call — against a device that locks the account
+after a few failed logins (Security page). The script also stops at the first
+`401` instead of trying the rest of the folder, and `-User`/`-Password` take the
+credentials used on the Login page (the default is the factory `admin`/`admin`).
+
+---
+
 ## POST /api/settings/import
 
 Restore settings from a JSON document produced by `GET /api/settings/export`.
@@ -1381,6 +1499,23 @@ task, and a file write there answers nobody else). The client polls
 `busy=false` on both and then asks for the restart with `"saved": true`.
 Waiting here instead would block that task, and then nothing could be polled.
 
+Since stage 169 both jobs, when a **restart** asks for them, also read the file
+back and compare it with what was written (the statistics byte for byte, the
+cache by parsing every record and comparing the count with the one the save
+reported). A file that does not match is written once more, and only then is the
+verdict published: `ok` means "the volume holds what was written", `mismatch`
+means "there is a file there and it is not the one we wrote". The client must
+ask the operator about a `mismatch` — describing the problem and offering
+"cancel" or "go ahead anyway" — and it must send no `"saved": true` when he
+chooses to go ahead, so the device writes the files itself during the restart.
+A mismatch of the statistics file leaves no checksum behind, and a mismatched
+`cache.dat` keeps the previous checksum, which is what makes the boot-time load
+refuse it instead of filling the cache with a damaged file. Both progress
+endpoints carry a `checking` flag that is true while the read-back runs, and
+`done`/`total` then describe that read, so the page can say "checking" with its
+own percentage instead of freezing at the save's last one — on a full table the
+read takes seconds.
+
 **Response `200 OK`:**
 ```json
 { "status": "ok", "stats": "started", "cache": "started" }
@@ -1401,14 +1536,26 @@ to it, because the page reads them the same way.
 
 **Response `200 OK`:**
 ```json
-{ "busy": false, "last_result": "ok" }
+{ "busy": false, "checking": false, "checked": true,
+  "path": "/fat/Statistica.dat", "last_result": "ok", "last_detail": "" }
 ```
 
 | field | values | meaning |
 |-------|--------|---------|
 | `busy` | `true` / `false` | the write is running now |
-| `last_result` | `ok` / `skipped` / `failed` / `""` | verdict of the last finished job; `skipped` = the switch was off when it ran, `""` = nothing has finished (so there is no verdict to report) |
-| `last_detail` | any text / `""` | the device's **own words** about the last failure (`cannot create the temporary file`, `write failed`, `cannot publish the file`). It is here because the operator does not always have a terminal: "the statistics could not be saved" without the reason is the message that made him ask what went wrong. Empty on success |
+| `checking` | `true` / `false` | the job is reading the record back rather than writing it (stage 169). The check of 92 bytes is over in microseconds, so a client polling twice a second will rarely see it — it is still the truth about the phase, and the interface has a line for it |
+| `checked` | `true` / `false` | the last finished job **read the file back and it matched** (stage 169). Not the same as `last_result: ok` — every restart save verifies, but a client that never sees a check must not be told there was one |
+| `path` | text | where the file lives (`/fat/Statistica.dat`), for the status line |
+| `last_result` | `ok` / `skipped` / `mismatch` / `failed` / `""` | verdict of the last finished job; `skipped` = the switch was off when it ran, `mismatch` = the file was written but reading it back did not give what was written, even after the one retry the operator allowed (stage 169), `""` = nothing has finished (so there is no verdict to report) |
+| `last_detail` | any text / `""` | the device's **own words** about the last failure or mismatch (`the file holds 40 bytes instead of 92`, `the content of the file differs from what was written`, `cannot create the file`). It is here because the operator does not always have a terminal: "the statistics could not be saved" without the reason is the message that made him ask what went wrong. Empty on success |
+
+Since stage 169 a job asked for by a **planned restart** writes the file and reads
+it back, and retries the write **once** when the content does not match; the
+verdict describes the volume as it is after that retry, so `mismatch` means "there
+is a file there and it is not the one we wrote". Both attempts and both reasons
+reach `/fat/logs/Errors.log`. A path without a page (an OTA upload by a script, a
+plain `POST /api/device/reboot`, the terminal menu) has nobody to ask, so it logs
+the mismatch and carries on with the restart.
 
 There is no `done`/`total`/`percent` here on purpose: three numbers have no
 progress to show, and the scheduler page draws an indeterminate bar for a job

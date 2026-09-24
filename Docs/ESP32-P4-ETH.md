@@ -30,10 +30,12 @@ below.
 
 ## Prerequisites
 
-1. ESP-IDF v6.0+ installed with the RISC-V toolchain
-   (`riscv32-esp-elf`). The setup used during development lives in
-   `C:\esp\v6.0.1\esp-idf` with the Python venv at
-   `C:\Espressif\tools\python\v6.0.1\venv`.
+1. ESP-IDF **v6.1** installed with the RISC-V toolchain (`riscv32-esp-elf`,
+   GNU 15.2.0). The setup used during development lives in
+   `C:\esp\v6.1\esp-idf` with the Python venv at
+   `C:\Espressif\tools\python\v6.1\venv`. (Until 24.09.2026 the same target was
+   built with 6.0.1; that installation is gone — stage 170 holds the one code
+   change the 6.1 headers required.)
 2. A terminal with the ESP-IDF environment exported (`export.ps1` on Windows /
    `export.sh` on Linux/macOS), **or** an "ESP-IDF PowerShell" shortcut from the
    ESP-IDF installer.
@@ -49,7 +51,7 @@ below.
 >
 > ```powershell
 > Remove-Item Env:IDF_TARGET
-> . C:\esp\v6.0.1\esp-idf\export.ps1
+> . C:\esp\v6.1\esp-idf\export.ps1
 > ```
 
 ---
@@ -129,8 +131,8 @@ uploaded to the `spiffs` partition manually. Use the helper script
 What the script does:
 
 1. Locates the ESP-IDF Python venv and `spiffsgen.py`
-   (`IDF_PYTHON_ENV_PATH` → `C:\Espressif\tools\python\v6.0.1\venv` → `PATH`;
-   `IDF_PATH` → `C:\esp\v6.0.1\esp-idf`).
+   (`IDF_PYTHON_ENV_PATH` → `C:\Espressif\tools\python\v6.1\venv` → `PATH`;
+   `IDF_PATH` → `C:\esp\v6.1\esp-idf`).
 2. Reads the `spiffs` partition offset/size from
    [`partitions/dhcp_partitions_p4.csv`](../partitions/dhcp_partitions_p4.csv).
 3. Builds a full-size SPIFFS image from `data/` with the **same geometry** as

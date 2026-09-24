@@ -1,7 +1,10 @@
 #ifndef DHCP_DNS_DNSSTATSTORE_H
 #define DHCP_DNS_DNSSTATSTORE_H
 
+#include "RestartSaveVerify.h"
+
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace dhcp {
@@ -159,24 +162,60 @@ public:
                      std::string* why = nullptr);
 
     /**
-     * @brief Save, and when that fails remove the file and write it once more.
+     * @brief Read @p path back and compare it with what @p totals encode to.
      *
-     * The operator asked for exactly this: a 44-byte record that cannot be
-     * written is worth a second attempt, and the attempt has to start from a
-     * clean slate — so the destination is removed first (together with a `.tmp`
-     * left over from the builds that used one).
+     * Byte for byte, because the encoding is deterministic: the same totals
+     * always produce the same 92 bytes. A file that merely *parses* is not
+     * enough here — a planned restart asks "does the volume hold what we just
+     * wrote", while the checksum inside the record answers a different question
+     * ("is this file damaged"), which `load()` already asks at boot.
      *
-     * Both attempts and both reasons go to the error log, including the price of
-     * the policy: after a failure the record that was there is gone, so a second
-     * failure leaves no statistics file at all — the counters then start from zero
-     * at boot. That is the trade the operator chose, and it is written down here so
-     * nobody has to guess where his file went.
-     *
-     * @param log where to report (nullptr = no log, the return value still
-     *            answers what happened — the host test uses a fake).
+     * @param[out] why English reason with numbers when the answer is false.
      */
-    static bool saveWithRetry(const std::string& path, const DnsStatTotals& totals,
-                              std::string* why, core::ErrorLogCore* log);
+    static bool verify(const std::string& path, const DnsStatTotals& totals,
+                       std::string* why = nullptr);
+
+    /**
+     * @brief Told when an attempt enters and leaves its read-back check.
+     *
+     * The check of a 92-byte record is instantaneous, but the device still has to
+     * be able to say *what* it is doing while it does it (stage 169): the page
+     * that polls the progress endpoint shows a different line for the write and
+     * for the check, and this is how the second one is known. `true` means "the
+     * file is being read back now".
+     */
+    using PhaseHandler = std::function<void(bool checking)>;
+
+    /**
+     * @brief Write the record, read it back, and try exactly once more.
+     *
+     * Stage 169: the file a planned restart keeps is judged by its content, not
+     * by the return value of `fwrite`. `RestartSaveVerify` owns the rule — one
+     * attempt, one retry, a verdict describing the volume as it is now — and this
+     * function supplies the two halves of an attempt: `save()` and `verify()`.
+     *
+     * The operator asked for exactly this, and the price is written down rather
+     * than hidden: the retry starts from a clean slate (the destination is
+     * removed first, together with a `.tmp` left over from the builds that used
+     * one), so a second failure leaves no statistics file at all — the counters
+     * then start from zero at boot.
+     *
+     * Both attempts and both reasons go to the error log, including the
+     * mismatch, which the operator cannot see anywhere else without a terminal.
+     *
+     * @param log   where to report (nullptr = no log, the return value still
+     *              answers what happened — the host test uses a fake).
+     * @param phase Optional: called with `true` before a read-back check and with
+     *              `false` after it, for the progress endpoint.
+     * @return Ok when the volume holds what was written; Mismatch when the last
+     *         attempt wrote a file whose content differs; Failed when the last
+     *         attempt could not write at all.
+     */
+    static RestartSaveVerify::Outcome saveWithRetry(const std::string& path,
+                                                    const DnsStatTotals& totals,
+                                                    std::string* why,
+                                                    core::ErrorLogCore* log,
+                                                    const PhaseHandler& phase = PhaseHandler());
 
     /**
      * @brief Read @p path.

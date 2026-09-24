@@ -39,6 +39,10 @@ public:
         None,     // nothing has finished yet — no verdict to report
         Ok,       // the file is on the card
         Skipped,  // the operator has the switch off; nothing was written
+        Mismatch, // written, but reading it back did not give what was written
+                  // (stage 169). Not a failure of the write but of its content,
+                  // and the page asks the operator about it in its own words —
+                  // which is why it is a verdict of its own rather than Failed.
         Failed,
     };
 

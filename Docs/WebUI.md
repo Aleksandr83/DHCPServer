@@ -1,0 +1,2 @@
+.\scripts\sync_web_p4.ps1 -Device 192.168.1.201 -User <логин> -Password <пароль>            # покажет, что лишнее
+.\scripts\sync_web_p4.ps1 -Device 192.168.1.201 -User <логин> -Password <пароль> -Delete    # удалит

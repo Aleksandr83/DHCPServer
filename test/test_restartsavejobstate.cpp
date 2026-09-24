@@ -51,10 +51,14 @@ static const char* name(StartResult r)
 static const char* name(Verdict v)
 {
     switch (v) {
-        case Verdict::None:    return "None";
-        case Verdict::Ok:      return "Ok";
-        case Verdict::Skipped: return "Skipped";
-        case Verdict::Failed:  return "Failed";
+        case Verdict::None:     return "None";
+        case Verdict::Ok:       return "Ok";
+        case Verdict::Skipped:  return "Skipped";
+        // Stage 169: written, but reading it back did not give what was written.
+        // It is a verdict of its own because the page asks a different question
+        // about it than about a failure.
+        case Verdict::Mismatch: return "Mismatch";
+        case Verdict::Failed:   return "Failed";
     }
     return "?";
 }
@@ -189,6 +193,26 @@ static void test_poll_sequence()
     check(!s.busy() && s.verdict() == Verdict::Ok, "run 2: ok");
 }
 
+/** A file whose content did not match is its own verdict, not a failure
+ *  (stage 169): the page has to be able to ask a different question about it. */
+static void test_mismatch_verdict()
+{
+    printf("mismatch\n");
+    RestartSaveJobState s;
+    s.request(true);
+    s.finish(Verdict::Mismatch, "the file holds 2 records, 3 were written");
+    check(!s.busy(), "a job that ended with a mismatch is not busy");
+    expect_verdict(s, Verdict::Mismatch, "and the verdict says what happened");
+    check(s.detail() == "the file holds 2 records, 3 were written",
+          "with the device's own words, which the page shows: " + s.detail());
+
+    // ...and it is not inherited by the next run either.
+    s.request(true);
+    expect_verdict(s, Verdict::None, "the next run starts with no verdict of its own");
+    s.finish(Verdict::Ok);
+    expect_verdict(s, Verdict::Ok, "and may end well");
+}
+
 int main()
 {
     test_initial();
@@ -199,6 +223,7 @@ int main()
     test_skip_during_run();
     test_abort_start();
     test_poll_sequence();
+    test_mismatch_verdict();
 
     printf("\n%d checks\n", g_checks);
     if (g_failed == 0) {

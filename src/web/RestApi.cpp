@@ -4,6 +4,8 @@
 #include "FileJson.h"
 #include "JsonWriter.h"
 #include "MultipartExtractor.h"
+#include "WebPrune.h"
+#include "../core/ErrorLog.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
 #include "../core/CpuMonitor.h"
@@ -22,6 +24,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <cstring>
+#include <dirent.h>
 #include <sstream>
 #include <algorithm>
 #include <atomic>
@@ -68,8 +71,13 @@ constexpr size_t kRelayChunkBytes = 1024;    // one chunk of a relayed body
 constexpr int kRestartStepDelayMs = 700;     // between the steps of a restart
 constexpr int kRestartPollMs = 500;          // polling for the device to come back
 constexpr int kConnectionTestWaitMs = 7000;  // waiting for "test connection"
-constexpr size_t kMaxRelPathLen = 64;        // a path inside the data volume
 constexpr size_t kMaxUint64Digits = 20;      // decimal digits of a uint64_t
+// The web-tree sync (stage 169): how many names a prune request may carry and how
+// much body it may have. The tree is 28 files today, ~30 bytes a name, so 256
+// names and 8 KB are both generous and bounded — a longer list is refused rather
+// than acted on.
+constexpr size_t kWebSyncMaxPaths = 256;
+constexpr size_t kWebSyncBodyBytes = 8192;
 
 // Rule 39: the task that re-applies the HTTPS switch once the answer of the
 // certificate request has left the device (stage 160).
@@ -2844,36 +2852,12 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
     }
 
     // Validate: must be a relative path with no traversal and no exotic chars.
-    // Only letters/digits/._- in each segment. Longest real path is ~27 chars
-    // (pages/settings_export.html); 64 is a generous but safe cap (SPIFFS object
-    // name limit is 32, and the "/spiffs" prefix is stripped by the VFS layer).
-    auto validRelChar = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-    };
-    bool valid = !relPath.empty() && relPath.size() <= kMaxRelPathLen && relPath[0] != '/';
-    if (valid) {
-        size_t segStart = 0;
-        while (segStart <= relPath.size()) {
-            size_t slash = relPath.find('/', segStart);
-            string seg = relPath.substr(
-                segStart, slash == string::npos ? string::npos : slash - segStart);
-            if (seg.empty() || seg == "." || seg == "..") {
-                valid = false;
-                break;
-            }
-            for (char c : seg) {
-                if (!validRelChar(c)) {
-                    valid = false;
-                    break;
-                }
-            }
-            if (!valid) break;
-            if (slash == string::npos) break;
-            segStart = slash + 1;
-        }
-    }
-    if (!valid) {
+    // The rule itself lives in `WebPrune::isAcceptableName`, which is also what
+    // checks the file list a *prune* is asked to keep (stage 169): one
+    // definition, so the upload and the deletion cannot disagree about what a
+    // web-file name is. SPIFFS's own object-name limit (31 characters including
+    // the leading slash) is smaller and is watched by the route-table guard test.
+    if (!web::WebPrune::isAcceptableName(relPath)) {
         sendJsonError("400 Bad Request", "Invalid path");
         return ESP_OK;
     }
@@ -2940,6 +2924,126 @@ esp_err_t RestApi::handlePostWebFile(httpd_req* req)
     j += to_string(written);
     j += "}";
     httpd_resp_sendstr(req, j.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/web/sync — make the device's web tree equal to the uploaded folder
+// ─────────────────────────────────────────────────────
+// The web interface is updated from a folder, one file per request, and that path
+// only ever writes — so a page dropped from `data/` used to stay on the device
+// for good, holding its bytes while its route had gone away with the firmware.
+// The operator needs the device serviceable from a browser alone, without a cable
+// and without a flash, so the update ends here: the page sends the files the
+// folder holds, and the device removes everything else on the volume.
+//
+// Body: {"paths":["index.html","pages/x.html",...],"delete":true|false}
+//   * `delete` absent/false is a **dry run**: nothing is removed and the answer
+//     lists what a prune would remove, so the page can show the operator exactly
+//     what he is about to lose before he agrees to it;
+//   * an empty (or missing) `paths` is refused — to a naive comparison it means
+//     "delete everything", and that is not a request anybody may send by accident;
+//   * every name has to pass `WebPrune::isAcceptableName`, the same rule the
+//     upload enforces, or the whole request is refused: a list that could not
+//     have been written by the upload must not decide what gets deleted.
+//
+// Response: {"status":"ok","extra":[…],"deleted":[…],"failed":[…]}
+// `extra` is the device's own spelling of the files the folder does not hold.
+
+esp_err_t RestApi::handlePostWebSync(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const string body = readBody(req, kWebSyncBodyBytes);
+    const vector<string> paths = jsonGetStrArray(body, "paths", kWebSyncMaxPaths);
+    const bool removeThem = jsonGetBool(body, "delete", false);
+
+    httpd_resp_set_type(req, "application/json");
+
+    if (paths.empty()) {
+        // No list is no order: an empty list means "the folder holds nothing", and
+        // acting on that would wipe the interface off a device that is not next to
+        // the operator.
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"no file list was sent\"}");
+        return ESP_OK;
+    }
+    for (const string& name : paths) {
+        if (!web::WebPrune::isAcceptableName(name)) {
+            string msg = "{\"status\":\"error\",\"message\":\"the file list holds an "
+                         "unusable name\",\"name\":\"";
+            msg += JsonWriter::escape(name);
+            msg += "\"}";
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_sendstr(req, msg.c_str());
+            return ESP_OK;
+        }
+    }
+
+    // What the volume actually holds. SPIFFS is flat, so one read of the mount
+    // point lists every object with its sub-path ("pages/x.html").
+    vector<string> onDevice;
+    DIR* dir = opendir("/spiffs");
+    if (dir == nullptr) {
+        ESP_LOGE(TAG, "Web sync: cannot read /spiffs");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req,
+            "{\"status\":\"error\",\"message\":\"the web volume is not readable\"}");
+        return ESP_OK;
+    }
+    while (struct dirent* ent = readdir(dir)) {
+        if (ent->d_name[0] == '.') continue;   // "." and ".." are not objects
+        onDevice.push_back(ent->d_name);
+    }
+    closedir(dir);
+
+    const vector<string> extra = web::WebPrune::extra(onDevice, paths);
+
+    vector<string> deleted;
+    vector<string> failed;
+    if (removeThem) {
+        for (const string& name : extra) {
+            const string full = "/spiffs/" + name;
+            if (::remove(full.c_str()) == 0) {
+                deleted.push_back(name);
+            } else {
+                failed.push_back(name);
+                ESP_LOGE(TAG, "Web sync: cannot remove %s", full.c_str());
+                // The operator may be a thousand kilometres away: the reason has to
+                // survive in the log he can download.
+                core::ErrorLog::instance().errorf(
+                    "web", "cannot remove the web file %s (the tree is not in sync)",
+                    full.c_str());
+            }
+        }
+        ESP_LOGI(TAG, "Web sync: %u files on the volume, %u kept by the folder, "
+                 "%u removed, %u could not be removed",
+                 (unsigned)onDevice.size(), (unsigned)paths.size(),
+                 (unsigned)deleted.size(), (unsigned)failed.size());
+    } else {
+        ESP_LOGI(TAG, "Web sync (dry run): %u files on the volume, %u in the folder, "
+                 "%u would be removed", (unsigned)onDevice.size(),
+                 (unsigned)paths.size(), (unsigned)extra.size());
+    }
+
+    auto arrayOf = [](const vector<string>& names) {
+        string out = "[";
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i > 0) out += ",";
+            out += "\"";
+            out += JsonWriter::escape(names[i]);
+            out += "\"";
+        }
+        return out + "]";
+    };
+
+    JsonWriter w;
+    w.str("status", "ok");
+    w.literal("extra", arrayOf(extra));
+    w.literal("deleted", arrayOf(deleted));
+    w.literal("failed", arrayOf(failed));
+    httpd_resp_sendstr(req, w.toString().c_str());
     return ESP_OK;
 }
 
@@ -3184,10 +3288,17 @@ esp_err_t RestApi::handleGetInternalCacheFile(httpd_req* req)
 // ─────────────────────────────────────────────────────
 // GET /api/dns/stats/progress
 // ─────────────────────────────────────────────────────
-// State of the background statistics write: {busy, last_result}. The same shape
-// as the cache endpoint next to it, because the page reads them the same way —
-// `last_result` is a word (ok | skipped | failed, "" = nothing finished yet),
-// and there is no progress to report: 92 bytes have no percentage.
+// State of the background statistics write: {busy, last_result, last_detail}.
+// The same shape as the cache endpoint next to it, because the page reads them
+// the same way — `last_result` is a word (ok | skipped | mismatch | failed,
+// "" = nothing finished yet), and there is no progress to report: 92 bytes have
+// no percentage.
+//
+// `mismatch` arrived with stage 169 and is not a synonym of `failed`: the file
+// was written, but reading it back did not give what was written — after the
+// device had already tried once more. The page asks the operator a different
+// question about it ("cancel, or reboot anyway?"), so the two cannot share a
+// word.
 
 esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
 {
@@ -3198,14 +3309,27 @@ esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
 
     const char* result = "";
     switch (p.result) {
-        case ::dhcp::dns::RestartSaveJobState::Verdict::Ok:      result = "ok";      break;
-        case ::dhcp::dns::RestartSaveJobState::Verdict::Skipped: result = "skipped"; break;
-        case ::dhcp::dns::RestartSaveJobState::Verdict::Failed:  result = "failed";  break;
-        default:                                                 result = "";        break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Ok:       result = "ok";       break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Skipped:  result = "skipped";  break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Mismatch: result = "mismatch"; break;
+        case ::dhcp::dns::RestartSaveJobState::Verdict::Failed:   result = "failed";   break;
+        default:                                                  result = "";         break;
     }
 
     string json = "{";
     addJsonBool(json, "busy", p.busy, false);
+    // True while the job is reading the file back rather than writing it
+    // (stage 169). The page shows its own line for that phase: the check of a
+    // 92-byte record is over in microseconds, so this is rarely caught, but a
+    // client that reads it is told the truth about the phase.
+    addJsonBool(json, "checking", p.checking, true);
+    // "The file was read back and it matched" (stage 169). It is not the same as
+    // `last_result: ok`: a save that was never verified (the DNS page's own
+    // button) is also `ok`, and a page that told the operator "the file was
+    // checked" there would be claiming something the device did not do.
+    addJsonBool(json, "checked", p.checked, true);
+    // The file this job is about, so the page can name it in the status line.
+    addJsonString(json, "path", p.path, true);
     addJsonString(json, "last_result", result, true);
     // The device's own words about the last failure ("cannot publish the file").
     // They travel to the page for one reason: the operator does not always have
@@ -3242,18 +3366,37 @@ esp_err_t RestApi::handleGetInternalCacheProgress(httpd_req* req)
     string json = "{";
     addJsonBool(json, "busy", p.busy, false);
     addJsonBool(json, "save", p.isSave, true);
+    // True while a restart-requested save is reading the file back rather than
+    // writing it (stage 169). On a table of a few megabytes that pass takes
+    // seconds and carries its own `done`/`total`, which is what lets the page say
+    // "checking 45 %" instead of freezing at the save's 100 %.
+    addJsonBool(json, "checking", p.checking, true);
+    // "The file was read back and it matched" (stage 169) — see the statistics
+    // endpoint next door: a manual save is `ok` without ever being checked, so a
+    // page must not tell the operator the file was checked on that answer alone.
+    addJsonBool(json, "checked", p.checked, true);
+    // The file this job is about (`/fat/cache.dat`), for the status line.
+    addJsonString(json, "path", p.path, true);
     // "busy went false" cannot tell a written file from a failed write, and a
     // bare boolean could not tell "there was nothing to write" from either —
     // which is how a fresh device ended up reporting a failure that never
-    // happened. The verdict is a word: ok | empty | failed ("" = none yet).
+    // happened. The verdict is a word: ok | empty | mismatch | failed
+    // ("" = none yet). `mismatch` is stage 169: written, but reading the file
+    // back did not give what was written (after one retry).
     const char* result = "";
     switch (p.result) {
-        case ::dhcp::dns::DnsServer::PersistResult::Ok:     result = "ok";     break;
-        case ::dhcp::dns::DnsServer::PersistResult::Empty:  result = "empty";  break;
-        case ::dhcp::dns::DnsServer::PersistResult::Failed: result = "failed"; break;
-        default:                                            result = "";       break;
+        case ::dhcp::dns::DnsServer::PersistResult::Ok:       result = "ok";       break;
+        case ::dhcp::dns::DnsServer::PersistResult::Empty:    result = "empty";    break;
+        case ::dhcp::dns::DnsServer::PersistResult::Mismatch: result = "mismatch"; break;
+        case ::dhcp::dns::DnsServer::PersistResult::Failed:   result = "failed";   break;
+        default:                                              result = "";         break;
     }
     addJsonString(json, "last_result", result, true);
+    // The device's own words about the last failure or mismatch ("the file holds
+    // 1181 records, 1188 were written"). They travel to the page for one reason:
+    // the operator does not always have a terminal, and a question about losing
+    // the cache without the reason is exactly what made him ask what went wrong.
+    addJsonString(json, "last_detail", p.detail, true);
     addJsonInt(json, "done", static_cast<int64_t>(p.done), true);
     addJsonInt(json, "total", static_cast<int64_t>(p.total), true);
     addJsonInt(json, "percent", static_cast<int64_t>(percent), true);

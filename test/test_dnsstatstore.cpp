@@ -8,7 +8,8 @@
 //
 // Build (MinGW g++ 13, PATH must contain C:\Qt\Tools\mingw1310_64\bin):
 //   g++ -std=c++17 -Wall -Wextra -Werror -DDHCP_TEST_HOST -Itest/stubs -I.
-//       test/test_dnsstatstore.cpp src/dns/DnsStatStore.cpp -o t_dnsstatstore.exe
+//       test/test_dnsstatstore.cpp src/dns/DnsStatStore.cpp
+//       src/dns/RestartSaveVerify.cpp src/core/ErrorLogCore.cpp -o t_dnsstatstore.exe
 //
 // The harness always exits with 0 — the proof is the printed text.
 
@@ -33,6 +34,8 @@ using namespace std;
 
 using dhcp::dns::DnsStatStore;
 using dhcp::dns::DnsStatTotals;
+using dhcp::dns::RestartSaveVerify;
+using SaveOutcome = dhcp::dns::RestartSaveVerify::Outcome;
 
 static int g_fail = 0;
 
@@ -466,8 +469,8 @@ static void test_retry_is_silent_when_the_first_attempt_works()
     DnsStatTotals totals;
     totals.hits = 5;
     string why;
-    check(DnsStatStore::saveWithRetry(path, totals, &why, &log),
-          "a save that works returns true");
+    check(DnsStatStore::saveWithRetry(path, totals, &why, &log) == SaveOutcome::Ok,
+          "a save that works returns ok");
     log.drain(0);
     check(target.lines.empty(), "and says nothing in the log (the log is for failures)");
 }
@@ -489,7 +492,7 @@ static void test_retry_removes_the_file_and_logs_every_step()
     DnsStatTotals totals;
     totals.hits = 7;
     string why;
-    check(!DnsStatStore::saveWithRetry(path, totals, &why, &log),
+    check(DnsStatStore::saveWithRetry(path, totals, &why, &log) == SaveOutcome::Failed,
           "both attempts fail — and the call says so");
     check(why == "cannot create the file",
           "the reason reported to the page is the last attempt's: " + why);
@@ -520,13 +523,95 @@ static void test_retry_keeps_the_file_out_of_the_way_when_it_can()
     DnsStatTotals totals;
     totals.hits = 3;
     string why;
-    check(DnsStatStore::saveWithRetry(path, totals, &why, &log),
+    check(DnsStatStore::saveWithRetry(path, totals, &why, &log) == SaveOutcome::Ok,
           "a working save goes through the retry path untouched");
     log.drain(0);
     check(target.lines.empty(), "and leaves nothing in the log");
 
     DnsStatTotals back;
     check(DnsStatStore::load(path, back, &why) && back.hits == 3, "the record is readable");
+}
+
+/** The read-back check a planned restart runs (stage 169): the file has to hold
+ *  the bytes that were written, not merely parse — the checksum inside the
+ *  record answers "is this file damaged", which is a different question from
+ *  "does the volume hold what we just wrote". */
+static void test_verify_reads_the_file_back()
+{
+    printf("test_verify_reads_the_file_back\n");
+    const string path = g_dir + "/verified.dat";
+    ::remove(path.c_str());
+
+    DnsStatTotals totals;
+    totals.hits = 11;
+    totals.forwards = 3;
+    totals.hitUsSum = 550;
+    string why;
+    check(!DnsStatStore::verify(path, totals, &why),
+          "a file that is not there does not verify");
+    check(why == "the file is not there", "and says exactly that: " + why);
+
+    check(DnsStatStore::save(path, totals, &why), "the record is written");
+    check(DnsStatStore::verify(path, totals, &why), "and the file holds it byte for byte");
+
+    // A different record under the same name: the file is perfectly readable and
+    // still not what was written. That is the difference the restart asks about.
+    DnsStatTotals other = totals;
+    other.hits = 12;
+    check(DnsStatStore::save(path, other, &why), "another record is written over it");
+    check(!DnsStatStore::verify(path, totals, &why),
+          "the file no longer holds what was asked about");
+    check(why == "the content of the file differs from what was written",
+          "with a reason a page can show: " + why);
+
+    // A file cut short: the same answer, with both sizes named.
+    {
+        FILE* f = fopen(path.c_str(), "wb");
+        check(f != nullptr, "the file can be opened for a torn write");
+        if (f != nullptr) {
+            const string half = DnsStatStore::encode(totals).substr(0, 40);
+            fwrite(half.data(), 1, half.size(), f);
+            fclose(f);
+        }
+    }
+    check(!DnsStatStore::verify(path, totals, &why), "a torn file does not verify either");
+    check(why.find("40 bytes instead of 92") != string::npos,
+          "and the reason names both sizes: " + why);
+
+    ::remove(path.c_str());
+}
+
+/** The read-back check is announced to the caller (stage 169), so the progress
+ *  endpoint can say that the device is checking rather than writing. */
+static void test_the_check_phase_is_reported()
+{
+    printf("test_the_check_phase_is_reported\n");
+    const string path = g_dir + "/phase.dat";
+    ::remove(path.c_str());
+
+    TestQueue queue;
+    TestTarget target;
+    dhcp::core::ErrorLogCore log(queue, target);
+
+    DnsStatTotals totals;
+    totals.hits = 21;
+    vector<string> phases;
+    const auto phase = [&](bool checking) { phases.push_back(checking ? "check" : "write"); };
+
+    string why;
+    check(DnsStatStore::saveWithRetry(path, totals, &why, &log, phase) == SaveOutcome::Ok,
+          "the record is saved and read back");
+    check(phases.size() == 2 && phases[0] == "check" && phases[1] == "write",
+          "and the check phase was opened and closed around the read");
+    ::remove(path.c_str());
+
+    // A write that never happened has no check to announce.
+    phases.clear();
+    check(makeDir(path) == 0, "an obstacle sits under the record's name");
+    check(DnsStatStore::saveWithRetry(path, totals, &why, &log, phase) == SaveOutcome::Failed,
+          "both attempts fail");
+    check(phases.empty(), "so no check phase is reported (nothing was read back)");
+    check(::rmdir(path.c_str()) == 0, "the obstacle is removed");
 }
 
 int main()
@@ -551,6 +636,8 @@ int main()
     test_retry_is_silent_when_the_first_attempt_works();
     test_retry_removes_the_file_and_logs_every_step();
     test_retry_keeps_the_file_out_of_the_way_when_it_can();
+    test_verify_reads_the_file_back();
+    test_the_check_phase_is_reported();
 
     if (g_fail != 0) {
         printf("FAILED (%d checks)\n", g_fail);

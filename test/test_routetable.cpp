@@ -2,7 +2,8 @@
  * @file test_routetable.cpp
  * @brief Unit tests for the web server's route-table rules.
  *
- * The table itself (82 routes, with the handlers) lives in `WebServer.cpp` and
+ * The table itself (every route of the server, with the handlers) lives in
+ * `WebServer.cpp` and
  * needs ESP-IDF; the rules about it do not: an entry without a URI or a handler
  * is unusable, a repeated pair of (URI, method) shadows an earlier route, and
  * the HTTP server's handler limit has to be derived from the table — the

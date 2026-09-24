@@ -32,6 +32,13 @@ const kNameInputMaxLen = 128;
 // this older, smaller figure is kept as it is on purpose, same decision.
 const kFallbackRamTotalBytes = 320 * 1024;
 
+// The file that tells the web tree from any other folder. The Version page picks
+// a *folder* to upload, and a wrong one was picked once (`bin`), which the page
+// dutifully sent as 28 replacements (stage 169). A folder without this file
+// cannot be the interface — the device would have no home page — so the page
+// refuses it: named here once, so the check and the message cannot drift apart.
+const kWebIndexName = 'index.html';
+
 /* ─── Session Auth ──────────────────────────────────── */
 
 // Restore auth from session storage
@@ -495,8 +502,14 @@ function showFieldDialog({ title, hintFor, textLabel, textValue, textHint,
    asked whether to reboot — he is not rebooting, the update is. */
 async function prepareRestartFlow(onStep, action) {
     const isUpdate = action === 'update';
-    const kStepMinMs = 900;       // no message may flash by unread
-    const kProgressMinMs = 300;   // ...and a progress line that ends at once
+    // The operator's rule (stage 169): every message stays readable — a line that
+    // is replaced in half a second is a line nobody saw. Two seconds, on his word:
+    // the hostnames in the lines are long, and the first second can be spent just
+    // finding the line. The wait happens BEFORE the next text takes the line (see
+    // lingerStep), which is also what protects the last message of a sequence from
+    // being wiped by the one after it.
+    const kStepMinMs = 2000;      // two seconds on screen, at the very least
+    const kProgressMinMs = 2000;  // ...and a progress line that ends at once
     const kPollMs = 500;
     const kStallLimitMs = 10000;  // no progress for this long -> carry on anyway
 
@@ -507,11 +520,57 @@ async function prepareRestartFlow(onStep, action) {
     };
 
     // A step that finishes in a millisecond is a step nobody can read — the
-    // cache of a freshly started device is empty, for instance. So a message
-    // stays on screen for at least minMs before the next one replaces it.
+    // cache of a freshly started device is empty, for instance. This waits out
+    // the rest of the current message's second, and the flow calls it before
+    // replacing a line, so every message the operator sees has had its full
+    // kStepMinMs — including the last one, which a later step or the page itself
+    // would otherwise replace immediately.
     async function lingerStep(minMs) {
         const left = (minMs || kStepMinMs) - (Date.now() - stepShownAt);
         if (left > 0) await sleep(left);
+    }
+
+    // One status line for one file: "<what>: <path>... <suffix>". The path comes
+    // from the device — it owns where the file lives — so the operator can see
+    // *which* file is being written, read back and checked (stage 169), and the
+    // suffix carries the progress of whichever pass is running.
+    function fileLine(key, p, suffix) {
+        return tr(key) + (p && p.path ? ': ' + p.path : '') + '...' + (suffix || '');
+    }
+
+    // A sentence about one file with the file named: "Кэш сохранить не удалось
+    // (/fat/cache.dat)". Every line that reports what became of a file names that
+    // file — the operator asked for it on the Version page, where the cache line
+    // said only that the cache is not written and left him without a name or a
+    // path (stage 169). The full stop gives way to the path; a device that does
+    // not name its file leaves the sentence exactly as it was, so no line ever
+    // depends on the path being there.
+    function aboutFile(text, path) {
+        if (!path) return text;
+        return text.replace(/\.\s*$/, '') + ' (' + path + ')';
+    }
+
+    // Where a file lives, asked of the device when a line about it has no progress
+    // answer to take the path from: the switches decide "not saved" and "nothing to
+    // save" before any job exists, so those lines have no poll behind them. The
+    // device owns the paths (it is the one that opens the files) — repeating
+    // "/fat/cache.dat" in the page would be a second copy of a fact that lives in
+    // the firmware. Asked once per flow, best effort: an older device answers
+    // nothing useful, and the lines then simply go without a path.
+    let filePaths = null;
+    async function filePath(which) {
+        if (filePaths === null) {
+            filePaths = { stats: '', cache: '' };
+            const endpoints = [['stats', '/api/dns/stats/progress'],
+                               ['cache', '/api/dns/internal-cache/progress']];
+            for (const one of endpoints) {
+                try {
+                    const answer = await fetchJSON(one[1]);
+                    filePaths[one[0]] = (answer && answer.path) || '';
+                } catch (e) { /* this device does not name its files */ }
+            }
+        }
+        return filePaths[which] || '';
     }
 
     // Wait for the background cache save to end. Returns the last progress
@@ -519,29 +578,44 @@ async function prepareRestartFlow(onStep, action) {
     // (kPersistStallMs) takes over during the restart, so nothing is lost, only
     // unshown.
     async function waitForCacheSave() {
-        let lastDone = -1, stalledMs = 0, shownProgress = false;
+        let lastDone = -1, stalledMs = 0, shownText = null;
         for (;;) {
             let p = null;
             try { p = await fetchJSON('/api/dns/internal-cache/progress'); } catch (e) { p = null; }
             if (p && !p.busy) {
-                // Nothing to announce when the job was over before the first
-                // question; but a progress line that did appear must not blink.
-                if (shownProgress) await lingerStep(kProgressMinMs);
+                // The last line the operator is looking at gets its full second
+                // before the flow says anything else.
+                if (shownText !== null) await lingerStep();
                 return p;
             }
 
             const done = p ? (p.done || 0) : 0;
             const total = p ? (p.total || 0) : 0;
             const pct = total > 0 ? Math.round(done * kPercentScale / total) : null;
-            step(tr('restart.cache_saving') +
-                 (pct === null ? '' : ' ' + pct + '%') +
-                 (total > 0 ? ' (' + done + ' / ' + total + ')' : ''));
-            shownProgress = true;
+            // Two phases, two lines (stage 169): while the device writes the file
+            // the line says so, and while it reads the file back to check what was
+            // written the line names the file and carries the read's own progress,
+            // since that pass takes seconds on a full table.
+            const text = fileLine(
+                p && p.checking ? 'restart.cache_checking' : 'restart.cache_saving', p,
+                (pct === null ? '' : ' ' + pct + '%') +
+                (total > 0 ? ' (' + done + ' / ' + total + ')' : ''));
+            // Only a *change* takes the line, and only after the previous text has
+            // been readable for a second: a percentage that moves every poll must
+            // not make the message unreadable, and a poll that reports the same
+            // number must not restart the clock.
+            if (text !== shownText) {
+                await lingerStep();
+                step(text);
+                shownText = text;
+            }
 
             if (done !== lastDone) { lastDone = done; stalledMs = 0; }
             else { stalledMs += kPollMs; }
             if (stalledMs >= kStallLimitMs) {
-                step(tr('restart.cache_stalled'), 'status-warn');
+                await lingerStep();
+                const path = (p && p.path) || await filePath('cache');
+                step(aboutFile(tr('restart.cache_stalled'), path), 'status-warn');
                 return null;
             }
             await sleep(kPollMs);
@@ -551,49 +625,73 @@ async function prepareRestartFlow(onStep, action) {
     // Wait for the background statistics write the device started (stage 122:
     // it runs as a job of its own, like the cache). No percentage — 92 bytes
     // have none, and inventing one would be worse than the plain word. Returns
-    // `{result, detail}` ('ok' | 'skipped' | 'failed' | '' when none arrived,
-    // plus the device's own words about a failure), or null when the job stopped
-    // answering.
+    // `{result, detail, path}` ('ok' | 'skipped' | 'failed' | '' when none arrived,
+    // plus the device's own words about a failure and where the file lives), or
+    // null when the job stopped answering.
     async function waitForStatsSave() {
-        let stalledMs = 0;
+        let stalledMs = 0, shownText = null;
         for (;;) {
             let p = null;
             try { p = await fetchJSON('/api/dns/stats/progress'); } catch (e) { p = null; }
             if (p && !p.busy) {
-                return { result: p.last_result || '', detail: p.last_detail || '' };
+                // The line of the last poll keeps its second (see the cache loop).
+                if (shownText !== null) await lingerStep();
+                return { result: p.last_result || '', detail: p.last_detail || '',
+                         path: p.path || '', checked: !!(p && p.checked) };
+            }
+            // A device that reports `checked` reads the file back, so the line can
+            // name both halves of the step; the read of 92 bytes is over in
+            // microseconds, so the "checking" line proper is only seen if a poll
+            // lands inside that window (stage 169).
+            const verifies = p && Object.prototype.hasOwnProperty.call(p, 'checked');
+            const text = fileLine(p && p.checking ? 'restart.stats_checking'
+                                                  : (verifies ? 'restart.stats_saving_checking'
+                                                              : 'restart.stats_saving'), p);
+            if (text !== shownText) {
+                await lingerStep();   // the previous line gets its second first
+                step(text);
+                shownText = text;
             }
             stalledMs += kPollMs;
             if (stalledMs >= kStallLimitMs) {
-                step(tr('restart.stats_stalled'), 'status-warn');
+                await lingerStep();
+                const path = (p && p.path) || await filePath('stats');
+                step(aboutFile(tr('restart.stats_stalled'), path), 'status-warn');
                 return null;
             }
             await sleep(kPollMs);
         }
     }
 
-    // One question for every way the files can fail to reach the card: the
-    // statistics, the cache, a cache save that never moved. The operator asked
-    // for exactly this rule — "if the save failed, ask whether to reboot" — and
-    // it applies to both files, not only to the cache. Asking costs one click;
-    // carrying on on its own costs him the data he was told would be kept.
+    // One question for every way the files can fail to be *right*: the statistics,
+    // the cache, a cache save that never moved, and — since stage 169 — a file
+    // that was written but does not hold what was written. The operator asked for
+    // exactly this rule ("if the save failed, ask whether to reboot", and for a
+    // mismatch: describe the problem and offer the two ways out), and it applies
+    // to both files, not only to the cache. Asking costs one click; carrying on on
+    // its own costs him the data he was told would be kept.
     //
     // The **action** is the other half of the same rule: the question must name
     // what the operator is about to do. On the Version page that is an update, and
     // asking him whether to "reboot anyway" there is simply wrong.
     //
+    // @param what   'cache' or 'stats' (the file the question is about).
     // @param detail the device's own words about the failure, when it gave any:
     //        the operator has no serial console, so this dialog is the only place
-    //        he can read why ("cannot publish the file").
-    async function askBeforeLosingData(what, detail) {
+    //        he can read why ("the file holds 1181 records, 1188 were written").
+    // @param reason 'failed' — the file was not written; 'mismatch' — it was, and
+    //        reading it back gave something else even after the retry. The two
+    //        are different problems, so they get different words (stage 169).
+    async function askBeforeLosingData(what, detail, reason) {
         const cache = what === 'cache';
-        const hintKey = cache ? (isUpdate ? 'restart.cache_failed_hint_update'
-                                          : 'restart.cache_failed_hint')
-                              : (isUpdate ? 'restart.stats_failed_hint_update'
-                                          : 'restart.stats_failed_hint');
+        const kind = reason === 'mismatch' ? 'mismatch' : 'failed';
+        const file = cache ? 'cache_' : 'stats_';
+        const hintKey = 'restart.' + file + kind + '_hint' + (isUpdate ? '_update' : '');
+        const titleKey = 'restart.' + file + kind;
         let hint = tr(hintKey);
         if (detail) hint += '\n\n' + tr('restart.device_detail') + ': ' + detail;
         const anyway = await showDialog({
-            title: tr(cache ? 'restart.cache_failed' : 'restart.stats_failed'),
+            title: tr(titleKey),
             hint: hint,
             okLabel: tr(isUpdate ? 'restart.update_anyway' : 'restart.reboot_anyway'),
             cancelLabel: tr(isUpdate ? 'restart.cancel_update' : 'restart.cancel_reboot'),
@@ -621,17 +719,23 @@ async function prepareRestartFlow(onStep, action) {
     let statsUnknown = false;
 
     let p;
-    step(tr('restart.stats_saving'));
+    step(tr('restart.stats_saving') + '...');
     try {
         p = await postJSON('/api/device/reboot/prepare', {});
     } catch (e) {
         // The device did not answer at all — a firmware without
-        // `/api/device/reboot/prepare` answers exactly like this. Nothing about
-        // the two files can be shown then, so this line is the last message
-        // before the reboot takes over: it must be readable. It used to be held
-        // for 300 ms, which is why an old firmware looked like a broken page.
+        // `/api/device/reboot/prepare` answers exactly like this, and so does a
+        // request the browser refused to deliver (a page open over http while the
+        // device answers over https: the redirect to the other origin is followed,
+        // its answer carries no CORS headers, and the page sees only a failed
+        // fetch). Nothing about the two files can be shown then, so this line is
+        // the last message before the reboot takes over: it must be readable, and
+        // it must carry the browser's own reason — otherwise "the device did not
+        // answer" hides a network problem behind a firmware problem. It used to be
+        // held for 300 ms, which is why an old firmware looked like a broken page.
         await lingerStep(kProgressMinMs);
-        step(tr('restart.prep_unavailable'), 'status-warn');
+        const reason = (e && e.message) ? ' [' + e.message + ']' : '';
+        step(tr('restart.prep_unavailable') + reason, 'status-warn');
         await lingerStep();
         return 'doubt';
     }
@@ -657,35 +761,51 @@ async function prepareRestartFlow(onStep, action) {
         }
         const verdict = statsOutcome.result;
         if (verdict === 'ok') {
+            // A device that read the file back says so before it says the file is
+            // saved — the two are different facts and the operator asked to see
+            // both (stage 169).
+            if (statsOutcome.checked) {
+                step(tr('restart.stats_checked'), 'status-ok');
+                await lingerStep();
+            }
             step(tr('restart.stats_saved'), 'status-ok');
             await lingerStep();
         } else if (verdict === 'skipped') {
-            step(tr('restart.stats_not_saved'), 'status-warn');
+            step(aboutFile(tr('restart.stats_not_saved'), statsOutcome.path), 'status-warn');
             await lingerStep();
         } else if (verdict === 'failed') {
-            step(tr('restart.stats_failed'), 'status-err');
+            step(aboutFile(tr('restart.stats_failed'), statsOutcome.path), 'status-err');
             await lingerStep();
             return askBeforeLosingData('stats', statsOutcome.detail);
+        } else if (verdict === 'mismatch') {
+            // The file was written, read back, and *still* does not hold what was
+            // written — the device saved it once more before answering (stage 169).
+            // That is neither a success nor "could not save", so the operator is
+            // asked, in words that say which of the two happened.
+            step(aboutFile(tr('restart.stats_mismatch'), statsOutcome.path), 'status-err');
+            await lingerStep();
+            return askBeforeLosingData('stats', statsOutcome.detail, 'mismatch');
         } else {
             // No verdict at all: the job never reported one (the device restarted
             // under it, or the endpoint is not there). A missing answer is not a
             // failure and not a success — say exactly that, and send no `saved`
             // flag, so the device writes the file itself during the restart.
-            step(tr('restart.stats_no_verdict'), 'status-warn');
+            step(aboutFile(tr('restart.stats_no_verdict'), statsOutcome.path), 'status-warn');
             statsUnknown = true;
             await lingerStep();
         }
     } else if (p.stats === 'skipped') {
         // The switch is off. Say so rather than stay silent: an absent step is
-        // indistinguishable from a broken feature (stage 120).
-        step(tr('restart.stats_not_saved'), 'status-warn');
+        // indistinguishable from a broken feature (stage 120) — and name the file
+        // the switch is about, so the line says *which* file is not written.
+        step(aboutFile(tr('restart.stats_not_saved'), await filePath('stats')), 'status-warn');
         await lingerStep();
     } else if (p.stats === 'failed') {
         // The statistics file could not be written *now* — and this page is the
         // only place that knows it. It used to print the line and let the
         // caller reboot, which is exactly what the operator objected to: a
         // failure message followed by a restart nobody agreed to.
-        step(tr('restart.stats_failed'), 'status-err');
+        step(aboutFile(tr('restart.stats_failed'), await filePath('stats')), 'status-err');
         await lingerStep();     // readable before the question opens
         return askBeforeLosingData('stats');
     }
@@ -693,22 +813,24 @@ async function prepareRestartFlow(onStep, action) {
     if (p.cache === 'skipped') {
         // The device refuses to write the cache: "save the cache before a
         // reboot" is off, or the internal cache itself is disabled. Say it
-        // rather than stay silent.
-        step(tr('restart.cache_not_saved'), 'status-warn');
+        // rather than stay silent, and name the file it is about.
+        step(aboutFile(tr('restart.cache_not_saved'), await filePath('cache')), 'status-warn');
         await lingerStep();
         return statsUnknown ? 'doubt' : 'ready';
     }
     if (p.cache === 'empty') {
         // Nothing live to write — a freshly started device, or one whose entries
-        // have all expired. Normal, and the restart has nothing to do either.
-        step(tr('restart.cache_empty'));
+        // have all expired. Normal, and the restart has nothing to do either; the
+        // file is still named, so "nothing to save" cannot be read as "no such
+        // file" (stage 169).
+        step(aboutFile(tr('restart.cache_empty'), await filePath('cache')));
         await lingerStep();
         return statsUnknown ? 'doubt' : 'ready';
     }
     if (p.cache === 'failed') {
         // The save could not even be started, so this restart will not write the
         // file either: the cache is lost unless the operator says otherwise.
-        step(tr('restart.cache_failed'), 'status-err');
+        step(aboutFile(tr('restart.cache_failed'), await filePath('cache')), 'status-err');
         await lingerStep();
         return askBeforeLosingData('cache');
     }
@@ -727,12 +849,19 @@ async function prepareRestartFlow(onStep, action) {
     }
     const result = last.last_result || '';
     if (result === 'ok') {
+        // The device read the file back and it matched: say that, and then that
+        // the file is saved — two facts, two lines, and the operator asked for
+        // both (stage 169).
+        if (last.checked) {
+            step(tr('restart.cache_checked'), 'status-ok');
+            await lingerStep();
+        }
         step(tr('restart.cache_saved'), 'status-ok');
         await lingerStep();
         return statsUnknown ? 'doubt' : 'ready';
     }
     if (result === 'empty') {
-        step(tr('restart.cache_empty'));
+        step(aboutFile(tr('restart.cache_empty'), last.path));
         await lingerStep();
         return statsUnknown ? 'doubt' : 'ready';
     }
@@ -743,6 +872,16 @@ async function prepareRestartFlow(onStep, action) {
         // just built.
         return askBeforeLosingData('cache');
     }
+    if (result === 'mismatch') {
+        // Written, and the read-back did not match — after the device had already
+        // saved it once more (stage 169). The cache on the card is not the cache
+        // that was in memory, and only the operator can say whether the restart
+        // may go ahead without it. The device's own words travel with the
+        // question: "the file holds 1181 records, 1188 were written".
+        step(aboutFile(tr('restart.cache_mismatch'), last.path), 'status-err');
+        await lingerStep();
+        return askBeforeLosingData('cache', last.last_detail || '', 'mismatch');
+    }
     // No verdict at all: the device does not report one (a firmware without
     // `last_result` answers `busy=false` and nothing more). Guessing "failed"
     // from a missing field is exactly what made this flow lie once — but going
@@ -751,7 +890,7 @@ async function prepareRestartFlow(onStep, action) {
     // is a restart with no cache step in it. So say what is known — the answer
     // never arrived, the device writes the file itself during the restart —
     // and send no `saved` flag.
-    step(tr('restart.cache_no_verdict'), 'status-warn');
+    step(aboutFile(tr('restart.cache_no_verdict'), last.path), 'status-warn');
     await lingerStep();
     return 'doubt';
 }
@@ -910,24 +1049,26 @@ async function updateStatus() {
     try {
         const data = await fetchJSON('/api/status');
 
-        // Uptime next to the page title: one unit, the largest that fits —
-        // seconds, then minutes, hours and days — because a raw second count
-        // would be noise in the header.
+        // Uptime next to the page title: days plus the clock, "1d 04:15" — one
+        // fixed shape, so the reading does not change size as the device runs.
+        // Seconds are left out on purpose: the row is refreshed by the page's
+        // five-second poll, so a seconds field would only step in fives.
         const uptimeEl = document.getElementById('uptime');
         if (uptimeEl && data.uptime_sec != null) {
             const sec = Math.max(0, Math.floor(Number(data.uptime_sec) || 0));
-            // Rule 39: the scale the uptime is broken down into.
+            // Rule 39: the scale the uptime is broken down into, and the width of
+            // the two fields of the clock (hh and mm).
             const SEC_PER_DAY = 86400;
             const SEC_PER_HOUR = 3600;
             const SEC_PER_MIN = 60;
+            const CLOCK_FIELD_DIGITS = 2;
             const days = Math.floor(sec / SEC_PER_DAY);
-            const hours = Math.floor(sec / SEC_PER_HOUR);
-            const mins = Math.floor(sec / SEC_PER_MIN);
-            const value = days >= 1 ? days + ' ' + tr('app.uptime_days')
-                        : hours >= 1 ? hours + ' ' + tr('app.uptime_hours')
-                        : mins >= 1 ? mins + ' ' + tr('app.uptime_min')
-                        : sec + ' ' + tr('app.uptime_sec');
-            uptimeEl.textContent = tr('app.uptime') + ' ' + value;
+            const hours = Math.floor((sec % SEC_PER_DAY) / SEC_PER_HOUR);
+            const mins = Math.floor((sec % SEC_PER_HOUR) / SEC_PER_MIN);
+            const clock = String(hours).padStart(CLOCK_FIELD_DIGITS, '0') + ':' +
+                          String(mins).padStart(CLOCK_FIELD_DIGITS, '0');
+            uptimeEl.textContent = tr('app.uptime') + ' ' +
+                                   days + tr('app.uptime_days') + ' ' + clock;
         }
         const dhcpEl = document.getElementById('dhcp-status');
         if (dhcpEl) {

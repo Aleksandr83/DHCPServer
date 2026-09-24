@@ -44,7 +44,7 @@ $envCandidates = @()
 if ($env:IDF_PYTHON_ENV_PATH) {
     $envCandidates += (Join-Path $env:IDF_PYTHON_ENV_PATH "Scripts\python.exe")
 }
-$Python = Get-FirstExisting @($envCandidates + @("C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe"))
+$Python = Get-FirstExisting @($envCandidates + @("C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe"))
 if (-not $Python) {
     $cmd = Get-Command "python" -ErrorAction SilentlyContinue
     if ($cmd) { $Python = $cmd.Source } else { $Python = "python" }
@@ -53,7 +53,7 @@ $idfCandidates = @()
 if ($env:IDF_PATH) {
     $idfCandidates += $env:IDF_PATH
 }
-$IdfPath = Get-FirstExisting @($idfCandidates + @("C:\esp\v6.0.1\esp-idf"))
+$IdfPath = Get-FirstExisting @($idfCandidates + @("C:\esp\v6.1\esp-idf"))
 if (-not $IdfPath) {
     Write-Error "ESP-IDF not found. Run this from an ESP-IDF terminal or set IDF_PATH."
 }

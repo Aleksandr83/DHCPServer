@@ -1,8 +1,10 @@
 #include "DnsServer.h"
 #include "dhcp/DnsMessage.h"
+#include "CacheFileReader.h"
 #include "DnsStatStore.h"
 #include "../core/Config.h"
 #include "../core/ErrorLog.h"
+#include "../core/ErrorLogCore.h"
 #include "../core/JobRegistry.h"
 #include "../core/Md5.h"
 #include "../core/Subnet.h"
@@ -272,12 +274,32 @@ DnsServer::PersistProgress DnsServer::persistProgress() const
                        portMAX_DELAY);
         p.busy = persistBusy_;
         p.isSave = persistSave_;
+        p.checking = persistChecking_;
+        p.checked = persistChecked_;
         p.result = persistResult_;
         p.done = persistDone_;
         p.total = persistTotal_;
+        p.path = kCacheDatPath;
+        p.detail = persistDetail_;
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
     }
     return p;
+}
+
+void DnsServer::setPersistChecking(bool checking)
+{
+    if (!persistJobMutex_) return;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_), portMAX_DELAY);
+    persistChecking_ = checking;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+}
+
+void DnsServer::setStatsChecking(bool checking)
+{
+    if (!statsJobMutex_) return;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(statsJobMutex_), portMAX_DELAY);
+    statsChecking_ = checking;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(statsJobMutex_));
 }
 
 void DnsServer::onPersistProgress(uint32_t done, uint32_t total, void* ctx)
@@ -305,20 +327,78 @@ void DnsServer::persistJobTask(void* arg)
 
     bool ok = false;
     PersistResult result = PersistResult::Failed;
+    string detail;
+    // True only when this job read the file back and the content matched: an
+    // `ok` from a save that was never verified (the DNS page's own button) must
+    // not be published as a check (stage 169).
+    bool verified = false;
     if (self->persistSave_) {
+        // A save a planned restart asked for is read back (stage 169): the file
+        // the restart keeps has to hold what was written, and the operator's rule
+        // allows exactly one retry before he is asked about it. A save started
+        // from the DNS page is not checked — his rule names the two restart
+        // paths — and it keeps its single write, as it always had.
+        const bool verify = self->takePersistVerifyOwed();
+
         size_t written = 0;
         bool nothingToSave = false;
-        ok = self->internalCache_.saveToFile(
-            self->kCacheDatPath, &written,
-            &DnsServer::onPersistProgress, self, &nothingToSave);
+
+        // One attempt: write the file and, when the restart asked for it, read it
+        // back. Starting over is not something this attempt has to do — `"wb"`
+        // truncates, so every attempt already begins with an empty file.
+        const auto attempt = [&](int, string& why) {
+            written = 0;
+            nothingToSave = false;
+            if (!self->internalCache_.saveToFile(self->kCacheDatPath, &written,
+                                                 &DnsServer::onPersistProgress, self,
+                                                 &nothingToSave)) {
+                // An empty table is not a failure: a freshly started device has
+                // nothing to write, and saying otherwise to the operator is
+                // worse than saying nothing. There is also nothing to check.
+                if (nothingToSave) return RestartSaveVerify::AttemptResult::Ok;
+                why = "the cache file could not be written";
+                return RestartSaveVerify::AttemptResult::Failed;
+            }
+            if (!verify) return RestartSaveVerify::AttemptResult::Ok;
+
+            // The write is done and the file is about to be read back: the page is
+            // told, so it shows "checking" with the read's own progress instead of
+            // sitting at the save's last percentage for the seconds this takes on
+            // a table of a few megabytes (stage 169).
+            self->setPersistChecking(true);
+            const CacheFileCheck check = CacheFileReader::check(
+                self->kCacheDatPath, written,
+                [self](uint32_t done, uint32_t total) {
+                    DnsServer::onPersistProgress(done, total, self);
+                });
+            self->setPersistChecking(false);
+            if (!check.ok) {
+                why = check.why;
+                return RestartSaveVerify::AttemptResult::Mismatch;
+            }
+            return RestartSaveVerify::AttemptResult::Ok;
+        };
+
+        string why;
+        RestartSaveVerify::Outcome outcome = RestartSaveVerify::Outcome::Ok;
+        if (verify) {
+            outcome = RestartSaveVerify::run(
+                attempt,
+                [self](int n, RestartSaveVerify::AttemptResult r, const string& w) {
+                    self->reportCacheVerify(n, r, w);
+                });
+        } else {
+            outcome = (attempt(1, why) == RestartSaveVerify::AttemptResult::Ok)
+                          ? RestartSaveVerify::Outcome::Ok
+                          : RestartSaveVerify::Outcome::Failed;
+        }
+
         if (nothingToSave) {
-            // An empty table is not a failure: a freshly started device has
-            // nothing to write, and saying otherwise to the operator is worse
-            // than saying nothing.
-            ok = false;
             result = PersistResult::Empty;
             ESP_LOGI(TAG, "cache not saved: nothing to store in %s", self->kCacheDatPath);
-        } else if (ok) {
+        } else if (outcome == RestartSaveVerify::Outcome::Ok) {
+            ok = true;
+            verified = verify;
             result = PersistResult::Ok;
             ESP_LOGI(TAG, "Built-in cache saved: %u entries -> %s",
                      (unsigned)written, self->kCacheDatPath);
@@ -336,10 +416,28 @@ void DnsServer::persistJobTask(void* arg)
                 self->storeCacheFileMd5(md5);
             }
         } else {
-            ESP_LOGE(TAG, "Built-in cache save failed -> %s",
-                     self->kCacheDatPath);
+            // A checksum of a file that does not hold what was written is
+            // deliberately **not** stored: the boot-time load accepts the file it
+            // has a checksum for, so storing this one would let the damaged file
+            // back into the cache. Leaving the previous value in place is exactly
+            // what keeps it out — the load then refuses with "checksum mismatch".
+            detail = why;
+            result = (outcome == RestartSaveVerify::Outcome::Mismatch)
+                         ? PersistResult::Mismatch
+                         : PersistResult::Failed;
+            ESP_LOGE(TAG, "Built-in cache save %s -> %s (%s)",
+                     (result == PersistResult::Mismatch) ? "does not match" : "failed",
+                     self->kCacheDatPath, detail.c_str());
         }
     } else {
+        // A read-back check cannot be satisfied by a load, and there will be no
+        // save this time: clear the request and say so, rather than leave it
+        // standing for whatever save happens next.
+        if (self->takePersistVerifyOwed()) {
+            ESP_LOGW(TAG, "a verified cache save was asked for, but a load was running "
+                          "— nothing was written for the restart");
+        }
+
         // The file is only read when it is the one this device wrote. A
         // mismatch is not something to "try anyway" silently: it means a
         // half-written file, a damaged block or a file replaced behind the
@@ -393,16 +491,71 @@ void DnsServer::persistJobTask(void* arg)
         "cache.dat");
 
     // Mark the job done (busy=false, keep last done/total so the UI can
-    // report "finished at N").
+    // report "finished at N", and the reason so it can say why).
     if (self->persistJobMutex_) {
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->persistJobMutex_),
                        portMAX_DELAY);
         self->persistBusy_ = false;
         self->persistResult_ = result;
+        self->persistDetail_ = detail;
+        // A phase never outlives its job: a page must not read "checking" from a
+        // job that has already ended.
+        self->persistChecking_ = false;
+        // "Read back and matched" is true only of a job that verified the file and
+        // succeeded — a manual save from the DNS page does not verify at all, and
+        // its `ok` must not be reported as a check.
+        self->persistChecked_ = verified;
         self->persistTaskHandle_ = nullptr;
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->persistJobMutex_));
     }
     vTaskDelete(nullptr);
+}
+
+bool DnsServer::takePersistVerifyOwed()
+{
+    bool owed = false;
+    if (persistJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_), portMAX_DELAY);
+        owed = persistVerifyOwed_;
+        persistVerifyOwed_ = false;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
+    }
+    return owed;
+}
+
+void DnsServer::reportCacheVerify(int attempt, RestartSaveVerify::AttemptResult result,
+                                  const string& why)
+{
+    // The same rule the statistics file follows: both attempts and both reasons
+    // reach the error log, because the operator has no terminal to read them from
+    // and "the cache was not saved" without a reason is what made him ask.
+    core::ErrorLogCore* log = core::ErrorLog::instance().core();
+    if (log == nullptr) return;
+
+    const string path(kCacheDatPath);
+    if (result == RestartSaveVerify::AttemptResult::Ok) {
+        if (attempt > 1) {
+            log->submit(core::LogLevel::Warn, "cache",
+                        "the second attempt saved " + path);
+        }
+        return;
+    }
+
+    const bool mismatch = (result == RestartSaveVerify::AttemptResult::Mismatch);
+    if (attempt == 1) {
+        log->submit(core::LogLevel::Error, "cache",
+                    mismatch
+                        ? "the cache file does not hold what was written (" + why + ")"
+                        : "the cache could not be saved (" + why + ")");
+        log->submit(core::LogLevel::Warn, "cache", "retrying to write " + path);
+        return;
+    }
+    log->submit(core::LogLevel::Error, "cache",
+                mismatch
+                    ? "the second attempt wrote a cache file that still does not match (" +
+                          why + ") — the cache is not safe to keep"
+                    : "the second attempt failed too (" + why +
+                          ") — there is no cache file for the restart");
 }
 
 void DnsServer::stop()
@@ -619,6 +772,13 @@ void DnsServer::statsJobTask(void* arg)
         xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->statsJobMutex_),
                        portMAX_DELAY);
         self->statsJob_.finish(verdict, detail);
+        // The check phase ends with the job whatever the verdict was: a page
+        // must never read "checking" from a job that is over.
+        self->statsChecking_ = false;
+        // "The file was read back and it matched" is only true of a job that
+        // succeeded — and the statistics job always verifies, so a success is a
+        // checked file.
+        self->statsChecked_ = (verdict == RestartSaveJobState::Verdict::Ok);
         self->statsTaskHandle_ = nullptr;
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->statsJobMutex_));
     }
@@ -677,6 +837,9 @@ DnsServer::StatsProgress DnsServer::statsProgress() const
                        portMAX_DELAY);
         p.busy = statsJob_.busy();
         p.result = statsJob_.verdict();
+        p.checking = statsChecking_;
+        p.checked = statsChecked_;
+        p.path = DnsStatStore::kPath;
         p.detail = statsJob_.detail();
         xSemaphoreGive(static_cast<SemaphoreHandle_t>(statsJobMutex_));
     }
@@ -742,15 +905,26 @@ RestartSaveJobState::Verdict DnsServer::writeStatsNow(string& detail)
     totals.evictScanNodes = ic.evictScanNodes;
 
     string why;
-    // Retry once, from a clean slate, and report both attempts to the error log
-    // (the operator asked for exactly that; see DnsStatStore::saveWithRetry).
-    if (!DnsStatStore::saveWithRetry(DnsStatStore::kPath, totals, &why,
-                                     core::ErrorLog::instance().core())) {
+    // One write, one read-back check, one retry — the operator's rule for the
+    // files a planned restart keeps (stage 169). Both attempts and both reasons
+    // go to the error log; see DnsStatStore::saveWithRetry.
+    const RestartSaveVerify::Outcome outcome =
+        DnsStatStore::saveWithRetry(DnsStatStore::kPath, totals, &why,
+                                    core::ErrorLog::instance().core(),
+                                    [this](bool checking) { setStatsChecking(checking); });
+    if (outcome != RestartSaveVerify::Outcome::Ok) {
+        // The page gets the device's own words: without a terminal, this is the
+        // only place the operator can read them.
+        detail = why;
+        if (outcome == RestartSaveVerify::Outcome::Mismatch) {
+            // The write itself worked and the file on the volume is something
+            // else: the page asks him a different question about that, and says
+            // which of the two happened.
+            ESP_LOGW(TAG, "statistics do not match what was written (%s)", why.c_str());
+            return RestartSaveJobState::Verdict::Mismatch;
+        }
         ESP_LOGW(TAG, "statistics could not be saved to %s (%s)",
                  DnsStatStore::kPath, why.c_str());
-        // The page gets the device's own words: without a terminal, this is the
-        // only place it can read them.
-        detail = why;
         return RestartSaveJobState::Verdict::Failed;
     }
 
@@ -840,6 +1014,17 @@ DnsServer::RestartSave DnsServer::startCacheSaveForRestart()
     if (internalCacheStats().entries == 0) {
         ESP_LOGI(TAG, "cache is not kept before a reboot (the cache is empty)");
         return RestartSave::NothingToSave;
+    }
+
+    // The file is read back before the device goes down (stage 169): the restart
+    // keeps whatever is on the volume, so "the write returned" is not enough. The
+    // request is left for the job rather than passed to startPersistJob(), because
+    // a job may already be running below — and it is still *that* file the restart
+    // will keep, whichever save produced it.
+    if (persistJobMutex_) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(persistJobMutex_), portMAX_DELAY);
+        persistVerifyOwed_ = true;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(persistJobMutex_));
     }
 
     // A job may already be running: a manual "Save to file" the operator started,
