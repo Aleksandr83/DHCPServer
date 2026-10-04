@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cctype>
 #include <cstdio>
+#include <queue>
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -918,6 +919,52 @@ InternalDnsCache::Stats InternalDnsCache::stats() const
                       : 0;
     unlock();
     return s;
+}
+
+// ─────────────────────────────────────────────────────
+// Auto-update support (stage 172)
+// ─────────────────────────────────────────────────────
+
+bool InternalDnsCache::contains(const string& domain, uint16_t qtype) const
+{
+    if (!arena_ || domain.empty()) return false;
+    const string lname = lower(domain);
+    lock();
+    const uint32_t h = hashName(lname.c_str());
+    const int idx = findNode(bucketOf(h), h, lname.c_str(), qtype);
+    unlock();
+    return idx >= 0;
+}
+
+vector<InternalDnsCache::RefreshCandidate> InternalDnsCache::oldestEntries(
+    size_t max, const function<bool(const char*, uint16_t)>& skip) const
+{
+    vector<RefreshCandidate> out;
+    if (!arena_ || max == 0) return out;
+
+    lock();
+    const uint32_t now = nowMs();
+    // A max-heap by age keeps only the `max` oldest records, so a 60k-entry pool
+    // does not become a 60k-string copy: the heap holds indices and ages, and a
+    // name is materialised only for the records that survive the cut.
+    priority_queue<pair<uint32_t, int>> heap;
+    for (uint32_t b = 0; b < numBuckets_; b++) {
+        for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
+            const Node& n = nodes_[idx];
+            if (skip && skip(n.name, n.qtype)) continue;
+            heap.push({elapsedMs(now, n.storedMs), idx});
+            if (heap.size() > max) heap.pop();
+        }
+    }
+    out.reserve(heap.size());
+    while (!heap.empty()) {
+        const int idx = heap.top().second;
+        heap.pop();
+        out.push_back({string(nodes_[idx].name), nodes_[idx].qtype});
+    }
+    // The heap drains largest age first — that already is "oldest first".
+    unlock();
+    return out;
 }
 
 } // namespace dns

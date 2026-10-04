@@ -404,6 +404,10 @@ bool DhcpServer::start()
 
     state_ = DhcpServerState::RUNNING;
     stopRequested_ = false;
+    // A server that has just started knows of no refusals: the hold-down protects
+    // the clients of one run, and every address is worth trying again after a
+    // restart (the machine that held one may have gone).
+    declined_.clear();
 
     // Create server task
     BaseType_t res = xTaskCreatePinnedToCore(
@@ -727,6 +731,18 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                     if (it != leases_.end()) {
                         // Existing lease: ACK only if it belongs to this client
                         ack = (memcmp(it->second.mac, msg->chaddr, 6) == 0);
+                    } else if (addressDeclined(assignIp)) {
+                        // A client has already refused this address: it is in use
+                        // as far as we know, and the refusing client's probe is
+                        // better evidence than ours (it is the same probe that had
+                        // just missed). The NAK sends it back to DISCOVER, and
+                        // selectIp no longer offers this address.
+                        ack = false;
+                        if (logTerminal_) {
+                            ESP_LOGI(TAG, "DHCP REQUEST " IP_FMT
+                                          ": refusing a declined address",
+                                     IP_FMT_ARGS(assignIp));
+                        }
                     } else {
                         // No lease — ARP-probe to detect a conflict
                         uint8_t ownerMac[6];
@@ -785,10 +801,32 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
         }
         break;
 
-    case DHCP_DECLINE:
+    case DHCP_DECLINE: {
         ESP_LOGW(TAG, "DHCP DECLINE for " IP_FMT, IP_FMT_ARGS(requestedIp));
+        // The client ARP-probed this address and somebody answered (RFC 2131), so
+        // it is not ours to hand out: its own probe is the stronger witness here,
+        // because the server's probe is the one that had just failed. A lease the
+        // refusing client holds goes with the address — it cannot keep what it
+        // has just declared unusable, and leaving the lease would keep the address
+        // out of the pool for a whole lease time instead of the hold-down.
+        auto lease = leases_.find(requestedIp);
+        if (lease != leases_.end() &&
+            memcmp(lease->second.mac, msg->chaddr, DHCP_HWADDR_LEN) == 0) {
+            leases_.erase(lease);
+        }
+        if (!declined_.add(requestedIp, getCurrentTimeMs())) {
+            ESP_LOGW(TAG, "DECLINE: the hold-down table is full, "
+                          "the oldest refusal was forgotten");
+        }
+        if (logTerminal_) {
+            ESP_LOGI(TAG, "IP " IP_FMT " held down for %u s, %u address(es) refused",
+                     IP_FMT_ARGS(requestedIp),
+                     static_cast<unsigned>(DeclinedAddresses::kDeclineHoldMs / 1000ULL),
+                     static_cast<unsigned>(declined_.count(getCurrentTimeMs())));
+        }
         logDhcpRest("DECLINE", msg->chaddr, requestedIp, 0, 0, false, 0, 0);
         break;
+    }
 
     default:
         break;
@@ -809,10 +847,18 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     if (requestedIp &&
         (isIpInRange(requestedIp) || isStaticBindingForMac(clientMac, requestedIp))) {
         // Honor a requested IP unless it is already used on the network by
-        // another device. Static bindings for this client are always honored.
-        if (isStaticBindingForMac(clientMac, requestedIp) ||
-            !probeIp(requestedIp, nullptr)) {
+        // another device, or a client has already refused it. Static bindings
+        // for this client are always honored: they are the operator's word, and
+        // a refusal may not overrule a decision made by hand.
+        const bool fixed = isStaticBindingForMac(clientMac, requestedIp);
+        const bool refused = !fixed && addressDeclined(requestedIp);
+        if (fixed || (!refused && !probeIp(requestedIp, nullptr))) {
             offerIp = requestedIp;
+        } else if (refused) {
+            // A separate branch rather than a conditional *format* string: the log
+            // macro cannot take one (the format argument has to be a literal).
+            ESP_LOGI(TAG, "Requested IP " IP_FMT " was declined, picking another",
+                     IP_FMT_ARGS(requestedIp));
         } else {
             ESP_LOGI(TAG, "Requested IP " IP_FMT " in use on network, picking another",
                      IP_FMT_ARGS(requestedIp));
@@ -1042,6 +1088,15 @@ uint32_t DhcpServer::selectIp(const uint8_t* clientMac)
     for (uint32_t ip = rangeStart_; ip <= rangeEnd_; ip = htonl(ntohl(ip) + 1)) {
         if (ip == serverIp_) continue;
         if (leases_.find(ip) == leases_.end()) {
+            // An address a client refused is not free, whatever the probe of the
+            // moment says: see DhcpServer::addressDeclined.
+            if (addressDeclined(ip)) {
+                if (logTerminal_) {
+                    ESP_LOGI(TAG, "IP " IP_FMT " was declined, skipping",
+                             IP_FMT_ARGS(ip));
+                }
+                continue;
+            }
             if (probeIp(ip, nullptr)) {
                 if (logTerminal_) {
                     ESP_LOGI(TAG, "IP " IP_FMT " in use on network, skipping",
@@ -1250,6 +1305,16 @@ void DhcpServer::removeExpiredLeases()
 uint32_t DhcpServer::getCurrentTimeSec() const
 {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000000ULL);
+}
+
+uint64_t DhcpServer::getCurrentTimeMs() const
+{
+    return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+}
+
+bool DhcpServer::addressDeclined(uint32_t ip) const
+{
+    return declined_.isDeclined(ip, getCurrentTimeMs());
 }
 
 string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const

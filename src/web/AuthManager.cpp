@@ -1,4 +1,5 @@
 #include "AuthManager.h"
+#include "../core/AuthAttemptPolicy.h"
 #include "../core/Config.h"
 
 #include <cstring>
@@ -58,19 +59,18 @@ bool AuthManager::authenticate(const string& authHeader,
         return false;
     }
 
-    // No auth header → fail
-    if (authHeader.empty()) {
-        recordFailure(clientIp);
+    // A request that carries no credentials is the browser being *asked* for
+    // them — the first half of the HTTP Basic challenge — and a header using
+    // another scheme never reaches a password comparison. Neither is a guess, so
+    // neither may spend the attempt budget: counting them locked the whole
+    // interface out for everyone (04.10.2026, see AuthAttemptPolicy).
+    if (!core::countsAsFailedAttempt(authHeader)) {
+        ESP_LOGI(TAG, "No credentials from %s: asking for them", clientIp.c_str());
         return false;
     }
 
     // Parse "Basic <base64>"
     const string prefix = "Basic ";
-    if (authHeader.compare(0, prefix.length(), prefix) != 0) {
-        recordFailure(clientIp);
-        return false;
-    }
-
     string base64Credentials = authHeader.substr(prefix.length());
 
     // Decode base64 (simple implementation for ESP-IDF)

@@ -47,3 +47,6 @@ spiffs.img
 
 # Test output
 test/build/
+
+# Agent Manager
+.gigacode_vsc/agent-manager.json

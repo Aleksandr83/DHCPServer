@@ -34,10 +34,12 @@ bool localTime(time_t t, tm& out)
 } // namespace
 
 ErrorLogCore::ErrorLogCore(IErrorQueue& queue, IErrorLogTarget& target,
-                           function<uint32_t()> uptimeSec)
+                           function<uint32_t()> uptimeSec,
+                           LineFormatter formatter)
     : queue_(queue)
     , target_(target)
     , uptimeSec_(move(uptimeSec))
+    , formatter_(move(formatter))
 {
 }
 
@@ -48,7 +50,12 @@ bool ErrorLogCore::clockIsSet(uint64_t nowEpochSec)
 
 const char* ErrorLogCore::levelTag(LogLevel level)
 {
-    return level == LogLevel::Warn ? "[W]" : "[E]";
+    switch (level) {
+        case LogLevel::Warn: return "[W]";
+        case LogLevel::Info: return "[I]";
+        case LogLevel::Error: break;
+    }
+    return "[E]";
 }
 
 string ErrorLogCore::clampMessage(const string& message)
@@ -57,11 +64,8 @@ string ErrorLogCore::clampMessage(const string& message)
     return message.substr(0, kMaxMessage) + kTruncatedMark;
 }
 
-string ErrorLogCore::formatLine(LogLevel level, const char* tag,
-                                     const string& message,
-                                     uint64_t nowEpochSec, uint32_t uptimeSec)
+string ErrorLogCore::formatStamp(uint64_t nowEpochSec, uint32_t uptimeSec)
 {
-    string stamp;
     if (clockIsSet(nowEpochSec)) {
         const time_t t = static_cast<time_t>(nowEpochSec);
         tm tmv{};
@@ -70,30 +74,43 @@ string ErrorLogCore::formatLine(LogLevel level, const char* tag,
         if (localTime(t, tmv)) {
             char buf[32];
             strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
-            stamp = buf;
+            return buf;
         }
     }
-    if (stamp.empty()) {
-        // No clock yet (a device that has not synced): an uptime stamp is a true
-        // statement, "1970-01-01" is not.
-        char buf[24];
-        snprintf(buf, sizeof(buf), "t+%us", static_cast<unsigned>(uptimeSec));
-        stamp = buf;
-    }
+    // No clock yet (a device that has not synced): an uptime stamp is a true
+    // statement, "1970-01-01" is not.
+    char buf[24];
+    snprintf(buf, sizeof(buf), "t+%us", static_cast<unsigned>(uptimeSec));
+    return buf;
+}
 
-    return stamp + " " + levelTag(level) + " " + (tag ? tag : "app") + ": " +
-           clampMessage(message);
+string ErrorLogCore::formatLine(LogLevel level, const char* tag,
+                                     const string& message,
+                                     uint64_t nowEpochSec, uint32_t uptimeSec)
+{
+    return formatStamp(nowEpochSec, uptimeSec) + " " + levelTag(level) + " " +
+           (tag ? tag : "app") + ": " + clampMessage(message);
+}
+
+string ErrorLogCore::makeLine(LogLevel level, const char* tag,
+                              const string& message) const
+{
+    if (formatter_) return formatter_(level, tag, message);
+    const uint32_t uptime = uptimeSec_ ? uptimeSec_() : 0;
+    return formatLine(level, tag, message,
+                      static_cast<uint64_t>(std::time(nullptr)), uptime);
 }
 
 bool ErrorLogCore::submit(LogLevel level, const char* tag, const string& message)
 {
-    uint32_t uptime = 0;
-    if (uptimeSec_) uptime = uptimeSec_();
+    return submitLine(level, makeLine(level, tag, message));
+}
 
+bool ErrorLogCore::submitLine(LogLevel level, const string& formattedLine)
+{
     ErrorLogEntry entry;
     entry.level = level;
-    entry.text = formatLine(level, tag, message,
-                            static_cast<uint64_t>(std::time(nullptr)), uptime);
+    entry.text = formattedLine;
 
     if (queue_.push(entry)) return true;
 
@@ -121,9 +138,7 @@ uint32_t ErrorLogCore::drain(uint32_t timeoutMs)
                                        " message(s) lost (queue full or the target refused them)";
             ErrorLogEntry note;
             note.level = LogLevel::Warn;
-            note.text = formatLine(LogLevel::Warn, "log", notice,
-                                   static_cast<uint64_t>(std::time(nullptr)),
-                                   uptimeSec_ ? uptimeSec_() : 0);
+            note.text = makeLine(LogLevel::Warn, "log", notice);
             if (!target_.append(note.level, note.text)) ++dropped_;
             else { dropNoticePending_ = false; dropped_ = 0; ++written; }
         }

@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "core/AutoUpdatePlan.h"
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -60,10 +61,21 @@ static const char* KEY_DNS_IC_ENABLE  = "dns_ic_enable";
 static const char* KEY_DNS_IC_SIZE_MB = "dns_ic_size_mb";
 static const char* KEY_DNS_IC_IGN_TTL = "dns_ic_ign_ttl";
 static const char* KEY_DNS_IC_STATS   = "dns_ic_stats";
-static const char* KEY_DNS_IC_SAVE_CACHE = "dns_ic_save_cache";
-static const char* KEY_DNS_IC_AUTOSAVE        = "dns_ic_autosave";
-static const char* KEY_DNS_IC_AUTOSAVE_PERIOD = "dns_ic_autosave_period";
-static const char* KEY_DNS_IC_AUTOSAVE_INTERVAL = "dns_ic_autosave_interval";
+static const char* KEY_DNS_IC_SAVE_CACHE = "dns_ic_sv_cache";   // 15 (was 17)
+// Stage 172: eight keys of the internal-cache family had grown past the 15-char
+// NVS limit (`NVS_KEY_NAME_MAX_SIZE` is 16 including the terminator, and
+// nvs_page.cpp refuses anything longer with ESP_ERR_NVS_KEY_TOO_LONG). The value
+// was then dropped silently, so each of those settings behaved as "never saved"
+// across a reboot. The names below stay within the limit; the length is noted
+// next to each one so the next edit does not repeat the mistake.
+static const char* KEY_DNS_IC_AUTOSAVE        = "dns_ic_autosave";      // 15
+static const char* KEY_DNS_IC_AUTOSAVE_PERIOD = "dns_ic_as_per";        // 13
+static const char* KEY_DNS_IC_AUTOSAVE_INTERVAL = "dns_ic_as_int";      // 13
+static const char* KEY_DNS_IC_AUTOUPDATE      = "dns_ic_au_on";         // 13
+static const char* KEY_DNS_IC_AUTOUPDATE_PERIOD = "dns_ic_au_per";      // 14
+static const char* KEY_DNS_IC_AUTOUPDATE_INTERVAL = "dns_ic_au_int";    // 14
+static const char* KEY_DNS_IC_AUTOUPDATE_BATCH    = "dns_ic_au_bat";    // 14
+static const char* KEY_DNS_IC_AUTOUPDATE_PAUSE    = "dns_ic_au_pau";    // 14
 static const char* KEY_DNS_IC_FILE_MD5 = "dns_ic_file_md5";
 static const char* KEY_DNS_BLK_NON_AA = "dns_blk_nonaa";
 static const char* KEY_DNS_ALLOW_LAN = "dns_allow_lan";
@@ -450,6 +462,16 @@ DnsConfig Config::getDns() const
     cfg.cacheInternalAutosaveInterval = autosaveClampInterval(
         cfg.cacheInternalAutosavePeriod,
         static_cast<uint16_t>(readI32(KEY_DNS_IC_AUTOSAVE_INTERVAL, 1)), 0);
+    cfg.cacheInternalAutoUpdate = readI32(KEY_DNS_IC_AUTOUPDATE, 0) != 0;
+    cfg.cacheInternalAutoUpdatePeriod = autosavePeriodFromIndex(
+        static_cast<uint8_t>(readI32(KEY_DNS_IC_AUTOUPDATE_PERIOD, 0)));
+    cfg.cacheInternalAutoUpdateInterval = autoUpdateClampInterval(
+        cfg.cacheInternalAutoUpdatePeriod,
+        static_cast<uint16_t>(readI32(KEY_DNS_IC_AUTOUPDATE_INTERVAL, 1)));
+    cfg.cacheInternalAutoUpdateBatch =
+        autoUpdateClampBatch(readI32(KEY_DNS_IC_AUTOUPDATE_BATCH, 50));
+    cfg.cacheInternalAutoUpdatePause =
+        autoUpdateClampPause(readI32(KEY_DNS_IC_AUTOUPDATE_PAUSE, 60));
     cfg.cacheInternalFileMd5 = readStr(KEY_DNS_IC_FILE_MD5, "");
     cfg.blockForwardNonAA = readI32(KEY_DNS_BLK_NON_AA, 0) != 0;
     cfg.allowOwnSubnet = readI32(KEY_DNS_ALLOW_LAN, 1) != 0;   // default ON
@@ -487,6 +509,15 @@ void Config::setDns(const DnsConfig& cfg)
              static_cast<int32_t>(cfg.cacheInternalAutosavePeriod));
     writeI32(KEY_DNS_IC_AUTOSAVE_INTERVAL,
              static_cast<int32_t>(cfg.cacheInternalAutosaveInterval));
+    writeI32(KEY_DNS_IC_AUTOUPDATE, cfg.cacheInternalAutoUpdate ? 1 : 0);
+    writeI32(KEY_DNS_IC_AUTOUPDATE_PERIOD,
+             static_cast<int32_t>(cfg.cacheInternalAutoUpdatePeriod));
+    writeI32(KEY_DNS_IC_AUTOUPDATE_INTERVAL,
+             static_cast<int32_t>(cfg.cacheInternalAutoUpdateInterval));
+    writeI32(KEY_DNS_IC_AUTOUPDATE_BATCH,
+             static_cast<int32_t>(cfg.cacheInternalAutoUpdateBatch));
+    writeI32(KEY_DNS_IC_AUTOUPDATE_PAUSE,
+             static_cast<int32_t>(cfg.cacheInternalAutoUpdatePause));
     writeStr(KEY_DNS_IC_FILE_MD5, cfg.cacheInternalFileMd5);
     writeI32(KEY_DNS_BLK_NON_AA, cfg.blockForwardNonAA ? 1 : 0);
     writeI32(KEY_DNS_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);

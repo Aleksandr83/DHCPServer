@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 
 namespace dhcp {
 namespace dns {
@@ -239,6 +240,33 @@ public:
         size_t freeBytes = 0;   // (capacity − entries) × node size
     };
     Stats stats() const;
+
+    /// @brief One record the auto-update (stage 172) may refresh.
+    struct RefreshCandidate {
+        std::string name;
+        uint16_t qtype = 0;
+    };
+
+    /**
+     * @brief Up to @p max live records, the ones stored longest ago first.
+     *
+     * A snapshot taken under the arena lock, so the caller — a low-priority task
+     * that queries the upstream DNS — holds nothing while it works. The oldest
+     * record comes first, so a sweep of `max` records per cycle walks the whole
+     * pool by itself.
+     *
+     * @param[in] max   How many records to return at most.
+     * @param[in] skip  Optional filter: a pair that is already being handled this
+     *                  cycle is left out. The name is a C string on purpose —
+     *                  the filter runs for every node, and a `std::string` there
+     *                  would copy up to 128 bytes a node.
+     */
+    std::vector<RefreshCandidate> oldestEntries(
+        size_t max,
+        const std::function<bool(const char*, uint16_t)>& skip = {}) const;
+
+    /// @brief True when a live record for that name/type is present.
+    bool contains(const std::string& domain, uint16_t qtype) const;
 
 private:
     // Fixed layout node — keeps the arena layout predictable.

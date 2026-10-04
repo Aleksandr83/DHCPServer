@@ -4,6 +4,7 @@
 #include "IDhcpServer.h"
 #include "DhcpRestLogger.h"
 #include "DhcpAllowedList.h"
+#include "DeclinedAddresses.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -139,6 +140,18 @@ private:
     void removeExpiredLeases();
     bool reserveOffer(const uint8_t* mac, uint32_t ip, const std::string& hostname);
     uint32_t getCurrentTimeSec() const;
+    /// @brief Milliseconds since boot — the clock the DECLINE hold-down uses.
+    uint64_t getCurrentTimeMs() const;
+
+    /**
+     * @brief True while that address is held down after a client refused it.
+     *
+     * RFC 2131 asks the server to treat an address named in a DECLINE as
+     * unavailable; @ref DeclinedAddresses says why the server's own ARP probe is
+     * the weaker witness, and what the OFFER/ACK/DECLINE loop of 04.10.2026
+     * looked like while the probe was trusted instead.
+     */
+    bool addressDeclined(uint32_t ip) const;
 
     /**
      * @brief True when a NEW entry (ip not yet in the table) may be inserted.
@@ -179,6 +192,11 @@ private:
 
     // Leases: IP (net order) -> Lease
     mutable std::map<uint32_t, DhcpLease> leases_;
+
+    // Addresses clients refused with DHCPDECLINE, held down for a while. Written
+    // and read only by the DHCP task (the packet path), so it needs no lock;
+    // see DeclinedAddresses for the rule and its bounds.
+    DeclinedAddresses declined_;
 
     // Lease-table cap (applyLeaseLimit): configured value (0 = auto) plus the
     // effective one actually enforced, and a refusal counter for diagnostics.

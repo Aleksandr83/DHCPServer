@@ -14,12 +14,21 @@ namespace {
 /** Level travels as a byte so the queue item stays a plain buffer. */
 uint8_t levelToByte(LogLevel level)
 {
-    return level == LogLevel::Warn ? 1 : 0;
+    switch (level) {
+        case LogLevel::Warn: return 1;
+        case LogLevel::Info: return 2;
+        case LogLevel::Error: break;
+    }
+    return 0;
 }
 
 LogLevel byteToLevel(uint8_t value)
 {
-    return value == 1 ? LogLevel::Warn : LogLevel::Error;
+    switch (value) {
+        case 1: return LogLevel::Warn;
+        case 2: return LogLevel::Info;
+        default: return LogLevel::Error;
+    }
 }
 
 /**

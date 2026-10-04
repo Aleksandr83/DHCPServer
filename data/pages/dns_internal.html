@@ -21,9 +21,11 @@
         </div>
 
         <div id="dns-internal-options" style="display:none;">
-            <!-- One card, two switches: the statistics switch lives here by the
-                 operator's request, the cache switch moved down into the Cache
-                 card where the rest of the cache controls are. -->
+            <!-- One card, two switches: Ignore TTL and Auto Update. The statistics
+                 switch was moved down into the Cache card where the rest of the
+                 cache controls live. Auto Update (and everything below it) only
+                 shows while Ignore TTL is on: without it the records expire on
+                 their own, so there is nothing for the sweep to do. -->
             <div class="card">
                 <div class="toggle-row" style="margin-bottom:0.5rem;">
                     <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
@@ -32,13 +34,52 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
-                <div class="toggle-row" style="margin-bottom:0.5rem;">
-                    <span data-i18n="dns_internal.save_stats">Save statistics before reboot</span>
+                <div class="toggle-row" id="dns-internal-autoupdate-row" style="margin-bottom:0.5rem; display:none;">
+                    <span data-i18n="dns_internal.auto_update">Auto Update</span>
                     <label class="toggle-switch">
-                        <input type="checkbox" id="dns-internal-save-stats" onchange="toggleInternalSaveStats()">
+                        <input type="checkbox" id="dns-internal-auto-update" onchange="toggleInternalAutoUpdate()">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
+                <div class="toggle-row" id="dns-internal-autoupdate-batch-row" style="display:none;">
+                    <span data-i18n="dns_internal.autoupdate_batch">Max entries per update</span>
+                    <span>
+                        <input type="number" id="dns-internal-autoupdate-batch"
+                               min="1" max="1000" step="1" value="50" style="width:4.5rem;"
+                               oninput="applyAutoupdateBatchMax()">
+                    </span>
+                </div>
+                <div class="toggle-row" id="dns-internal-autoupdate-pause-row" style="display:none;">
+                    <span data-i18n="dns_internal.autoupdate_pause">Pause after update (sec)</span>
+                    <span>
+                        <input type="number" id="dns-internal-autoupdate-pause"
+                               min="1" max="3600" step="1" value="60" style="width:4.5rem;"
+                               oninput="applyAutoupdatePauseMax()">
+                    </span>
+                </div>
+                <div class="toggle-row" id="dns-internal-autoupdate-period-row" style="display:none;">
+                    <span data-i18n="dns_internal.autoupdate_period">Update every</span>
+                    <span>
+                        <input type="number" id="dns-internal-autoupdate-interval"
+                               min="1" max="30" step="1" value="1" style="width:4.5rem;"
+                               oninput="applyAutoupdateIntervalMax()">
+                        <select id="dns-internal-autoupdate-unit" style="width:6.5rem;"
+                                onchange="applyAutoupdateIntervalMax()">
+                            <option value="0" data-i18n="dns_internal.period_hour">hours</option>
+                            <option value="1" data-i18n="dns_internal.period_day">days</option>
+                        </select>
+                    </span>
+                </div>
+                <!-- Countdown to the next refresh cycle (stage 174): the device
+                     reports its own remaining time, the page ticks it locally and
+                     refreshes the value from the device every few seconds. -->
+                <div class="toggle-row" id="dns-internal-autoupdate-next-row" style="display:none;">
+                    <span data-i18n="dns_internal.autoupdate_next">Next update in</span>
+                    <span id="dns-internal-autoupdate-next" class="test-conn-result"></span>
+                </div>
+                <button class="btn btn-primary" id="dns-internal-autoupdate-save"
+                        onclick="saveInternalAutoupdatePeriod(this)" data-i18n="dns_internal.autoupdate_save"
+                        style="margin-top:0.8rem; display:none;">Save</button>
             </div>
 
             <!-- Persistence: save the PSRAM cache to /fat/cache.dat and restore it -->
@@ -51,6 +92,13 @@
                     <button class="btn btn-primary" onclick="saveInternalCacheFile(this)" data-i18n="dns_internal.save_file">Save to file</button>
                     <button class="btn" onclick="loadInternalCacheFile(this)" data-i18n="dns_internal.load_file">Load from file</button>
                     <button class="btn" onclick="resetInternalCache(this)" data-i18n="dns_internal.reset">Reset</button>
+                </div>
+                <div class="toggle-row" style="margin-bottom:0.5rem;">
+                    <span data-i18n="dns_internal.save_stats">Save statistics before reboot</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-save-stats" onchange="toggleInternalSaveStats()">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
                 <div class="toggle-row">
                     <span data-i18n="dns_internal.save_cache">Save cache before reboot</span>
@@ -73,15 +121,17 @@
                         <input type="number" id="dns-internal-autosave-interval"
                                min="1" max="24" step="1" value="1" style="width:4.5rem;"
                                oninput="applyAutosaveIntervalMax()">
-                        <select id="dns-internal-autosave-unit" onchange="applyAutosaveIntervalMax()">
+                        <select id="dns-internal-autosave-unit" style="width:6.5rem;"
+                                onchange="applyAutosaveIntervalMax()">
                             <option value="2" data-i18n="dns_internal.period_minute">minutes</option>
                             <option value="0" data-i18n="dns_internal.period_hour">hours</option>
                             <option value="1" data-i18n="dns_internal.period_day">days</option>
                         </select>
-                        <button class="btn btn-primary" onclick="saveInternalAutosavePeriod(this)"
-                                data-i18n="dns_internal.autosave_save">Save</button>
                     </span>
                 </div>
+                <button class="btn btn-primary" id="dns-internal-autosave-save"
+                        onclick="saveInternalAutosavePeriod(this)" data-i18n="dns_internal.autosave_save"
+                        style="margin-top:0.8rem; display:none;">Save</button>
 
                 <!-- Live progress while a save/load job is running -->
                 <div id="dns-internal-progress-row" style="display:none; margin-top:0.6rem;">
@@ -132,6 +182,24 @@
             field.value = String(Number(data.cache_internal_autosave_interval) || 1);
             applyAutosaveIntervalMax();
             updateAutosavePeriodVisibility();
+            // Auto Update: interval and unit.
+            const au = document.getElementById('dns-internal-auto-update');
+            au.checked = !!data.cache_internal_autoupdate;
+            au.disabled = !internalAvailable;
+            const auUnit = document.getElementById('dns-internal-autoupdate-unit');
+            auUnit.value = String(Number(data.cache_internal_autoupdate_period) || 0);
+            const auField = document.getElementById('dns-internal-autoupdate-interval');
+            auField.value = String(Number(data.cache_internal_autoupdate_interval) || 1);
+            applyAutoupdateIntervalMax();
+            // Auto Update batch size.
+            const auBatch = document.getElementById('dns-internal-autoupdate-batch');
+            auBatch.value = String(Number(data.cache_internal_autoupdate_batch) || 50);
+            applyAutoupdateBatchMax();
+            // Auto Update pause.
+            const auPause = document.getElementById('dns-internal-autoupdate-pause');
+            if (auPause) auPause.value = String(Number(data.cache_internal_autoupdate_pause) || 60);
+            applyAutoupdatePauseMax();
+            updateAutoupdateVisibility();
             // The internal cache needs PSRAM — disable the toggle without it.
             cb.disabled = !internalAvailable;
             const note = document.getElementById('dns-internal-psram-note');
@@ -153,6 +221,9 @@
             if (sst) sst.disabled = !active;
             const sca = document.getElementById('dns-internal-save-cache');
             if (sca) sca.disabled = !active;
+            const au = document.getElementById('dns-internal-auto-update');
+            if (au) au.disabled = !active;
+            updateAutoupdateVisibility();
         }
 
         async function toggleInternalCache() {
@@ -179,6 +250,8 @@
                                    hideCancel: true });
                 ittl.checked = !checked;
             }
+            // Auto Update only exists while Ignore TTL is on.
+            updateAutoupdateVisibility();
         }
 
         /* The device keeps the main-page counters (From cache / Forward / Avg hit)
@@ -293,10 +366,209 @@
         // The period only makes sense while the switch is on.
         function updateAutosavePeriodVisibility() {
             const box = document.getElementById('dns-internal-autosave');
+            const on = !!(box && box.checked);
             const row = document.getElementById('dns-internal-autosave-period-row');
-            if (row) row.style.display = (box && box.checked) ? '' : 'none';
-            if (box && box.checked) applyAutosaveIntervalMax();
+            if (row) row.style.display = on ? '' : 'none';
+            const save = document.getElementById('dns-internal-autosave-save');
+            if (save) save.style.display = on ? '' : 'none';
+            if (on) applyAutosaveIntervalMax();
         }
+
+        // ─── Auto Update ───
+
+        async function toggleInternalAutoUpdate() {
+            const box = document.getElementById('dns-internal-auto-update');
+            const checked = box.checked;
+            updateAutoupdateVisibility();
+            const result = await saveDnsPartial({ cache_internal_autoupdate: checked });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                box.checked = !checked;
+                updateAutoupdateVisibility();
+            }
+        }
+
+        // The interval is how many of the unit fit into the next one up: 24
+        // hours in a day — the browser's own up/down arrows walk inside that
+        // range, and the maximum is recomputed when the unit changes.
+        function autoupdateIntervalMax(unitValue) {
+            const unit = Number(unitValue);
+            if (unit === 0) return 24;                       // hours
+            return 30;                                        // days
+        }
+
+        function applyAutoupdateIntervalMax() {
+            const unit = document.getElementById('dns-internal-autoupdate-unit');
+            const field = document.getElementById('dns-internal-autoupdate-interval');
+            if (!unit || !field) return;
+            const max = autoupdateIntervalMax(unit.value);
+            field.max = String(max);
+            const value = Number(field.value) || 1;
+            if (value > max) field.value = String(max);
+            if (value < 1) field.value = '1';
+        }
+
+        async function saveAutoupdatePeriod() {
+            const unit = document.getElementById('dns-internal-autoupdate-unit');
+            const field = document.getElementById('dns-internal-autoupdate-interval');
+            const result = await saveDnsPartial({
+                cache_internal_autoupdate_period: Number(unit.value) || 0,
+                cache_internal_autoupdate_interval: Number(field.value) || 1,
+            });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+            }
+        }
+
+        // The unit and the number are only prepared here: the device is told
+        // when the operator presses Save, so a half-typed interval never reaches
+        // the settings (and never restarts the timer twice).
+        async function saveInternalAutoupdatePeriod(btn) {
+            applyAutoupdateIntervalMax();
+            const out = document.getElementById('dns-internal-file-status');
+            if (btn) btn.disabled = true;
+            if (out) {
+                out.textContent = tr('dns_internal.saving');
+                out.className = 'test-conn-result test-conn-warn';
+            }
+            await saveAutoupdateSettings();
+            // Saving re-arms the timer on the device: show the new countdown at
+            // once rather than up to a poll later.
+            await refreshAutoupdateCountdown();
+            if (out) {
+                out.textContent = tr('dns_internal.saved');
+                out.className = 'test-conn-result test-conn-ok';
+            }
+            if (btn) btn.disabled = false;
+        }
+
+        // Auto Update needs Ignore TTL: without it a record expires on its own,
+        // so the sweep has nothing to keep alive. The whole block below the
+        // Ignore TTL row therefore disappears while that switch is off, and the
+        // fields below Auto Update follow its own switch.
+        function updateAutoupdateVisibility() {
+            const ittl = document.getElementById('dns-internal-ignore-ttl');
+            const box = document.getElementById('dns-internal-auto-update');
+            const showToggle = !!(ittl && ittl.checked);
+            const row = document.getElementById('dns-internal-autoupdate-row');
+            if (row) row.style.display = showToggle ? '' : 'none';
+            const on = showToggle && !!(box && box.checked);
+            const period = document.getElementById('dns-internal-autoupdate-period-row');
+            const batch = document.getElementById('dns-internal-autoupdate-batch-row');
+            const pause = document.getElementById('dns-internal-autoupdate-pause-row');
+            if (period) period.style.display = on ? '' : 'none';
+            if (batch) batch.style.display = on ? '' : 'none';
+            if (pause) pause.style.display = on ? '' : 'none';
+            const save = document.getElementById('dns-internal-autoupdate-save');
+            if (save) save.style.display = on ? '' : 'none';
+            if (on) applyAutoupdateIntervalMax();
+            // The countdown exists only while the sweep does.
+            if (on) startAutoupdateCountdown(); else stopAutoupdateCountdown();
+        }
+
+        // ─── Countdown to the next update (Stage 174) ───
+        // The device owns the remaining time; the page ticks it once a second and
+        // re-reads it every few seconds, so a settings change or a cycle shows up
+        // without a reload. Seconds are not displayed — days, hours and minutes
+        // only — so the tick only ever moves the minute.
+        let autoupdatePoll = null;
+        let autoupdateTick = null;
+        let autoupdateState = { counting: false, running: false, remaining: 0 };
+
+        function formatCountdown(totalSec) {
+            const s = Math.max(0, Math.floor(Number(totalSec) || 0));
+            const days = Math.floor(s / 86400);
+            const hours = Math.floor((s % 86400) / 3600);
+            const mins = Math.floor((s % 3600) / 60);
+            const pad = n => String(n).padStart(2, '0');
+            return days + 'd ' + pad(hours) + ':' + pad(mins);
+        }
+
+        function renderAutoupdateCountdown() {
+            const row = document.getElementById('dns-internal-autoupdate-next-row');
+            const out = document.getElementById('dns-internal-autoupdate-next');
+            const box = document.getElementById('dns-internal-auto-update');
+            const ittl = document.getElementById('dns-internal-ignore-ttl');
+            if (!row || !out) return;
+            const on = !!(box && box.checked) && !!(ittl && ittl.checked);
+            // A frozen number is worse than none: with the clock unset the device
+            // is not counting, so the line stays away.
+            const show = on && (autoupdateState.counting || autoupdateState.running);
+            row.style.display = show ? '' : 'none';
+            if (!show) return;
+            out.textContent = autoupdateState.running
+                ? tr('dns_internal.autoupdate_running')
+                : formatCountdown(autoupdateState.remaining);
+            out.className = 'test-conn-result test-conn-ok';
+        }
+
+        async function refreshAutoupdateCountdown() {
+            try {
+                const d = await fetchJSON('/api/dns/internal-cache/autoupdate');
+                autoupdateState.counting = !!d.counting;
+                autoupdateState.running = !!d.running;
+                autoupdateState.remaining = Number(d.remaining_sec) || 0;
+            } catch (e) {
+                // The device did not answer: keep the last value instead of
+                // inventing one.
+            }
+            renderAutoupdateCountdown();
+        }
+
+        function startAutoupdateCountdown() {
+            if (autoupdatePoll) { refreshAutoupdateCountdown(); return; }
+            refreshAutoupdateCountdown();
+            autoupdatePoll = setInterval(refreshAutoupdateCountdown, 5000);
+            autoupdateTick = setInterval(() => {
+                if (autoupdateState.counting && !autoupdateState.running &&
+                    autoupdateState.remaining > 0) {
+                    autoupdateState.remaining -= 1;
+                }
+                renderAutoupdateCountdown();
+            }, 1000);
+        }
+
+        function stopAutoupdateCountdown() {
+            if (autoupdatePoll) { clearInterval(autoupdatePoll); autoupdatePoll = null; }
+            if (autoupdateTick) { clearInterval(autoupdateTick); autoupdateTick = null; }
+            const row = document.getElementById('dns-internal-autoupdate-next-row');
+            if (row) row.style.display = 'none';
+        }
+
+        function applyAutoupdateBatchMax() {
+            const field = document.getElementById('dns-internal-autoupdate-batch');
+            if (!field) return;
+            const value = Number(field.value) || 50;
+            if (value < 1) field.value = '1';
+            if (value > 1000) field.value = '1000';
+        }
+
+        function applyAutoupdatePauseMax() {
+            const field = document.getElementById('dns-internal-autoupdate-pause');
+            if (!field) return;
+            const value = Number(field.value) || 60;
+            if (value < 1) field.value = '1';
+            if (value > 3600) field.value = '3600';
+        }
+
+        // Save both period and batch together when the user presses Save or leaves the page.
+        async function saveAutoupdateSettings() {
+            const unit = document.getElementById('dns-internal-autoupdate-unit');
+            const field = document.getElementById('dns-internal-autoupdate-interval');
+            const batch = document.getElementById('dns-internal-autoupdate-batch');
+            const pause = document.getElementById('dns-internal-autoupdate-pause');
+            await saveDnsPartial({
+                cache_internal_autoupdate_period: Number(unit.value) || 0,
+                cache_internal_autoupdate_interval: Number(field.value) || 1,
+                cache_internal_autoupdate_batch: Number(batch.value) || 50,
+                cache_internal_autoupdate_pause: Number(pause.value) || 60,
+            });
+        }
+
         let persistPollTimer = null;
 
         async function updateInternalCacheFileStatus() {
@@ -486,6 +758,21 @@
         }
 
         loadInternalCacheSettings();
+
+        // There is deliberately **no** "save the Auto Update fields when the page
+        // is left" here, and the reason is worth keeping: `POST /api/dns/settings`
+        // **replaces** the whole DNS settings object — every field missing from
+        // the body is written back as its default, not as its stored value, so a
+        // client that sends only a handful of fields switches everything else
+        // off, empties the external DNS address and resets the cache size. A
+        // `navigator.sendBeacon()` did exactly that once, and it was harmless
+        // only by accident: the beacon carries no `Authorization` header, so the
+        // device answered `401` and never reached the handler. Making it work
+        // (04.10.2026) turned it into a settings wipe on every tab switch.
+        // The safe way to save a subset is `saveDnsPartial()`, which reads the
+        // stored object first and merges — and that is what the Auto Update
+        // toggle, the Save button and every other page here already use, so the
+        // values are saved when they are changed rather than when the page goes.
 
         // The file status is dynamic (tr() text) — only render it once the
         // translation dictionary has been fetched (loadTranslations is async).

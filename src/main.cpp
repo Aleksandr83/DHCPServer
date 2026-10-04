@@ -27,6 +27,7 @@
 #include "core/Config.h"
 #include "core/CpuMonitor.h"
 #include "core/ErrorLog.h"
+#include "core/JobLog.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
 #include "files/FileManager.h"
@@ -129,6 +130,14 @@ extern "C" void app_main(void)
     // the web file explorer can read the file. One low-priority task writes it
     // through a queue in PSRAM, so no caller ever waits for the FAT.
     dhcp::core::ErrorLog::instance().start("/fat");
+    // Long-running operations get their own file, next to it: one line when an
+    // operation starts and one when it ends (stage 173). The registry knows
+    // nothing about files — this is the subscriber that writes them. It was
+    // switched off for one build while the slow web interface was being
+    // diagnosed; the cause turned out to be elsewhere, so it is back on.
+    dhcp::core::JobLog::instance().start("/fat");
+    dhcp::core::JobRegistry::instance().setObserver(
+        &dhcp::core::JobLog::instance());
     // LAN-only access policy (device address + netmask from the DHCP settings).
     s_fileManager.applyAccessFilter();
 

@@ -114,6 +114,16 @@ struct DnsConfig {
     AutosavePeriod cacheInternalAutosavePeriod = AutosavePeriod::Hour;
     /// @brief Every N of that unit (1..60 minutes, 1..24 hours, 1..month days).
     uint16_t cacheInternalAutosaveInterval = 1;
+    /// @brief Automatically refresh entries from upstream DNS.
+    bool cacheInternalAutoUpdate = false;
+    /// @brief The unit of the interval: hours or days.
+    AutosavePeriod cacheInternalAutoUpdatePeriod = AutosavePeriod::Hour;
+    /// @brief Every N of that unit (1..24 hours, 1..30 days).
+    uint16_t cacheInternalAutoUpdateInterval = 1;
+    /// @brief Maximum number of entries to refresh in one cycle.
+    uint16_t cacheInternalAutoUpdateBatch = 50;
+    /// @brief Seconds to wait after a batch update before starting the next one.
+    uint16_t cacheInternalAutoUpdatePause = 60;
     // MD5 of cache.dat as this device last wrote it (32 lowercase hex characters,
     // empty = never written). Checked before the file is loaded: a mismatch means
     // a half-written file, a damaged block, or a file replaced behind the

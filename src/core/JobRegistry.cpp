@@ -71,33 +71,51 @@ size_t JobRegistry::slotFor(const string& id)
     return oldest;
 }
 
+void JobRegistry::setObserver(IJobObserver* observer)
+{
+    lock_guard<mutex> lock(mutex_);
+    observer_ = observer;
+}
+
 bool JobRegistry::begin(const string& id, const string& titleKey,
                         const string& arg, uint32_t total, uint32_t repeatSec)
 {
     if (id.empty()) return false;
 
-    lock_guard<mutex> lock(mutex_);
+    // The observer is called **after** the lock is released: it writes to a file
+    // (through a queue) and must never be able to deadlock the registry by
+    // calling back into it.
+    JobInfo started;
+    IJobObserver* observer = nullptr;
+    {
+        lock_guard<mutex> lock(mutex_);
 
-    const size_t slot = slotFor(id);
-    if (slot >= kMaxJobs) {
-        ESP_LOGW(TAG, "job '%s' refused: %u operations are running", id.c_str(),
-                 static_cast<unsigned>(kMaxJobs));
-        return false;
+        const size_t slot = slotFor(id);
+        if (slot >= kMaxJobs) {
+            ESP_LOGW(TAG, "job '%s' refused: %u operations are running", id.c_str(),
+                     static_cast<unsigned>(kMaxJobs));
+            return false;
+        }
+
+        JobInfo& job = jobs_[slot];
+        job = JobInfo{};
+        job.id = id;
+        job.titleKey = titleKey;
+        job.arg = arg;
+        job.state = JobState::Running;
+        job.total = total;
+        job.repeatSec = repeatSec;
+        used_[slot] = true;
+        started_[slot] = now();
+        finished_[slot] = chrono::milliseconds{0};
+
+        started = job;
+        observer = observer_;
+
+        ESP_LOGI(TAG, "job started: %s %s", id.c_str(), arg.c_str());
     }
 
-    JobInfo& job = jobs_[slot];
-    job = JobInfo{};
-    job.id = id;
-    job.titleKey = titleKey;
-    job.arg = arg;
-    job.state = JobState::Running;
-    job.total = total;
-    job.repeatSec = repeatSec;
-    used_[slot] = true;
-    started_[slot] = now();
-    finished_[slot] = chrono::milliseconds{0};
-
-    ESP_LOGI(TAG, "job started: %s %s", id.c_str(), arg.c_str());
+    if (observer) observer->jobStarted(started);
     return true;
 }
 
@@ -134,31 +152,47 @@ void JobRegistry::pause(const string& id, const string& detail)
 
 void JobRegistry::finish(const string& id, JobState state, const string& detail)
 {
-    lock_guard<mutex> lock(mutex_);
+    // Same rule as begin(): the record is copied and the observer is called once
+    // the lock is gone.
+    JobInfo ended;
+    IJobObserver* observer = nullptr;
+    {
+        lock_guard<mutex> lock(mutex_);
 
-    for (size_t i = 0; i < kMaxJobs; i++) {
-        if (!used_[i] || jobs_[i].id != id) continue;
+        for (size_t i = 0; i < kMaxJobs; i++) {
+            if (!used_[i] || jobs_[i].id != id) continue;
 
-        jobs_[i].state = state;
-        if (!detail.empty()) jobs_[i].detail = detail;
-        if (jobs_[i].total > 0 && state == JobState::Done) {
-            jobs_[i].done = jobs_[i].total;
+            jobs_[i].state = state;
+            if (!detail.empty()) jobs_[i].detail = detail;
+            if (jobs_[i].total > 0 && state == JobState::Done) {
+                jobs_[i].done = jobs_[i].total;
+            }
+            finished_[i] = now();
+
+            // The duration is measured while the record can still be read, and
+            // travels to the observer with it — a one-off record is cleared below.
+            const auto ms = finished_[i] - started_[i];
+            ended = jobs_[i];
+            ended.durationMs =
+                ms.count() > 0 ? static_cast<uint32_t>(ms.count()) : 0;
+            observer = observer_;
+
+            // A one-off operation is gone the moment it ends: the list answers
+            // "what is running now". A scheduled repeat keeps its record, so the
+            // operator can see that the next run is coming.
+            if (jobs_[i].repeatSec == 0) {
+                used_[i] = false;
+                jobs_[i] = JobInfo{};
+                started_[i] = chrono::milliseconds{0};
+                finished_[i] = chrono::milliseconds{0};
+            }
+
+            ESP_LOGI(TAG, "job finished: %s (%s)", id.c_str(), jobStateText(state));
+            break;
         }
-        finished_[i] = now();
-
-        // A one-off operation is gone the moment it ends: the list answers "what
-        // is running now". A scheduled repeat keeps its record, so the operator
-        // can see that the next run is coming.
-        if (jobs_[i].repeatSec == 0) {
-            used_[i] = false;
-            jobs_[i] = JobInfo{};
-            started_[i] = chrono::milliseconds{0};
-            finished_[i] = chrono::milliseconds{0};
-        }
-
-        ESP_LOGI(TAG, "job finished: %s (%s)", id.c_str(), jobStateText(state));
-        return;
     }
+
+    if (observer) observer->jobFinished(ended);
 }
 
 bool JobRegistry::requestCancel(const string& id)

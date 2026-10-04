@@ -100,6 +100,8 @@ public:
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     static esp_err_t handleGetInternalCacheFile(httpd_req* req);
     static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
+    // Stage 174: the countdown to the next auto-update cycle.
+    static esp_err_t handleGetInternalCacheAutoUpdate(httpd_req* req);
     static esp_err_t handlePostInternalCacheSave(httpd_req* req);
     static esp_err_t handlePostInternalCacheLoad(httpd_req* req);
     static esp_err_t handlePostInternalCacheReset(httpd_req* req);

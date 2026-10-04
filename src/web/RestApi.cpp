@@ -8,6 +8,7 @@
 #include "../core/ErrorLog.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
+#include "../core/AutoUpdatePlan.h"
 #include "../core/CpuMonitor.h"
 #include "../core/JobRegistry.h"
 #include "../wifi/IWiFiManager.h"
@@ -226,17 +227,23 @@ bool RestApi::checkFileAccess(httpd_req* req)
 
 string RestApi::getClientIp(httpd_req* req)
 {
-    // Try X-Forwarded-For first
-    size_t hdrLen = httpd_req_get_hdr_value_len(req, "X-Forwarded-For");
-    if (hdrLen > 0) {
-        string ip;
-        ip.resize(hdrLen);
-        httpd_req_get_hdr_value_str(req, "X-Forwarded-For", &ip[0], hdrLen + 1);
-        return ip;
-    }
-    // Fallback: return local network identifier
-    // (Client IP extraction from httpd_req varies by ESP-IDF version)
-    return "192.168.1.0";
+    // The peer of the TCP connection, and deliberately not a header. This address
+    // keys the failed-attempt counter of the login (and the lockout that follows
+    // it), so a client able to name itself would get a fresh counter with every
+    // request — the protection would protect nothing. `X-Forwarded-For` was read
+    // here once, which is how every client of this device ended up sharing the
+    // single hard-coded fallback address and locked each other out (04.10.2026).
+    // There is no reverse proxy in front of this server, and `getClientIp4()` —
+    // the same address as a number, used by the file endpoints — made the same
+    // choice for the same reason.
+    const uint32_t ip = getClientIp4(req);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+             static_cast<unsigned>((ip >> 24) & 0xFFu),
+             static_cast<unsigned>((ip >> 16) & 0xFFu),
+             static_cast<unsigned>((ip >> 8) & 0xFFu),
+             static_cast<unsigned>(ip & 0xFFu));
+    return buf;
 }
 
 // ─────────────────────────────────────────────────────
@@ -1056,6 +1063,15 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
                static_cast<int>(cfg.cacheInternalAutosavePeriod), true);
     addJsonInt(json, "cache_internal_autosave_interval",
                static_cast<int>(cfg.cacheInternalAutosaveInterval), true);
+    addJsonBool(json, "cache_internal_autoupdate", cfg.cacheInternalAutoUpdate, true);
+    addJsonInt(json, "cache_internal_autoupdate_period",
+               static_cast<int>(cfg.cacheInternalAutoUpdatePeriod), true);
+    addJsonInt(json, "cache_internal_autoupdate_interval",
+               static_cast<int>(cfg.cacheInternalAutoUpdateInterval), true);
+    addJsonInt(json, "cache_internal_autoupdate_batch",
+               static_cast<int>(cfg.cacheInternalAutoUpdateBatch), true);
+    addJsonInt(json, "cache_internal_autoupdate_pause",
+               static_cast<int>(cfg.cacheInternalAutoUpdatePause), true);
     addJsonBool(json, "block_forward_non_aa", cfg.blockForwardNonAA, true);
     addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
     addJsonBool(json, "cache_internal_available",
@@ -1128,6 +1144,23 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         static_cast<uint16_t>(jsonGetInt(
             body, "cache_internal_autosave_interval",
             static_cast<int>(cfg.cacheInternalAutosaveInterval))), 0);
+    cfg.cacheInternalAutoUpdate =
+        jsonGetBool(body, "cache_internal_autoupdate", cfg.cacheInternalAutoUpdate);
+    cfg.cacheInternalAutoUpdatePeriod = core::autosavePeriodFromIndex(
+        static_cast<uint8_t>(jsonGetInt(
+            body, "cache_internal_autoupdate_period",
+            static_cast<int>(cfg.cacheInternalAutoUpdatePeriod))));
+    cfg.cacheInternalAutoUpdateInterval = core::autoUpdateClampInterval(
+        cfg.cacheInternalAutoUpdatePeriod,
+        static_cast<uint16_t>(jsonGetInt(
+            body, "cache_internal_autoupdate_interval",
+            static_cast<int>(cfg.cacheInternalAutoUpdateInterval))));
+    cfg.cacheInternalAutoUpdateBatch = core::autoUpdateClampBatch(
+        jsonGetInt(body, "cache_internal_autoupdate_batch",
+                   static_cast<int>(cfg.cacheInternalAutoUpdateBatch)));
+    cfg.cacheInternalAutoUpdatePause = core::autoUpdateClampPause(
+        jsonGetInt(body, "cache_internal_autoupdate_pause",
+                   static_cast<int>(cfg.cacheInternalAutoUpdatePause)));
     cfg.blockForwardNonAA = jsonGetBool(body, "block_forward_non_aa", false);
     cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
 
@@ -1176,8 +1209,14 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
                                   cfg.cacheInternalIgnoreTtl);
         // Stage 153: the automatic save of that cache, applied live too.
         s_dns->applyCacheAutosave(cfg.cacheInternalAutosave,
-                                  cfg.cacheInternalAutosavePeriod,
-                                  cfg.cacheInternalAutosaveInterval);
+                                   cfg.cacheInternalAutosavePeriod,
+                                   cfg.cacheInternalAutosaveInterval);
+        // Stage 172: refresh those records from upstream on a timer, live too.
+        s_dns->applyCacheAutoUpdate(cfg.cacheInternalAutoUpdate,
+                                    cfg.cacheInternalAutoUpdatePeriod,
+                                    cfg.cacheInternalAutoUpdateInterval,
+                                    cfg.cacheInternalAutoUpdateBatch,
+                                    cfg.cacheInternalAutoUpdatePause);
         // Block forwarding of non-A/AAAA queries — apply live.
         s_dns->setBlockForwardNonAA(cfg.blockForwardNonAA);
         s_dns->applySubnetFilter();
@@ -1881,6 +1920,15 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonBool(json, "cache_internal_ignore_ttl", dns.cacheInternalIgnoreTtl, true);
     addJsonBool(json, "cache_internal_save_stats", dns.cacheInternalSaveStats, true);
     addJsonBool(json, "cache_internal_save_cache", dns.cacheInternalSaveCache, true);
+    addJsonBool(json, "cache_internal_autoupdate", dns.cacheInternalAutoUpdate, true);
+    addJsonInt(json, "cache_internal_autoupdate_period",
+               static_cast<int>(dns.cacheInternalAutoUpdatePeriod), true);
+    addJsonInt(json, "cache_internal_autoupdate_interval",
+               static_cast<int>(dns.cacheInternalAutoUpdateInterval), true);
+    addJsonInt(json, "cache_internal_autoupdate_batch",
+               static_cast<int>(dns.cacheInternalAutoUpdateBatch), true);
+    addJsonInt(json, "cache_internal_autoupdate_pause",
+               static_cast<int>(dns.cacheInternalAutoUpdatePause), true);
     addJsonBool(json, "block_forward_non_aa", dns.blockForwardNonAA, true);
     addJsonBool(json, "allow_own_subnet", dns.allowOwnSubnet, true);
     json += "}";
@@ -2021,6 +2069,11 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 key != "cache_internal_ignore_ttl" &&
                 key != "cache_internal_save_stats" &&
                 key != "cache_internal_save_cache" &&
+                key != "cache_internal_autoupdate" &&
+                key != "cache_internal_autoupdate_period" &&
+                key != "cache_internal_autoupdate_interval" &&
+                key != "cache_internal_autoupdate_batch" &&
+                key != "cache_internal_autoupdate_pause" &&
                 key != "block_forward_non_aa" &&
                 key != "allow_own_subnet" &&
                 key != "external_ntp" && key != "timezone" &&
@@ -2195,6 +2248,24 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.cacheInternalSaveCache =
                     jsonGetBool(seg, "cache_internal_save_cache",
                                 cur.cacheInternalSaveCache);
+                cur.cacheInternalAutoUpdate =
+                    jsonGetBool(seg, "cache_internal_autoupdate",
+                                cur.cacheInternalAutoUpdate);
+                cur.cacheInternalAutoUpdatePeriod = core::autosavePeriodFromIndex(
+                    static_cast<uint8_t>(jsonGetInt(
+                        seg, "cache_internal_autoupdate_period",
+                        static_cast<int>(cur.cacheInternalAutoUpdatePeriod))));
+                cur.cacheInternalAutoUpdateInterval = core::autoUpdateClampInterval(
+                    cur.cacheInternalAutoUpdatePeriod,
+                    static_cast<uint16_t>(jsonGetInt(
+                        seg, "cache_internal_autoupdate_interval",
+                        static_cast<int>(cur.cacheInternalAutoUpdateInterval))));
+                cur.cacheInternalAutoUpdateBatch = core::autoUpdateClampBatch(
+                    jsonGetInt(seg, "cache_internal_autoupdate_batch",
+                               static_cast<int>(cur.cacheInternalAutoUpdateBatch)));
+                cur.cacheInternalAutoUpdatePause = core::autoUpdateClampPause(
+                    jsonGetInt(seg, "cache_internal_autoupdate_pause",
+                               static_cast<int>(cur.cacheInternalAutoUpdatePause)));
                 cur.blockForwardNonAA =
                     jsonGetBool(seg, "block_forward_non_aa",
                                 cur.blockForwardNonAA);
@@ -3400,6 +3471,35 @@ esp_err_t RestApi::handleGetInternalCacheProgress(httpd_req* req)
     addJsonInt(json, "done", static_cast<int64_t>(p.done), true);
     addJsonInt(json, "total", static_cast<int64_t>(p.total), true);
     addJsonInt(json, "percent", static_cast<int64_t>(percent), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/dns/internal-cache/autoupdate
+// ─────────────────────────────────────────────────────
+// The countdown the Internal Cache page draws under "Update every" (stage 174).
+// Response: {enabled, counting, running, remaining_sec}.
+// `counting` is false while the device clock is not set — the auto-update task
+// is asleep then and a frozen number would be a lie; `running` is true while a
+// refresh cycle is in progress, when the page says "updating" rather than a
+// countdown.
+
+esp_err_t RestApi::handleGetInternalCacheAutoUpdate(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::CacheAutoUpdate::Status st;
+    if (s_dns) st = s_dns->cacheAutoUpdateStatus();
+
+    string json = "{";
+    addJsonBool(json, "enabled", st.enabled, false);
+    addJsonBool(json, "counting", st.counting, true);
+    addJsonBool(json, "running", st.running, true);
+    addJsonInt(json, "remaining_sec", static_cast<int64_t>(st.remainingSec), true);
     json += "}";
 
     httpd_resp_set_type(req, "application/json");

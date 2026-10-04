@@ -402,6 +402,14 @@ Get DNS server configuration.
   "cache_internal_ignore_ttl": false,
   "cache_internal_save_stats": true,
   "cache_internal_save_cache": true,
+  "cache_internal_autosave": false,
+  "cache_internal_autosave_period": 0,
+  "cache_internal_autosave_interval": 1,
+  "cache_internal_autoupdate": false,
+  "cache_internal_autoupdate_period": 0,
+  "cache_internal_autoupdate_interval": 1,
+  "cache_internal_autoupdate_batch": 50,
+  "cache_internal_autoupdate_pause": 60,
   "cache_internal_available": true,
   "block_forward_non_aa": false,
   "allow_own_subnet": true
@@ -417,12 +425,31 @@ Get DNS server configuration.
 > `cache_internal` — master switch for the **built-in** (on-device) DNS cache
 > (hash table in PSRAM, ESP32-P4); `cache_internal_size_mb` is its max size
 > in MB (1..20, default 20); `cache_internal_ignore_ttl` — when on, stored
-> TTLs are kept but never expire entries (actualization comes later).
+> TTLs are kept but never expire entries; the entries are kept honest by the
+> auto-update below instead.
 > `cache_internal_available` (read-only) is true when PSRAM is present and
 > the cache can actually be enabled.
 > `cache_internal_save_stats` and `cache_internal_save_cache` (both default
 > **on**) keep the main-page counters and the cache itself across a planned
 > restart — see the two sections below.
+> `cache_internal_autosave`, `cache_internal_autosave_period` and
+> `cache_internal_autosave_interval` — the built-in cache saves itself on a
+> timer: `_period` is the unit (`0` = hours, `1` = days, `2` = minutes) and
+> `_interval` how many of that unit (bounded by the unit, and for days by the
+> length of the running month). Off by default.
+> `cache_internal_autoupdate`, `cache_internal_autoupdate_period`,
+> `cache_internal_autoupdate_interval`, `cache_internal_autoupdate_batch` and
+> `cache_internal_autoupdate_pause` — the built-in cache refreshes its records
+> from the upstream DNS on a timer, so that with "Ignore TTL" on they do not go
+> stale. One cycle refreshes up to `cache_internal_autoupdate_batch` records
+> (**1..1000**, default 50) — the ones whose last refresh failed first, then the
+> oldest in the pool — pausing `cache_internal_autoupdate_pause` seconds
+> (**1..3600**, default 60) after each, and the next cycle starts one
+> `_period` / `_interval` later (hours `0` or days `1`; the interval is bounded
+> by the unit — 24 hours, 30 days). It runs only while "Ignore TTL" is on; a
+> record the upstream does not confirm is kept and retried first next cycle.
+> Off by default. The cycle appears on the Task Scheduler page and can be
+> stopped there, which switches the feature off.
 > `block_forward_non_aa` — when on, queries of any type other than A/AAAA
 > that are NOT answered from local hosts are answered **NODATA** (NOERROR,
 > 0 records) and are never sent to the external cache or the upstream DNS.
@@ -468,6 +495,14 @@ Update DNS server configuration.
   "cache_internal_ignore_ttl": false,
   "cache_internal_save_stats": true,
   "cache_internal_save_cache": true,
+  "cache_internal_autosave": false,
+  "cache_internal_autosave_period": 0,
+  "cache_internal_autosave_interval": 1,
+  "cache_internal_autoupdate": false,
+  "cache_internal_autoupdate_period": 0,
+  "cache_internal_autoupdate_interval": 1,
+  "cache_internal_autoupdate_batch": 50,
+  "cache_internal_autoupdate_pause": 60,
   "block_forward_non_aa": false,
   "allow_own_subnet": true
 }
@@ -714,6 +749,32 @@ Progress of the running background save/load job (auth required).
 > operator does not always have a terminal and the question about losing the
 > cache is asked on the page. Empty on success. Added in stage 169; a client
 > that does not know the field simply does not show the reason.
+
+#### `GET /api/dns/internal-cache/autoupdate`
+
+The countdown to the next built-in-cache auto-update cycle (auth required),
+drawn on the Internal Cache page under "Update every" (stage 174).
+
+**Response `200 OK`:**
+```json
+{
+  "enabled": true,
+  "counting": true,
+  "running": false,
+  "remaining_sec": 90061
+}
+```
+
+> `remaining_sec` is the auto-update task's **own** countdown, so the page shows
+> when the next cycle really happens rather than a value recomputed from the
+> settings (the timer is re-armed whenever those change).
+> `counting` is `false` while the device clock is not set: the task is suspended
+> then and a frozen number would be a lie — the page hides the line instead.
+> `running` is `true while a refresh cycle is in progress, when the countdown is
+> stopped; the page says "updating…" rather than showing `0d 00:00`.
+> `enabled` mirrors the Auto Update switch. The page formats the value as
+> `Nd HH:MM` (days, hours, minutes — no seconds) and refreshes it every few
+> seconds, ticking the value down locally in between.
 
 #### `POST /api/dns/internal-cache/save`
 

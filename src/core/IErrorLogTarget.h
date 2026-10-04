@@ -7,14 +7,18 @@ namespace dhcp {
 namespace core {
 
 /**
- * @brief Severity of a logged line. The file is for things that went wrong, so
- *        there are only two: an error, and the log's own warnings about itself
- *        (a full queue, a rotation) — those must be visible too, and pretending
- *        they are errors would make the file harder to read than it has to be.
+ * @brief Severity of a logged line.
+ *
+ * `Error` and `Warn` belong to the error log: something went wrong, or the log
+ * itself has something to admit (a full queue, a lost line). `Info` is what the
+ * job log (stage 173) marks its own lines with — a long-running operation
+ * starting or finishing is news, not a fault, and calling it an error would make
+ * the file harder to read than it has to be.
  */
 enum class LogLevel {
     Error,
     Warn,
+    Info,
 };
 
 /**

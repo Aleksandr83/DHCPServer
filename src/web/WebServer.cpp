@@ -58,6 +58,23 @@ constexpr size_t kHttpsMaxOpenSockets = 6;
 constexpr int kKeepAliveIdleSec = 5;         // idle keep-alive timeout
 constexpr int kKeepAliveIntervalSec = 5;     // ...and its probe interval
 constexpr int kLingerTimeoutSec = 1;         // how long a close may linger
+// How long a client may take to finish the TLS handshake, and how long a socket
+// may stay silent mid-request. Both are written out rather than left to the IDF
+// defaults, because both decide how long ONE client can hold the server: the
+// handshake runs on the same task as the handlers, so a client that connects to
+// :443 and then says nothing — a browser tab that was closed, a port scanner, a
+// client that lost interest after the SYN — stops every other request until the
+// handshake timeout expires. Measured on the board (04.10.2026): a silent TCP
+// client made a request fail after 40 s, and the next request, once it closed,
+// was served in 0.37 s. The IDF default for the handshake is 10 s
+// (ESP_TLS_DEFAULT_SERVER_HANDSHAKE_TIMEOUT_MS); a real browser on the LAN
+// finishes in about 0.3 s, so three seconds is generous — and it is the whole
+// point of the number, not its exact value, because the handshake cannot be
+// moved off the httpd task. The socket timeouts keep the IDF default of 5 s, now
+// written where the rest of the policy is.
+constexpr uint32_t kTlsHandshakeTimeoutMs = 3000;
+constexpr int kRecvWaitTimeoutSec = 5;
+constexpr int kSendWaitTimeoutSec = 5;
 constexpr size_t kStaticFileChunkBytes = 512; // one chunk of a served file
 // Stage 165: the retry that waits for the device clock. It walks the same path a
 // manual switch does, but a switch answers a request that already exists, while
@@ -218,6 +235,12 @@ httpd_config_t WebServer::makeConfig(uint16_t port, size_t stackBytes, size_t ma
     config.enable_so_linger = true;
     config.linger_timeout = kLingerTimeoutSec;
     config.lru_purge_enable = true;
+    // How long a socket may be quiet before the session is given up on, and how
+    // long an answer may take to leave. The IDF defaults are the same five
+    // seconds; naming them here is what keeps a reader from having to look them
+    // up in the framework to know what this server promises.
+    config.recv_wait_timeout = kRecvWaitTimeoutSec;
+    config.send_wait_timeout = kSendWaitTimeoutSec;
     return config;
 }
 
@@ -294,6 +317,8 @@ bool WebServer::startHttps()
     config.httpd = makeConfig(kHttpsPort, kHttpsStackBytes, kHttpsMaxOpenSockets, kHttpsCtrlPort);
     config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
     config.port_secure = kHttpsPort;
+    // A silent client must not be able to hold the interface: see the constant.
+    config.tls_handshake_timeout_ms = kTlsHandshakeTimeoutMs;
     // The PEM text is read at start time — the HTTPS server copies it into its
     // own buffers (https_server.c) — and the pair itself stays on the volume.
     config.servercert = reinterpret_cast<const uint8_t*>(certPem_.c_str());
@@ -529,6 +554,7 @@ const WebRoute WebServer::kRoutes[] = {
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     { "/api/dns/internal-cache/file",     RouteMethod::Get,   &WebServer::getInternalCacheFileHandler },
     { "/api/dns/internal-cache/progress", RouteMethod::Get,   &WebServer::getInternalCacheProgressHandler },
+    { "/api/dns/internal-cache/autoupdate", RouteMethod::Get, &WebServer::getInternalCacheAutoUpdateHandler },
     { "/api/dns/internal-cache/save",     RouteMethod::Post,  &WebServer::postInternalCacheSaveHandler },
     { "/api/dns/internal-cache/load",     RouteMethod::Post,  &WebServer::postInternalCacheLoadHandler },
     { "/api/dns/internal-cache/reset",    RouteMethod::Post,  &WebServer::postInternalCacheResetHandler },

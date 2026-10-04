@@ -33,13 +33,26 @@ public:
     static constexpr size_t kMaxMessage = 200;
 
     /**
+     * @brief Turns a level, a tag and a message into one line.
+     *
+     * The error log has its own shape (see @ref formatLine). The job log
+     * (stage 173) wants the stamp in brackets, so it supplies its own formatter
+     * and gets the same queue, the same drop counting and the same drain — only
+     * the text differs.
+     */
+    using LineFormatter = std::function<std::string(LogLevel, const char*,
+                                                    const std::string&)>;
+
+    /**
      * @param queue  hand-off to the writing task
      * @param target where the lines end up
      * @param uptimeSec seconds since boot, used when the clock is unset
      *                  (null on the host: the stamp is then `t+0s`)
+     * @param formatter line shape; empty means @ref formatLine (the error log)
      */
     ErrorLogCore(IErrorQueue& queue, IErrorLogTarget& target,
-                 std::function<uint32_t()> uptimeSec = {});
+                 std::function<uint32_t()> uptimeSec = {},
+                 LineFormatter formatter = {});
 
     /**
      * @brief Producer side: format one line and enqueue it. Never blocks.
@@ -47,6 +60,15 @@ public:
      *         broken target — either way it is counted as a drop.
      */
     bool submit(LogLevel level, const char* tag, const std::string& message);
+
+    /**
+     * @brief Producer side for an already formatted line.
+     *
+     * Same queue and same drop counting as @ref submit, but the text is stored
+     * as given: the caller owns the line shape (the job log builds its own and
+     * does not want a second stamp in front of it).
+     */
+    bool submitLine(LogLevel level, const std::string& formattedLine);
 
     /**
      * @brief Consumer side: write everything that is waiting.
@@ -72,6 +94,15 @@ public:
     /** @brief `[E]` / `[W]` — what a human sees at the start of the level column. */
     static const char* levelTag(LogLevel level);
 
+    /**
+     * @brief The bare stamp: `YYYY-MM-DD HH:MM:SS`, or `t+Ns` before the clock
+     *        is set.
+     *
+     * Extracted so a log with a different line shape (the job log) can wrap the
+     * same timestamp in brackets instead of inventing a second clock reader.
+     */
+    static std::string formatStamp(uint64_t nowEpochSec, uint32_t uptimeSec);
+
     /** @brief True when the stamp can be a real date instead of an uptime. */
     static bool clockIsSet(uint64_t nowEpochSec);
 
@@ -79,9 +110,14 @@ public:
     static std::string clampMessage(const std::string& message);
 
 private:
+    /** Format one line with the formatter in force. */
+    std::string makeLine(LogLevel level, const char* tag,
+                         const std::string& message) const;
+
     IErrorQueue& queue_;
     IErrorLogTarget& target_;
     std::function<uint32_t()> uptimeSec_;
+    LineFormatter formatter_;
     uint32_t dropped_ = 0;
     /** When true, the next successful write starts by reporting the drops. */
     bool dropNoticePending_ = false;

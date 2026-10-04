@@ -59,6 +59,12 @@ static const char* TAG = "DnsServer";
 #define DNS_PERSIST_TASK_STACK_BYTES   8192  // walks megabytes of cache records
 #define DNS_STATS_TASK_STACK_BYTES     4096  // three numbers, a string, one stdio call
 
+// Stage 172: how long the auto-update waits for one upstream answer, and the
+// buffer of the query it builds itself (header + a name of up to 255 bytes + the
+// question tail). The client path never builds one — it relays the raw packet.
+#define DNS_REFRESH_TIMEOUT_MS     3000
+#define DNS_REFRESH_QUERY_BYTES     512
+
 namespace dhcp {
 namespace dns {
 
@@ -134,6 +140,12 @@ bool DnsServer::start()
     applyCacheAutosave(dnsCfg.cacheInternalAutosave,
                        dnsCfg.cacheInternalAutosavePeriod,
                        dnsCfg.cacheInternalAutosaveInterval);
+    // Stage 172: the timer that refreshes those records from upstream.
+    applyCacheAutoUpdate(dnsCfg.cacheInternalAutoUpdate,
+                         dnsCfg.cacheInternalAutoUpdatePeriod,
+                         dnsCfg.cacheInternalAutoUpdateInterval,
+                         dnsCfg.cacheInternalAutoUpdateBatch,
+                         dnsCfg.cacheInternalAutoUpdatePause);
     blockForwardNonAA_ = dnsCfg.blockForwardNonAA;
     applySubnetFilter();
     // The cache lookup runs in a dedicated worker task so the DNS server
@@ -694,6 +706,100 @@ void DnsServer::applyCacheAutosave(bool enabled, core::AutosavePeriod unit,
         ESP_LOGI(TAG, "autosave stopped and switched off in the settings");
     });
     cacheAutosave_.configure(enabled, unit, interval);
+}
+
+void DnsServer::applyCacheAutoUpdate(bool enabled, core::AutosavePeriod unit,
+                                     uint16_t interval, uint16_t batch,
+                                     uint16_t pauseSec)
+{
+    // Stopping the cycle on the scheduler page switches auto-update off for
+    // good, and that has to survive a reboot — the same rule as the autosave.
+    cacheAutoUpdate_.setDisabledHandler([] {
+        auto cfg = core::Config::instance().getDns();
+        cfg.cacheInternalAutoUpdate = false;
+        core::Config::instance().setDns(cfg);
+        ESP_LOGI(TAG, "auto-update stopped and switched off in the settings");
+    });
+    // The refresh itself: this server owns the upstream address and the parser.
+    cacheAutoUpdate_.setRefreshHandler(
+        [this](const string& name, uint16_t qtype, vector<string>& ips,
+               uint32_t& ttl) {
+            return refreshCacheEntry(name, qtype, ips, ttl);
+        });
+    cacheAutoUpdate_.configure(enabled, unit, interval, batch, pauseSec);
+}
+
+// Stage 172: one record of the built-in cache, asked of the upstream DNS again.
+// Runs in the auto-update task, so a three-second wait costs the sweep time and
+// never a client query.
+bool DnsServer::refreshCacheEntry(const string& name, uint16_t qtype,
+                                  vector<string>& ips, uint32_t& ttl)
+{
+    ips.clear();
+    ttl = 0;
+    if (externalDnsIp_ == 0 || name.empty()) return false;
+    if (qtype != DNS_TYPE_A && qtype != DNS_TYPE_AAAA) return false;
+
+    // Header + one question, recursion desired, a fresh transaction id. A
+    // failure to encode (name too long) leaves pos short and encLen 0; the
+    // question tail is still appended, and the name check below refuses it.
+    uint8_t query[DNS_REFRESH_QUERY_BYTES];
+    size_t pos = 0;
+    const uint16_t id = static_cast<uint16_t>(esp_timer_get_time());
+    query[pos++] = static_cast<uint8_t>(id >> 8);
+    query[pos++] = static_cast<uint8_t>(id & 0xFF);
+    query[pos++] = static_cast<uint8_t>((DNS_FLAG_RD >> 8) & 0xFF);
+    query[pos++] = static_cast<uint8_t>(DNS_FLAG_RD & 0xFF);
+    query[pos++] = 0; query[pos++] = 1;  // QDCOUNT
+    query[pos++] = 0; query[pos++] = 0;  // ANCOUNT
+    query[pos++] = 0; query[pos++] = 0;  // NSCOUNT
+    query[pos++] = 0; query[pos++] = 0;  // ARCOUNT
+    const size_t encLen = encodeDomainName(query + pos, name);
+    if (encLen == 0) return false;
+    pos += encLen;
+    query[pos++] = static_cast<uint8_t>((qtype >> 8) & 0xFF);
+    query[pos++] = static_cast<uint8_t>(qtype & 0xFF);
+    query[pos++] = 0; query[pos++] = 1;  // QCLASS = IN
+
+    const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) return false;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(DNS_PORT);
+    dest.sin_addr.s_addr = externalDnsIp_;
+    if (sendto(fd, query, pos, 0, reinterpret_cast<struct sockaddr*>(&dest),
+               sizeof(dest)) < 0) {
+        close(fd);
+        return false;
+    }
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = DNS_REFRESH_TIMEOUT_MS / 1000;
+    tv.tv_usec = (DNS_REFRESH_TIMEOUT_MS % 1000) * 1000;
+    if (select(fd + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
+        close(fd);
+        return false;
+    }
+
+    uint8_t response[DNS_MAX_MSG_SIZE];
+    const ssize_t rl = recvfrom(fd, response, sizeof(response), 0, nullptr, nullptr);
+    close(fd);
+    if (rl < static_cast<ssize_t>(DnsMessage::kHeaderBytes)) return false;
+    // Only an answer to our own question counts: a stray datagram on this
+    // socket must not be parsed as the answer for the record.
+    const uint16_t replyId =
+        (static_cast<uint16_t>(response[0]) << 8) | response[1];
+    if (replyId != id) return false;
+
+    parseForwardAnswer(response, static_cast<size_t>(rl), ips, ttl);
+    if (ips.empty()) return false;
+    if (ttl == 0) ttl = DNS_DEFAULT_TTL_SEC;
+    return true;
 }
 
 InternalDnsCache::FileInfo DnsServer::internalCacheFileInfo() const

@@ -6,6 +6,7 @@
 #include "DnsLogger.h"
 #include "InternalDnsCache.h"
 #include "CacheAutosave.h"
+#include "CacheAutoUpdate.h"
 #include "RestartSaveJobState.h"
 #include "RestartSaveVerify.h"
 #include "../dhcp/IDhcpServer.h"
@@ -119,6 +120,30 @@ public:
      */
     void applyCacheAutosave(bool enabled, core::AutosavePeriod unit,
                              uint16_t interval);
+
+    /**
+     * @brief Apply the auto-update settings of the built-in cache.
+     *
+     * Stage 172: the records of the cache are refreshed from the upstream DNS so
+     * that, with "Ignore TTL" on, they do not go stale. Turning it on starts (or
+     * re-arms) the timer, turning it off stops it; the pause and the batch are
+     * part of the same settings. Called with the values the operator saved, and
+     * again whenever they change.
+     */
+    void applyCacheAutoUpdate(bool enabled, core::AutosavePeriod unit,
+                              uint16_t interval, uint16_t batch,
+                              uint16_t pauseSec);
+
+    /**
+     * @brief The auto-update countdown the page draws (stage 174).
+     *
+     * The remaining time is the timer's own, so the page shows when the next
+     * cycle really happens rather than a value recomputed from the settings.
+     */
+    CacheAutoUpdate::Status cacheAutoUpdateStatus() const
+    {
+        return cacheAutoUpdate_.status();
+    }
 
     /**
      * @brief Built-in cache statistics + per-query counters (main page).
@@ -433,6 +458,15 @@ private:
                             std::vector<std::string>& ips,
                             uint32_t& ttlSec);
 
+    // Stage 172: ask the upstream DNS for one record of the built-in cache.
+    // Builds the query itself (the client queries that reach the server are
+    // relayed verbatim, so nothing else here does), waits for one reply on a
+    // temporary socket and parses it with parseForwardAnswer(). Called from the
+    // auto-update task, never from the DNS loop, so a slow upstream delays a
+    // periodic sweep and nothing else.
+    bool refreshCacheEntry(const std::string& name, uint16_t qtype,
+                           std::vector<std::string>& ips, uint32_t& ttl);
+
     // DNS message building
     size_t buildAnswer(uint8_t* buf, size_t bufSize,
                        uint16_t id, const std::string& domain,
@@ -579,6 +613,8 @@ private:
     InternalDnsCache internalCache_;
     /// Stage 153: writes the cache to the card on a timer (see CacheAutosave).
     CacheAutosave cacheAutosave_{internalCache_, kCacheDatPath};
+    /// Stage 172: refreshes the cache from upstream on a timer.
+    CacheAutoUpdate cacheAutoUpdate_{internalCache_};
 };
 
 } // namespace dns

@@ -197,6 +197,7 @@ private:
     static esp_err_t postRebootPrepareHandler(httpd_req* req) { return RestApi::handlePostDeviceRebootPrepare(req); }
     static esp_err_t getInternalCacheFileHandler(httpd_req* req) { return RestApi::handleGetInternalCacheFile(req); }
     static esp_err_t getInternalCacheProgressHandler(httpd_req* req) { return RestApi::handleGetInternalCacheProgress(req); }
+    static esp_err_t getInternalCacheAutoUpdateHandler(httpd_req* req) { return RestApi::handleGetInternalCacheAutoUpdate(req); }
     // Progress/verdict of the statistics write a planned restart asks for.
     static esp_err_t getStatsProgressHandler(httpd_req* req) { return RestApi::handleGetStatsProgress(req); }
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }

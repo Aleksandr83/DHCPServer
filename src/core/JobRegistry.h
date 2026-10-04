@@ -47,6 +47,25 @@ struct JobInfo {
 };
 
 /**
+ * @brief Told when a long-running operation starts or ends (stage 173).
+ *
+ * The registry knows nothing about files: the job log subscribes and writes the
+ * lines, so the registry stays plain C++ and host-tested, and a test can watch
+ * the calls with a stub of its own. Only the two ends are reported — progress is
+ * too frequent to be worth a line each time, and a periodic operation would fill
+ * the file with it.
+ */
+class IJobObserver {
+public:
+    virtual ~IJobObserver() = default;
+
+    /// @param job the record as it was created (`durationMs` is 0).
+    virtual void jobStarted(const JobInfo& job) = 0;
+    /// @param job the record as it ended, with `durationMs` filled in.
+    virtual void jobFinished(const JobInfo& job) = 0;
+};
+
+/**
  * @brief The list of long-running operations ("Task Scheduler").
  *
  * One place where an operation of any subsystem announces itself: what it is,
@@ -77,6 +96,13 @@ public:
     static constexpr size_t kMaxJobs = 8;
 
     static JobRegistry& instance();
+
+    /**
+     * @brief Subscribe an observer to starts and finishes (null unsubscribes).
+     *
+     * Called once at startup, before any operation begins; not owned.
+     */
+    void setObserver(IJobObserver* observer);
 
     /**
      * @brief Announce an operation that starts now.
@@ -152,6 +178,7 @@ private:
     size_t slotFor(const std::string& id);
 
     mutable std::mutex mutex_;
+    IJobObserver* observer_ = nullptr;
     JobInfo jobs_[kMaxJobs];
     bool used_[kMaxJobs] = {};
     /** @brief Start and end of each record (the monotonic clock, milliseconds). */

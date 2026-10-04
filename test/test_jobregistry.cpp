@@ -24,6 +24,7 @@
 
 using namespace std;
 
+using dhcp::core::IJobObserver;
 using dhcp::core::JobInfo;
 using dhcp::core::JobRegistry;
 using dhcp::core::JobState;
@@ -36,6 +37,18 @@ JobRegistry& reg()
     JobRegistry& r = JobRegistry::instance();
     return r;
 }
+
+/** Watches both ends the way the job log does (stage 173). */
+class StubObserver : public IJobObserver {
+public:
+    int started = 0;
+    int finished = 0;
+    JobInfo lastStarted;
+    JobInfo lastFinished;
+
+    void jobStarted(const JobInfo& job) override { ++started; lastStarted = job; }
+    void jobFinished(const JobInfo& job) override { ++finished; lastFinished = job; }
+};
 
 } // namespace
 
@@ -243,6 +256,57 @@ static int test_percent_and_state_text()
     return 0;
 }
 
+/**
+ * The two ends of an operation are reported to the subscriber (stage 173), and
+ * nothing else is: the job log writes one line per end, so progress must not
+ * reach it.
+ */
+static int test_observer_reports_both_ends()
+{
+    reg().clear();
+    StubObserver obs;
+    reg().setObserver(&obs);
+
+    TEST_ASSERT_TRUE(reg().begin("upload", "jobs.upload", "sd", 500));
+    TEST_ASSERT_EQ(obs.started, 1);
+    TEST_ASSERT_EQ(obs.finished, 0);
+    TEST_ASSERT_STR_EQ(obs.lastStarted.id, "upload");
+    TEST_ASSERT_STR_EQ(obs.lastStarted.titleKey, "jobs.upload");
+    TEST_ASSERT_STR_EQ(obs.lastStarted.arg, "sd");
+    TEST_ASSERT_EQ(obs.lastStarted.total, 500u);
+    TEST_ASSERT_EQ(obs.lastStarted.state, JobState::Running);
+
+    // Progress is deliberately not reported — only the two ends are.
+    reg().progress("upload", 100, 0, "part");
+    TEST_ASSERT_EQ(obs.started, 1);
+    TEST_ASSERT_EQ(obs.finished, 0);
+
+    reg().finish("upload", JobState::Done, "500 files");
+    TEST_ASSERT_EQ(obs.finished, 1);
+    TEST_ASSERT_STR_EQ(obs.lastFinished.id, "upload");
+    TEST_ASSERT_EQ(obs.lastFinished.state, JobState::Done);
+    TEST_ASSERT_STR_EQ(obs.lastFinished.detail, "500 files");
+    TEST_ASSERT_EQ(obs.lastFinished.done, 500u);      // Done brings the count up
+
+    // A failure is reported the same way, with its own state and words.
+    reg().begin("format", "jobs.format", "sdcard");
+    reg().finish("format", JobState::Failed, "no card");
+    TEST_ASSERT_EQ(obs.finished, 2);
+    TEST_ASSERT_EQ(obs.lastFinished.state, JobState::Failed);
+    TEST_ASSERT_STR_EQ(obs.lastFinished.arg, "sdcard");
+    TEST_ASSERT_STR_EQ(obs.lastFinished.detail, "no card");
+
+    // Unsubscribing stops the reports for good.
+    reg().setObserver(nullptr);
+    reg().begin("check", "jobs.file_check");
+    reg().finish("check", JobState::Cancelled);
+    TEST_ASSERT_EQ(obs.started, 2);
+    TEST_ASSERT_EQ(obs.finished, 2);
+
+    reg().clear();
+    return 0;
+}
+
 } // extern "C"
 
 extern "C" int app_main(void)
@@ -256,6 +320,7 @@ extern "C" int app_main(void)
         { "cancel requests", test_cancel_requests },
         { "capacity", test_capacity },
         { "percent and state text", test_percent_and_state_text },
+        { "observer reports both ends", test_observer_reports_both_ends },
     };
 
     int failed = 0;
