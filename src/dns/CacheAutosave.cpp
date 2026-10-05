@@ -187,7 +187,7 @@ void CacheAutosave::saveNow()
     core::JobRegistry& jobs = core::JobRegistry::instance();
     // The total is unknown (0), so the page shows the row without a percentage
     // instead of inventing one.
-    if (!jobs.begin(kJobId, kJobTitleKey, path_, 0)) {
+    if (!jobs.begin(kJobId, kJobTitleKey, path_, 0, core::JobUnit::Records)) {
         ESP_LOGW(TAG, "job registry is full, skipping this save");
         return;
     }

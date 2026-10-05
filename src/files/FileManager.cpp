@@ -783,7 +783,7 @@ FileStatus FileManager::checkStart(const string& volumeId, string* detail)
     // in the registry: the scheduler page shows it and can stop it from there.
     ::dhcp::core::JobRegistry::instance().begin(
         "file_check", "jobs.file_check", volumeId,
-        static_cast<uint32_t>(kCheckBudgetBytes));
+        static_cast<uint32_t>(kCheckBudgetBytes), ::dhcp::core::JobUnit::Bytes);
     return FileStatus::Ok;
 }
 
@@ -1128,7 +1128,8 @@ FileStatus FileManager::transferStart(const TransferRequest& req, string* detail
     // it can be stopped as well; the byte total arrives with the measurement.
     string arg = to_string(req.paths.size()) + (req.paths.size() == 1 ? " entry -> " : " entries -> ");
     arg += req.dstVolume + req.dstPath;
-    ::dhcp::core::JobRegistry::instance().begin("transfer", "jobs.transfer", arg, 0);
+    ::dhcp::core::JobRegistry::instance().begin("transfer", "jobs.transfer", arg, 0,
+                                               ::dhcp::core::JobUnit::Bytes);
     return FileStatus::Ok;
 }
 

@@ -302,6 +302,8 @@
     "autoupdate_pause": "Pause after update (sec)",
     "autoupdate_next": "Next update in",
     "autoupdate_running": "updating…",
+    "autoupdate_now": "Update now",
+    "autoupdate_now_busy": "Updating…",
     "period_hour": "hour",
     "period_day": "day",
     "period_minute": "minutes",
@@ -412,6 +414,16 @@
     "file_newer": "The file is from a newer firmware — unknown parameters will be skipped.",
     "reboot_required": "Network parameters changed — reboot the device to apply the static IP.",
     "skipped": "Not imported (unknown to this firmware):",
+    "sec_dhcp": "DHCP configuration",
+    "sec_static_bindings": "Static bindings",
+    "sec_allowed": "Allowed computers",
+    "sec_dns": "DNS configuration",
+    "sec_time": "Time server",
+    "sec_local_hosts": "Local hosts",
+    "sec_security": "Security",
+    "sec_files": "Files",
+    "applied": "Applied:",
+    "warnings": "Warnings:",
     "error": "Import failed:"
   },
   "files": {
@@ -579,6 +591,8 @@
     "empty": "Nothing is running right now.",
     "elapsed": "Elapsed: ",
     "repeat": "Repeat: ",
+    "unit_records": "records",
+    "unit_seconds": "s",
     "cancel": "Cancel",
     "cancel_failed": "Could not cancel the operation.",
     "cancel_done": "The operation has already finished.",
@@ -606,7 +620,8 @@
     "cancel": "Cancel",
     "warning": "Warning",
     "error": "Error",
-    "unknown_error": "Unknown error"
+    "unknown_error": "Unknown error",
+    "save_failed": "Could not save — the device did not answer"
   },
 
   "restart": {

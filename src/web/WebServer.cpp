@@ -555,6 +555,8 @@ const WebRoute WebServer::kRoutes[] = {
     { "/api/dns/internal-cache/file",     RouteMethod::Get,   &WebServer::getInternalCacheFileHandler },
     { "/api/dns/internal-cache/progress", RouteMethod::Get,   &WebServer::getInternalCacheProgressHandler },
     { "/api/dns/internal-cache/autoupdate", RouteMethod::Get, &WebServer::getInternalCacheAutoUpdateHandler },
+    // One refresh cycle right away, asked for by the operator (stage 177).
+    { "/api/dns/internal-cache/autoupdate", RouteMethod::Post, &WebServer::postInternalCacheAutoUpdateHandler },
     { "/api/dns/internal-cache/save",     RouteMethod::Post,  &WebServer::postInternalCacheSaveHandler },
     { "/api/dns/internal-cache/load",     RouteMethod::Post,  &WebServer::postInternalCacheLoadHandler },
     { "/api/dns/internal-cache/reset",    RouteMethod::Post,  &WebServer::postInternalCacheResetHandler },

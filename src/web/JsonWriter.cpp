@@ -74,5 +74,31 @@ string JsonWriter::escape(const string& in)
     return out;
 }
 
+string JsonWriter::unescape(const string& in)
+{
+    string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); i++) {
+        if (in[i] != '\\' || i + 1 >= in.size()) {
+            out += in[i];
+            continue;
+        }
+        const char next = in[++i];
+        switch (next) {
+            case 'n': out += '\n'; break;
+            case 'r': out += '\r'; break;
+            case 't': out += '\t'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            // '"', '\\' and '/' stand for themselves. So does the name of any
+            // escape this reader does not know — including `\uXXXX`, which this
+            // writer never emits and which is therefore kept as its four
+            // characters rather than decoded into a guessed byte.
+            default: out += next; break;
+        }
+    }
+    return out;
+}
+
 } // namespace web
 } // namespace dhcp

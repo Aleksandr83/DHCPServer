@@ -51,7 +51,7 @@ Get overall system status.
 > `internal_cache_hits`, `internal_cache_avg_hit_us` — average µs of a
 > successful PSRAM-cache lookup, `internal_forward_count`).
 >
-> Since stage 127 the same block also answers **where the time of a hit goes**,
+> The same block also answers **where the time of a hit goes**,
 > because that average times the whole `lookup()` call and a lookup starts by
 > taking the arena mutex: `internal_cache_avg_wait_us` (the part spent waiting for
 > that lock — somebody else's work, not the cache's),
@@ -441,15 +441,20 @@ Get DNS server configuration.
 > `cache_internal_autoupdate_interval`, `cache_internal_autoupdate_batch` and
 > `cache_internal_autoupdate_pause` — the built-in cache refreshes its records
 > from the upstream DNS on a timer, so that with "Ignore TTL" on they do not go
-> stale. One cycle refreshes up to `cache_internal_autoupdate_batch` records
-> (**1..1000**, default 50) — the ones whose last refresh failed first, then the
-> oldest in the pool — pausing `cache_internal_autoupdate_pause` seconds
-> (**1..3600**, default 60) after each, and the next cycle starts one
+> stale. One **sweep** walks the **whole** cache in blocks of
+> `cache_internal_autoupdate_batch` records (**1..1000**, default 50) — the ones
+> whose last refresh failed first, then the oldest in the pool — waiting
+> `cache_internal_autoupdate_pause` seconds (**1..3600**, default 60) between two
+> blocks and never after the last one, and the next sweep starts one
 > `_period` / `_interval` later (hours `0` or days `1`; the interval is bounded
-> by the unit — 24 hours, 30 days). It runs only while "Ignore TTL" is on; a
-> record the upstream does not confirm is kept and retried first next cycle.
-> Off by default. The cycle appears on the Task Scheduler page and can be
-> stopped there, which switches the feature off.
+> by the unit — 24 hours, 30 days). The period therefore counts **between sweeps**
+> and not between blocks: a 2000-record cache is refreshed in one go instead of
+> 40 records per period. It runs only while "Ignore TTL" is on; a
+> record the upstream does not confirm is kept and retried first in the next
+> sweep. Off by default. The sweep appears on the Task Scheduler page and can be
+> stopped there, which switches the feature off; the request is noticed between
+> two records and also once a second while the sweep waits out a
+> pause — so a stop does not have to wait for the pause to end.
 > `block_forward_non_aa` — when on, queries of any type other than A/AAAA
 > that are NOT answered from local hosts are answered **NODATA** (NOERROR,
 > 0 records) and are never sent to the external cache or the upstream DNS.
@@ -572,7 +577,7 @@ average could not be continued after a reboot (new queries would be averaged
 against an average). The record is written **in place**, like `cache.dat`, and not
 published through a temporary file: FatFS refuses a `rename` onto an existing name,
 so `<path>.tmp` + `rename` failed on every save after the first one (the device's
-`logs/Errors.log` said `cannot publish the file` three times in a row; stage 125).
+`logs/Errors.log` said `cannot publish the file` three times in a row).
 The price of writing in place is that an interrupted write can leave a torn record,
 and what pays for it is the format itself — magic, version, payload size and
 checksum are checked on every load, so a half-written file is refused instead of
@@ -715,7 +720,7 @@ Progress of the running background save/load job (auth required).
 
 > `busy=false` means no job is running; `done`/`total` keep the last
 > finished job's values so the UI can show "finished at N entries".
-> `checking` (stage 169) is `true` while a **restart-requested** save is reading
+> `checking` is `true` while a **restart-requested** save is reading
 > the saved file back instead of writing it, and `done`/`total` then describe that
 > read — the page shows "checking the cache file: /fat/cache.dat … 45 %" instead
 > of sitting at the save's last "100 %" for the seconds a full table takes to
@@ -733,7 +738,7 @@ Progress of the running background save/load job (auth required).
 > |---------------|---------|
 > | `ok` | the file is written (a save) or read (a load) |
 > | `empty` | the save found nothing live to write — an empty table, or one whose entries have all expired. **Not an error**, and the file on the card is left as it was |
-> | `mismatch` | the file was written, but reading it back did not give what was written (stage 169). The save a **planned restart** asks for is read back, and it is retried once before this verdict is published; a save started from the Internal Cache page is not checked, so this value is only ever reported for a restart save |
+> | `mismatch` | the file was written, but reading it back did not give what was written. The save a **planned restart** asks for is read back, and it is retried once before this verdict is published; a save started from the Internal Cache page is not checked, so this value is only ever reported for a restart save |
 > | `failed` | the write (or the read) failed, for instance because the volume is full |
 > | `""` | no job has finished in this boot yet |
 >
@@ -747,13 +752,13 @@ Progress of the running background save/load job (auth required).
 > `last_detail` carries the device's **own words** about the last `failed` or
 > `mismatch` (`the file holds 1181 records, 1188 were written`), because the
 > operator does not always have a terminal and the question about losing the
-> cache is asked on the page. Empty on success. Added in stage 169; a client
+> cache is asked on the page. Empty on success; a client
 > that does not know the field simply does not show the reason.
 
 #### `GET /api/dns/internal-cache/autoupdate`
 
-The countdown to the next built-in-cache auto-update cycle (auth required),
-drawn on the Internal Cache page under "Update every" (stage 174).
+The countdown to the next built-in-cache auto-update **sweep** (auth required),
+drawn on the Internal Cache page under "Update every".
 
 **Response `200 OK`:**
 ```json
@@ -766,15 +771,55 @@ drawn on the Internal Cache page under "Update every" (stage 174).
 ```
 
 > `remaining_sec` is the auto-update task's **own** countdown, so the page shows
-> when the next cycle really happens rather than a value recomputed from the
+> when the next sweep really happens rather than a value recomputed from the
 > settings (the timer is re-armed whenever those change).
 > `counting` is `false` while the device clock is not set: the task is suspended
 > then and a frozen number would be a lie — the page hides the line instead.
-> `running` is `true while a refresh cycle is in progress, when the countdown is
+> `running` is `true` while a sweep is in progress, when the countdown is
 > stopped; the page says "updating…" rather than showing `0d 00:00`.
 > `enabled` mirrors the Auto Update switch. The page formats the value as
 > `Nd HH:MM` (days, hours, minutes — no seconds) and refreshes it every few
 > seconds, ticking the value down locally in between.
+>
+> A **sweep** refreshes the whole cache: it walks the records in blocks of
+> "Max entries per update", pausing "Pause after update (sec)" **between** the
+> blocks, and the period ("Update every") counts until the next sweep — so a cache
+> of 2000 records is refreshed in one go, not 40 records per period.
+> `running` therefore stays `true` for as long as the sweep lasts, which on a full
+> cache is minutes; the Task Scheduler page shows its progress (records walked of
+> records found), and stopping it there switches Auto Update off — noticed between
+> two records and once a second inside a pause as well, so the
+> pause does not have to be waited out.
+
+#### `POST /api/dns/internal-cache/autoupdate`
+
+Start **one full sweep** right away — the whole cache, in blocks, exactly the work
+the auto-update timer does on its own. The reply comes back before the sweep ends: watch `running` in the countdown
+GET above. The sweep is listed on the Task Scheduler page exactly like a scheduled
+one, and stopping it there switches Auto Update off, as for every sweep.
+
+**Body:** none.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "started"
+}
+```
+
+**Errors:** `409 Conflict` with `{"status":"error","message":…}` when the sweep
+cannot be served — Auto Update is off, Ignore TTL is off, the internal cache is
+not available, or a sweep is already running; `500` when the DNS server is not
+up. The reasons are the guards the sweep itself follows
+(`core::autoUpdateRunNowRefusal`), so a refused press never promises a sweep
+that would walk nothing.
+
+> A manual sweep does **not** need the device clock, unlike the countdown, which
+> counts periods: the request is served even while `counting` is `false`. The
+> countdown is re-armed afterwards, exactly as after a scheduled cycle, so the
+> next automatic run is a whole period away. A press while a cycle runs is
+> refused with `409` rather than queued — that second cycle would ask the
+> upstream for the same records all over again.
 
 #### `POST /api/dns/internal-cache/save`
 
@@ -871,7 +916,7 @@ the only thing the value is ever compared with is the device's own record.
 u32 version=2, u32 entryCount, u32 reserved), then per entry: nameLen u8 +
 name, qtype u16, nA u8, nAAAA u8, remaining-ttl u32, **usage counter u64**, then
 nA×4 B IPv4 and nAAAA×16 B IPv6 raw bytes. The counter was added in version 2
-(stage 104) so that the frequency of a name survives a save/load — the file is
+so that the frequency of a name survives a save/load — the file is
 read back with the same counters instead of counting the restore as a use per
 record. Version 1 files (written before the counter existed) are still accepted
 and their records come back with `uses == 0`.
@@ -959,11 +1004,11 @@ TLS server on port 443 is actually up. A device that comes back with HTTPS in it
 settings and a pair that cannot serve yet (the usual one being `not_yet_valid` —
 SNTP answers after the servers are up, so at boot the certificate is judged against
 the epoch) reports `false` here and starts the listener by itself once the clock
-arrives (stage 165). `https_available` says whether HTTPS could be served right
+arrives. `https_available` says whether HTTPS could be served right
 now, and `https_status` names the reason when it could not — one of
 `ready`, `no_store` (this build has no volume for certificates), `storage_unavailable`
 (the volume is not mounted), `no_certificate`, `unreadable`, `expired`,
-`not_yet_valid` (stage 158). Only `ready` makes `https_available` true.
+`not_yet_valid`. Only `ready` makes `https_available` true.
 
 ---
 
@@ -992,7 +1037,7 @@ Update security/authentication configuration.
 
 > A request accepted here is also retried by the device on its own: a stored "on" that
 > the boot could not honour because the clock was not set yet starts the TLS listener as
-> soon as SNTP (or a manual clock setting) provides a date (stage 165).
+> soon as SNTP (or a manual clock setting) provides a date.
 
 > The name a new certificate is made with (`cert.name` below) is **not** part of this
 > request: it is written by `POST /api/security/certificates` when a pair is actually
@@ -1010,8 +1055,8 @@ Update security/authentication configuration.
 ## GET /api/security/certificates
 
 State of the HTTPS certificate pair: on which volume it lives, whether it can still
-serve, and what a new one would be made of (Settings → Security → Certificates, stage 160).
-Since stage 163 the create dialog asks for the name and the period itself, so the two
+serve, and what a new one would be made of (Settings → Security → Certificates).
+The create dialog asks for the name and the period itself, so the two
 `cert.*` fields below are what pre-fills it rather than fields of the page.
 
 > The **private key is in no answer of this endpoint and has no download route at all** —
@@ -1059,7 +1104,7 @@ Since stage 163 the create dialog asks for the name and the period itself, so th
 | `storage` | Volume the pair is on now: `internal` (`/fat`) or `sdcard` (`/sdcard`); `none` when this build has no volume for certificates |
 | `state` | `ready`, `no_store` (no volume in this build), `storage_unavailable` (the volume is not mounted), `no_certificate`, `unreadable`, `expired`, `not_yet_valid`, `unknown` |
 | `available` | The volume of the pair is mounted and usable. **Not** "a pair exists" — `available: true` with `state: "no_certificate"` is a working volume with nothing stored on it |
-| `https_enabled` | What is listening: true only while the TLS server is up (stage 165). `https_available` is whether HTTPS could be served right now; both are the same values `GET /api/security/settings` reports |
+| `https_enabled` | What is listening: true only while the TLS server is up. `https_available` is whether HTTPS could be served right now; both are the same values `GET /api/security/settings` reports |
 | `volumes[]` | Both volumes, so the picker can show where a pair is already waiting: `current` marks the chosen one, `present` says whether the pair was found there |
 | `cert.present/valid/expired/not_yet_valid/expiring_soon` | What the pair on the chosen volume is |
 | `cert.days_left` | Days until `not_after`, counted **only** for a pair that parsed (`0` otherwise, because "0 days left" next to a file that could not be read would be read as "expired") |
@@ -1071,7 +1116,7 @@ Since stage 163 the create dialog asks for the name and the period itself, so th
 | `cert.validity_options` | The periods the store accepts, in years: `[1, 2, 3, 5, 10]`. The page builds its picker from this table, so what it offers and what the device accepts cannot drift apart |
 | `cert.warning_days` | The interface warns while fewer days than this are left (`30`) |
 | `cert.name` | The name a new certificate would carry — the stored setting (NVS `sec_cert_name`), which pre-fills the name field of the create dialog |
-| `cert.default_name` | The name an **empty** field means: the default of the security module (`dhcpserver.local`), not the stored setting. The page reads it from here, so it does not carry a copy of the constant (stage 163) |
+| `cert.default_name` | The name an **empty** field means: the default of the security module (`dhcpserver.local`), not the stored setting. The page reads it from here, so it does not carry a copy of the constant |
 | `cert.ip` | The address that would go into the SAN: the device's own DHCP address, not a field of the request |
 | `cert.error` | Why the pair could not be read or parsed, when that is the case |
 
@@ -1164,7 +1209,7 @@ given`, or the reason of the refused action (a name that cannot be a host name, 
 outside the list, a clock that is not set).
 
 Three more reasons belong to this route rather than to the store, because `generate` runs
-in a **task of its own** (stage 164): writing a pair goes through mbedTLS X.509 and the PSA
+in a **task of its own**: writing a pair goes through mbedTLS X.509 and the PSA
 key store, and that chain does not fit the stack of the httpd task. The handler asks the
 task to do the work and waits up to **10 seconds** for it (`kCertGenWaitMs`); the answers it
 can produce are `cannot start the certificate generator` (the task could not be created —
@@ -1312,6 +1357,14 @@ Full backup of all persisted settings as a single JSON document. Passwords are
 **not** exported (web password, REST-log/cache auth passwords) — the matching
 `*_auth` booleans are kept so an import knows whether auth is enabled.
 
+> Every value is written through `JsonWriter::escape`. The document
+> used to be assembled by hand: names, URLs and timezones went between quotes as
+> they were, so a single `"` in one of them made the whole file invalid JSON — the
+> page then answered "nothing to export" to a response that was `200 OK`, and
+> `POST /api/settings/import` could not read the file back either. A value that
+> holds a quote, a backslash, a newline or a tab now travels escaped and comes
+> back exactly as it was typed.
+
 **Response `200 OK`:**
 ```json
 {
@@ -1339,14 +1392,43 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "log_cache": true, "log_rest_sent": false, "log_rest": false,
     "log_url": "", "log_auth": false, "log_auth_user": "",
     "cache_rest": false, "cache_rest_read": true, "cache_rest_write": true,
-    "cache_url": "", "cache_auth": false, "cache_auth_user": ""
+    "cache_url": "", "cache_auth": false, "cache_auth_user": "",
+    "cache_internal": true, "cache_internal_size_mb": 4,
+    "cache_internal_ignore_ttl": false, "cache_internal_save_stats": true,
+    "cache_internal_save_cache": true,
+    "cache_internal_autosave": false, "cache_internal_autosave_period": 3,
+    "cache_internal_autosave_interval": 1,
+    "cache_internal_autoupdate": true, "cache_internal_autoupdate_period": 3,
+    "cache_internal_autoupdate_interval": 1,
+    "cache_internal_autoupdate_batch": 500,
+    "cache_internal_autoupdate_pause": 60,
+    "block_forward_non_aa": false, "allow_own_subnet": true
+  },
+  "time": {
+    "enabled": true, "sync_enabled": true, "external_ntp": "pool.ntp.org",
+    "timezone": "MSK-3", "utc_offset_hours": 3, "sync_interval_sec": 3600,
+    "rate_limit_per_sec": 10, "allow_own_subnet": true,
+    "log_terminal": false, "log_rest": false, "log_url": "",
+    "log_auth": false, "log_auth_user": ""
   },
   "local_hosts": [
     { "name": "mydevice.local", "ip4": "192.168.1.60", "ip6": "", "enabled": true }
   ],
-  "security": { "username": "admin", "max_attempts": 5, "lockout_period": 300 }
+  "security": {
+    "username": "admin", "max_attempts": 5, "lockout_period": 300,
+    "https_enabled": false, "cert_storage": "internal",
+    "cert_name": "dhcpserver"
+  },
+  "files": { "allow_own_subnet": true }
 }
 ```
+
+The `security` section carries the operator's **wish** for HTTPS and where the
+certificate pair lives (`cert_storage` is `internal` or `sdcard`, `cert_name` is
+the common name of the certificate — a host name). The **pair itself is not
+exported** — a private key is a secret, exactly like a password — so a device
+restored from a backup still needs its own certificate (the Certificates page
+generates one).
 
 ---
 
@@ -1385,7 +1467,7 @@ That is what the next one is for.
 
 ## POST /api/web/sync
 
-Makes the device's web tree equal to an uploaded folder (stage 169): the client
+Makes the device's web tree equal to an uploaded folder: the client
 sends the list of files the folder holds, and the device removes everything else
 on the SPIFFS volume. This is how the interface is updated **remotely** — without
 a cable and without flashing the SPIFFS image — so that a page dropped from
@@ -1435,7 +1517,7 @@ switches it is the dry run (`-Device <host>`), `-Delete` removes what it listed,
 `-Upload` sends the folder first, and it refuses a folder without `index.html` —
 the same rule the page enforces. It calls `curl.exe` with `-L -k`: with the
 device's HTTPS switch on and a usable certificate the plain request is answered
-with a `308` (stage 167), and a `308` preserves the method and the body, so the
+with a `308`, and a `308` preserves the method and the body, so the
 redirect is followed and the very same POST is re-sent; `-k` is there because the
 pair in the device is its own, self-signed one. Credentials are sent
 **preemptively** (an `Authorization` header, not `curl -u`): the device answers a
@@ -1451,8 +1533,12 @@ credentials used on the Login page (the default is the factory `admin`/`admin`).
 
 Restore settings from a JSON document produced by `GET /api/settings/export`.
 
-**Request body:** the export JSON (full or partial document). Content-Length may
-be up to ~16 KB.
+**Request body:** the export JSON (full or partial document). The body is either
+read whole or **refused**: a `Content-Length` above 16 KB is answered with
+`413 Payload Too Large`, because a silently truncated document would apply the
+sections up to the cut and leave the operator believing the file arrived
+complete. (The limit is far above anything this endpoint exports: the three list
+blobs it carries are bounded by 512 + 1024 + 512 bytes.)
 
 Import logic:
 
@@ -1461,17 +1547,38 @@ Import logic:
 2. **Version** — `firmware_version` is compared **by release number** (`xxx` of
    `aa.bb.xxx.cc.YY.MM.RR`); sub-release / date / region are ignored.
 3. **Recognized fields only** — each section is applied field-by-field from the
-   known schema; passwords are never imported (current ones are kept).
+   known schema; passwords are never imported (current ones are kept), and a
+   string value is read with `JsonWriter::unescape`, so a name or a
+   URL that holds a quote or a backslash is restored as the text it was (the
+   reader used to stop at the first quote of the body and hand back `a\` for a
+   name equal to `a"b`).
 4. **Unknown fields** (e.g. a file exported by a **newer** firmware) are not
-   applied and are listed in `skipped_fields`.
-5. **Apply** — sections are saved to NVS; the DHCP/DNS servers are started or
-   stopped to match the imported `enabled` flags. A change of the network
-   parameters (`server_ip` / `subnet` / `gateway`) is **not** applied on the fly —
-   the response flags `reboot_required`, so a reboot picks up the new static IP.
+   applied and are listed in `skipped_fields`. A key is told apart from an
+   ordinary string value by what stands *before* it — `{` or `,` — so a name
+   holding a quote and a colon is never reported as an unknown field.
+5. **Apply** — sections are saved to NVS and then handed to the running services
+   through the same calls the settings pages use, so a restore **takes effect
+   immediately**: DHCP logging/lease limit/allow-list, every DNS setting (both
+   caches, autosave, auto-update, the non-A/AAAA policy, the subnet filter),
+   the time server, the security limits, the web-file access filter, and the
+   HTTPS switch. The DHCP/DNS/SNTP servers are started or stopped to match the
+   imported `enabled` flags. Two things cannot be applied on the fly:
+   - a change of the network parameters (`server_ip` / `subnet` / `gateway`) —
+     the response flags `reboot_required`, so a reboot picks up the new static IP;
+   - the volume of the certificate pair (`cert_storage`). It is moved only when
+     the pair is **already waiting** on the target volume; otherwise the entry is
+     reported in `warnings`, because an empty volume would be a certificate the
+     device cannot serve.
+   An HTTPS switch that cannot work (no usable certificate) and a `cert_name`
+   that is not a host name are also answered with a warning rather than a failure:
+   the rest of the file is still worth importing.
+6. **Honest report** — a section the device could not store (a list over the NVS
+   budget, an HTTPS switch that was refused) is reported as **not** imported: the
+   matching `imported` flag stays `false` and the reason appears in `warnings`.
    The allowed-computers list is written from `allowed_computers` and the PSRAM
    MAC table is rebuilt immediately (the entries are read only between the
-   brackets of that array, so the `static_bindings` / `local_hosts` entries in
-   the same file cannot be picked up by their identical `mac`/`name` keys).
+   brackets of their own array, so the `static_bindings` / `local_hosts` entries
+   in the same file cannot be picked up by their identical `mac`/`name` keys).
 
 **Response `200 OK`:**
 ```json
@@ -1484,9 +1591,11 @@ Import logic:
   "reboot_required": false,
   "imported": {
     "dhcp": true, "static_bindings": true, "allowed_computers": true,
-    "dns": true, "local_hosts": true, "security": true
+    "dns": true, "time": true, "local_hosts": true, "security": true,
+    "files": true
   },
-  "skipped_fields": ["some_future_field"]
+  "skipped_fields": ["some_future_field"],
+  "warnings": ["cert_storage: no certificate on sd"]
 }
 ```
 
@@ -1495,8 +1604,9 @@ Import logic:
 | `version_mismatch` | imported release ≠ current release |
 | `file_newer` | imported file was produced by a newer release |
 | `reboot_required` | network params changed — reboot to apply static IP |
-| `imported` | which sections were actually found and applied |
+| `imported` | which sections were found **and applied**; `false` means the section was in the file but nothing of it landed |
 | `skipped_fields` | fields present but unknown to this firmware (not imported) |
+| `warnings` | sections that were in the file and could not be applied, with the reason; `[]` when there are none |
 
 ---
 
@@ -1552,7 +1662,7 @@ show the operator what is happening instead of a reboot that looks instant while
 the device is still writing to FAT. The command is authenticated.
 
 The policy stays on the device (the two switches on the Internal Cache page);
-this endpoint only reports what each step decided. Since stage 122 **neither file
+this endpoint only reports what each step decided. **Neither file
 is written inside this call** — both run as background jobs of their own (44
 bytes still deserve a task: the callers of a restart run on the single httpd
 task, and a file write there answers nobody else). The client polls
@@ -1560,7 +1670,7 @@ task, and a file write there answers nobody else). The client polls
 `busy=false` on both and then asks for the restart with `"saved": true`.
 Waiting here instead would block that task, and then nothing could be polled.
 
-Since stage 169 both jobs, when a **restart** asks for them, also read the file
+Both jobs, when a **restart** asks for them, also read the file
 back and compare it with what was written (the statistics byte for byte, the
 cache by parsing every record and comparing the count with the one the save
 reported). A file that does not match is written once more, and only then is the
@@ -1584,7 +1694,7 @@ read takes seconds.
 
 | field | values | meaning |
 |-------|--------|---------|
-| `stats` | `started` / `busy` / `skipped` / `failed` | `started` = the statistics write job is running now; `busy` = one was already running and it is that one that will finish; `skipped` = the switch is off; `failed` = the task could not be started. On devices older than stage 122 this field answered `saved` — the file was written inside the call, and a client that understands both readings shows the same step either way |
+| `stats` | `started` / `busy` / `skipped` / `failed` | `started` = the statistics write job is running now; `busy` = one was already running and it is that one that will finish; `skipped` = the switch is off; `failed` = the task could not be started. On older firmware this field answered `saved` — the file was written inside the call, and a client that understands both readings shows the same step either way |
 | `cache` | `started` / `busy` / `empty` / `skipped` / `failed` | `started` = the background save job is running now; `busy` = one was already running (a manual save, or the boot restore) and it is that one that will finish; `empty` = the cache holds no entry, so there is nothing to write and the existing file is left as it is (`saveToFile()` refuses an empty table as well — this state exists so a client does not report a save that never happened); `skipped` = the switch is off or there is no cache |
 
 ---
@@ -1604,13 +1714,13 @@ to it, because the page reads them the same way.
 | field | values | meaning |
 |-------|--------|---------|
 | `busy` | `true` / `false` | the write is running now |
-| `checking` | `true` / `false` | the job is reading the record back rather than writing it (stage 169). The check of 92 bytes is over in microseconds, so a client polling twice a second will rarely see it — it is still the truth about the phase, and the interface has a line for it |
-| `checked` | `true` / `false` | the last finished job **read the file back and it matched** (stage 169). Not the same as `last_result: ok` — every restart save verifies, but a client that never sees a check must not be told there was one |
+| `checking` | `true` / `false` | the job is reading the record back rather than writing it. The check of 92 bytes is over in microseconds, so a client polling twice a second will rarely see it — it is still the truth about the phase, and the interface has a line for it |
+| `checked` | `true` / `false` | the last finished job **read the file back and it matched**. Not the same as `last_result: ok` — every restart save verifies, but a client that never sees a check must not be told there was one |
 | `path` | text | where the file lives (`/fat/Statistica.dat`), for the status line |
-| `last_result` | `ok` / `skipped` / `mismatch` / `failed` / `""` | verdict of the last finished job; `skipped` = the switch was off when it ran, `mismatch` = the file was written but reading it back did not give what was written, even after the one retry the operator allowed (stage 169), `""` = nothing has finished (so there is no verdict to report) |
+| `last_result` | `ok` / `skipped` / `mismatch` / `failed` / `""` | verdict of the last finished job; `skipped` = the switch was off when it ran, `mismatch` = the file was written but reading it back did not give what was written, even after the one retry the operator allowed, `""` = nothing has finished (so there is no verdict to report) |
 | `last_detail` | any text / `""` | the device's **own words** about the last failure or mismatch (`the file holds 40 bytes instead of 92`, `the content of the file differs from what was written`, `cannot create the file`). It is here because the operator does not always have a terminal: "the statistics could not be saved" without the reason is the message that made him ask what went wrong. Empty on success |
 
-Since stage 169 a job asked for by a **planned restart** writes the file and reads
+A job asked for by a **planned restart** writes the file and reads
 it back, and retries the write **once** when the content does not match; the
 verdict describes the volume as it is after that retry, so `mismatch` means "there
 is a file there and it is not the one we wrote". Both attempts and both reasons
@@ -2496,11 +2606,13 @@ page keep working without a new route per operation.
       "state": "running",
       "done": 41943040,
       "total": 67108864,
+      "unit": "bytes",
       "percent": 62,
       "detail": "/logs/2026-09.txt",
       "elapsed_ms": 41230,
       "cancel_requested": false,
-      "repeat_sec": 0
+      "repeat_sec": 0,
+      "pause_sec": 0
     }
   ]
 }
@@ -2511,11 +2623,29 @@ page keep working without a new route per operation.
 > operation itself. `percent` is **-1** when the operation cannot say (an unknown
 > `total`), which the page draws as an indeterminate bar.
 >
+> `unit` (`none` / `bytes` / `records`) says what `done` and `total`
+> actually count, because they do not all count bytes: an upload, a transfer and
+> a volume check count bytes, the cache jobs count records, and an operation with
+> no progress of its own reports `none` and shows no number at all. The page used
+> to append `B` to every job — a cache sweep of 50 records read as
+> `4 B / 50 B` — and a forgotten unit is deliberately rendered as nothing rather
+> than as a wrong one.
+>
 > The list answers **"what is running now"**: a finished one-off operation is
 > removed from it immediately, so there is nothing to clean up. An operation
 > that knows it will run again (`repeat_sec > 0`) keeps its record after
 > finishing, and an operation that is **paused** (an upload whose `<name>.part`
 > waits for the client) stays until it is continued or discarded.
+>
+> `pause_sec` is the seconds left of a pause whose length the
+> operation knows, and what the state badge counts down — the DNS cache sweep
+> between two blocks of "Pause after update (sec)" announces it once a second,
+> so the row reads `paused, 60 s` instead of sitting there as a frozen `running`
+> for the whole pause. It is `0` for an operation that is working and for one
+> paused **without** a known length (an upload waiting for the operator): a
+> badge of a bare `paused` then, never an invented number. The operation itself
+> decides how often it repeats the announcement; the registry logs only the
+> entry into the pause, so a countdown does not fill `/fat/logs/Jobs.log`.
 >
 > Everything in the list is **unfinished**, and therefore everything in it can be
 > asked to stop — there is no "cancellable" field, and the page shows the stop
@@ -2545,6 +2675,8 @@ the operation, which decides how quickly it can let go:
 | `upload:<path>` (paused) | the `.part` is dropped and the record ends with it — nothing would continue that transfer |
 | `format` | the record ends **at once** and, one second later, the card's supply is cut for five seconds — the erase itself is one call into IDF and FatFS and cannot be interrupted in software, but an unpowered card makes the transfer in flight fail, so the call comes back. The volume ends unmounted and is mounted again by the normal retry (every five seconds) |
 | `cache_save` / `cache_load` | honoured before the file I/O starts; the write itself is one call |
+| `cache_autosave` | the write in flight runs to its end (one call into FatFS cannot be interrupted): the record ends, and the stop also switches **Autosave** off in the settings, which is what an operator who stops an automatic repeat is asking for |
+| `cache_autoupdate` | the sweep ends between two records, or the pause between two blocks is left within a second; the sweep's **setting is not touched** — Stop ends an operation, and the "Auto Update" switch on the internal-cache page is what turns the feature off. The countdown is re-armed, so the next sweep comes a full period later |
 | `test_connection` | honoured before the request goes out |
 
 **Errors:** `400` missing `id` · `404` unknown id · `409` the operation has

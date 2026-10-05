@@ -1,5 +1,7 @@
 #include "DhcpAllowedList.h"
 
+#include "../core/StorageText.h"
+
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -75,12 +77,11 @@ string DhcpAllowedList::normalizeMac(const string& mac)
 
 string DhcpAllowedList::sanitizeName(const string& name)
 {
-    string out = trim(name);
-    for (char& c : out) {
-        // '|' separates the fields and '\n' the entries — a name must not be
-        // able to break the format it is stored in.
-        if (c == '|' || c == '\n' || c == '\r') c = ' ';
-    }
+    // One rule for every delimited blob in the settings (core/StorageText.h):
+    // the separators of the format become spaces, the ends are trimmed. Only the
+    // length is this list's own business — its names sit in a 1024-byte budget
+    // shared by at most 25 entries.
+    string out = ::dhcp::core::storageFieldText(name);
     if (out.size() > kMaxNameLen) out.resize(kMaxNameLen);
     return out;
 }

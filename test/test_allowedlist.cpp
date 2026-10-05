@@ -27,6 +27,7 @@ using namespace std;
 #include <string>
 #include <vector>
 
+#include "../src/core/StorageText.h"
 #include "../src/dhcp/DhcpAllowedList.h"
 
 #define TEST_ASSERT_TRUE(cond)  do { if (!(cond)) { printf("FAIL: %s:%d: %s\n", __FILE__, __LINE__, #cond); return 1; } } while(0)
@@ -145,6 +146,38 @@ static int test_codec_roundtrip()
     TEST_ASSERT_STR_EQ(mixed[1].mac, "aa:bb:cc:dd:ee:f0");
     TEST_ASSERT_STR_EQ(mixed[1].name, "a");
     TEST_ASSERT_TRUE(mixed[1].enabled);       // "b" is not "0"
+    return 0;
+}
+
+/**
+ * A name cannot break the blob it is stored in (stage 183a). '|' separates the
+ * fields and CR/LF separate the entries of this format, so a name carrying one
+ * used to cut itself short and swallow the field after it: the round trip below
+ * came back as the name `pc` and the Enable column gone. The rule now lives in
+ * core::storageFieldText(), shared with the static bindings and the local hosts.
+ */
+static int test_name_cannot_break_the_blob()
+{
+    vector<AllowedComputer> list{
+        entry("24:0A:C4:01:23:45", "  pc|with pipe  "),
+        entry("AA:BB:CC:DD:EE:FF", " two\nlines "),
+    };
+    const string text = DhcpAllowedList::serialize(list);
+    TEST_ASSERT_STR_EQ(text,
+                       "24:0a:c4:01:23:45|pc with pipe|1\n"
+                       "aa:bb:cc:dd:ee:ff|two lines|1");
+
+    auto back = DhcpAllowedList::parse(text);
+    TEST_ASSERT_EQ(back.size(), 2u);
+    TEST_ASSERT_STR_EQ(back[0].name, "pc with pipe");
+    TEST_ASSERT_STR_EQ(back[1].name, "two lines");
+    TEST_ASSERT_TRUE(back[0].enabled);     // the Enable column is still the third
+    TEST_ASSERT_TRUE(back[1].enabled);
+
+    // The shared rule itself, as the three lists use it.
+    TEST_ASSERT_STR_EQ(::dhcp::core::storageFieldText("  a|b\r\nc  "), "a b  c");
+    TEST_ASSERT_STR_EQ(::dhcp::core::storageFieldText("keep"), "keep");
+    TEST_ASSERT_STR_EQ(::dhcp::core::storageFieldText(""), "");
     return 0;
 }
 
@@ -417,6 +450,7 @@ void app_main()
 
     failures += test_mac_codec();
     failures += test_codec_roundtrip();
+    failures += test_name_cannot_break_the_blob();
     failures += test_codec_enable_flag();
     failures += test_codec_limits();
     failures += test_blob_budget_matches_the_format();

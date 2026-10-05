@@ -144,6 +144,27 @@
             return { item, name, state, cancel, track, fill, detail, repeat, progress, elapsed };
         }
 
+        /* Progress reads in the unit the operation itself reports (stage 178).
+           The page used to append "B" to everything and printed "4 B / 50 B" for
+           a cache sweep that had refreshed 4 of its 50 records — a wrong unit is
+           worse than none, so a job that claims no unit shows no number, and one
+           that has neither counted nor promised anything shows none either. */
+        function jobsProgressText(job) {
+            const unit = job.unit || 'none';
+            if (job.done === 0 && job.total === 0) return '';
+            if (unit === 'records') {
+                return job.total > 0
+                    ? job.done + ' / ' + job.total + ' ' + tr('jobs.unit_records')
+                    : '';
+            }
+            if (unit === 'bytes') {
+                return job.total > 0
+                    ? formatBytes(job.done) + ' / ' + formatBytes(job.total) + ' · ' + job.percent + '%'
+                    : formatBytes(job.done);
+            }
+            return '';
+        }
+
         function jobsUpdateRow(row, job) {
             /* Name = dictionary title + what it works on ("Volume check — sd"). */
             const title = job.arg ? tr(job.title_key) + ' — ' + job.arg : tr(job.title_key);
@@ -153,7 +174,14 @@
             }
 
             const stateId = jobsStateId(job.state);
+            /* A pause whose length the operation knows counts down in the badge
+               itself (stage 181): "pause, 60 s" instead of a frozen "running" row
+               while the cache sweep waits between two blocks. A pause without a
+               length — an upload waiting for the operator — keeps the bare word. */
+            const pauseSec = Number(job.pause_sec) || 0;
             const badge = tr('jobs.state_' + stateId) +
+                (stateId === 'paused' && pauseSec > 0
+                    ? ' ' + pauseSec + ' ' + tr('jobs.unit_seconds') : '') +
                 (job.cancel_requested && stateId === 'running' ? ' · ' + tr('jobs.stopping') : '');
             if (row.state.textContent !== badge) row.state.textContent = badge;
             row.state.className = 'jobs-state jobs-state-' + stateId;
@@ -181,12 +209,14 @@
             row.fill.style.width = unknown
                 ? '' : Math.max(0, Math.min(100, job.percent)) + '%';
 
-            const progress = unknown
-                ? formatBytes(job.done)
-                : formatBytes(job.done) + ' / ' + formatBytes(job.total) + ' · ' + job.percent + '%';
+            const progress = jobsProgressText(job);
             if (row.progress.textContent !== progress) row.progress.textContent = progress;
-            row.progress.title = job.total > 0
-                ? job.done + ' / ' + job.total + ' B' : job.done + ' B';
+            row.progress.style.display = progress ? '' : 'none';
+            // The tooltip kept the exact byte numbers; it does so only where the
+            // job really counts bytes, and never invents a unit (stage 178).
+            const progressTip = job.unit === 'bytes' && job.total > 0
+                ? job.done + ' / ' + job.total + ' B' : progress;
+            if (row.progress.title !== progressTip) row.progress.title = progressTip;
 
             if (row.detail.textContent !== job.detail) row.detail.textContent = job.detail || '';
             row.detail.style.display = job.detail ? '' : 'none';

@@ -66,6 +66,23 @@ public:
      */
     static std::string escape(const std::string& in);
 
+    /**
+     * @brief The reading half of @ref escape — what a value really holds.
+     *
+     * The REST layer reads string values out of request bodies with a small
+     * scanner, and without this half a name carrying a quote came back cut in
+     * two at the escape (`a\"b` read as `a\`) while the same name left the
+     * device escaped in the settings export. The two halves belong together:
+     * one rule about how a string sits between JSON quotes.
+     *
+     * `\n`, `\r`, `\t`, `\b` and `\f` are decoded, and `\"`, `\\` and `\/` stand
+     * for themselves. Any other escape keeps the character it names — including
+     * `\uXXXX`, which this writer never produces (it passes UTF-8 through), so
+     * such a sequence is read as the character `u` and its four digits rather
+     * than decoded into a guessed one.
+     */
+    static std::string unescape(const std::string& in);
+
 private:
     /** @brief Add the separating comma, unless this is the first member. */
     void separate();

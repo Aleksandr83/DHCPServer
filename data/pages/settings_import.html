@@ -63,6 +63,28 @@
             }
             if (r.file_newer) lines.push(tr('settings_import.file_newer'));
             if (r.reboot_required) lines.push(tr('settings_import.reboot_required'));
+            // What actually landed: the answer carries a flag per section, so the
+            // operator sees the restore instead of trusting one word "ok". The
+            // names are the sections of a settings file, spelled out — the menu
+            // entries of the sub-pages collide (three of them are "General").
+            if (r.imported) {
+                const applied = [
+                    ['settings_import.sec_dhcp', r.imported.dhcp],
+                    ['settings_import.sec_static_bindings', r.imported.static_bindings],
+                    ['settings_import.sec_allowed', r.imported.allowed_computers],
+                    ['settings_import.sec_dns', r.imported.dns],
+                    ['settings_import.sec_time', r.imported.time],
+                    ['settings_import.sec_local_hosts', r.imported.local_hosts],
+                    ['settings_import.sec_security', r.imported.security],
+                    ['settings_import.sec_files', r.imported.files],
+                ].filter(pair => pair[1]).map(pair => tr(pair[0]));
+                if (applied.length) {
+                    lines.push(tr('settings_import.applied') + ' ' + applied.join(', '));
+                }
+            }
+            if (Array.isArray(r.warnings) && r.warnings.length) {
+                lines.push(tr('settings_import.warnings') + ' ' + r.warnings.join('; '));
+            }
             if (Array.isArray(r.skipped_fields) && r.skipped_fields.length) {
                 lines.push(tr('settings_import.skipped') + ' ' + r.skipped_fields.join(', '));
             }

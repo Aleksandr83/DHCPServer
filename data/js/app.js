@@ -130,29 +130,44 @@ function tr(key) {
     return val !== null && val !== undefined ? val : key;
 }
 
-/* ─── DNS partial-save helper ────────────────────────
-   The DNS settings are ONE object on the server, but the DNS section is split
-   into several sub-pages, each owning a subset of the fields. Saving must send
-   the FULL object (the backend replaces it), so fetch the current persisted
-   settings and override with the page-owned fields. */
+/* ─── Partial save of a settings page ────────────────
+   The settings of a section are ONE object on the server, and each sub-page owns
+   a subset of its fields: saving sends the FULL object (the backend replaces it),
+   so the current persisted settings are fetched first and then overridden with the
+   fields this page owns.
+
+   A request that never arrives used to leave the page half-changed. `fetchJSON`
+   and `postJSON` did not catch anything, so the rejected promise aborted the
+   caller between "the switch moved" and "the page is put back in step" — put the
+   switch back, rebuild the block, tell the operator — and the page went on
+   disagreeing with the device in silence (the operator met it live: the device
+   was restarted while he pressed Ignore TTL, the switch moved, the Auto Update
+   block stayed on screen and nothing was said). Every caller already handles an
+   answer with `status: 'error'`, so an unreachable device answers with one. */
+async function savePartial(url, localFields) {
+    try {
+        const server = await fetchJSON(url);
+        return await postJSON(url, { ...server, ...localFields });
+    } catch (e) {
+        return { status: 'error', message: tr('common.save_failed') };
+    }
+}
+
 async function saveDnsPartial(localFields) {
-    const server = await fetchJSON('/api/dns/settings');
-    return postJSON('/api/dns/settings', { ...server, ...localFields });
+    return savePartial('/api/dns/settings', localFields);
 }
 
 /* Same helper for the DHCP settings — one object on the server, but the DHCP
    section is split into sub-pages, each owning a subset of the fields. */
 async function saveDhcpPartial(localFields) {
-    const server = await fetchJSON('/api/dhcp/settings');
-    return postJSON('/api/dhcp/settings', { ...server, ...localFields });
+    return savePartial('/api/dhcp/settings', localFields);
 }
 
 /* Same helper for the Time (NTP) settings — one object on the server, but the
    Time section is split into two sub-pages (General / Logging), each owning a
    subset of the fields. */
 async function saveTimePartial(localFields) {
-    const server = await fetchJSON('/api/time/settings');
-    return postJSON('/api/time/settings', { ...server, ...localFields });
+    return savePartial('/api/time/settings', localFields);
 }
 
 /* Run a "Test connection" for a DNS/DHCP REST block. The test runs ENTIRELY on

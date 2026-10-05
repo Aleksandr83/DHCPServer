@@ -67,6 +67,67 @@ constexpr uint16_t autoUpdateClampPause(int32_t value)
     return static_cast<uint16_t>(value);
 }
 
+/// @brief Whether the auto-update countdown must restart from a whole period.
+///
+/// The timer re-arms on a fresh enable and on a changed period, but not when the
+/// same settings are applied again: every DNS settings save reaches the timer
+/// through the same call, and throwing the remaining time away on an unrelated
+/// save made the page reset "Next update in" for no reason (stage 176).
+constexpr bool autoUpdateReArmNeeded(bool wasEnabled, uint32_t oldPeriodSec,
+                                     uint32_t newPeriodSec)
+{
+    return !wasEnabled || oldPeriodSec != newPeriodSec;
+}
+
+/// @brief Why a sweep asked for by the operator cannot be served (stage 177).
+enum class AutoUpdateRunNowRefusal {
+    None = 0,       ///< the sweep may start
+    NotEnabled,     ///< Auto Update is switched off: no task to ask
+    IgnoreTtlOff,   ///< Ignore TTL is off: the records expire on their own
+    Unavailable,    ///< the cache is not there (no PSRAM arena)
+    AlreadyRunning, ///< a cycle is in progress right now
+};
+
+/// @brief Whether one sweep may be started right away, and if not, why.
+///
+/// The reasons mirror the guards the cycle itself follows — `runCycle()` returns
+/// at once without them — so the button refuses in words instead of promising a
+/// sweep that would walk nothing. The order is the order of the switches the
+/// operator sees: the feature, then Ignore TTL, then the cache, and a second
+/// request while a cycle runs is refused rather than queued, because that second
+/// cycle would ask the upstream for the same records all over again.
+constexpr AutoUpdateRunNowRefusal autoUpdateRunNowRefusal(bool enabled, bool ignoreTtl,
+                                                          bool cacheAvailable, bool running)
+{
+    if (!enabled) return AutoUpdateRunNowRefusal::NotEnabled;
+    if (!ignoreTtl) return AutoUpdateRunNowRefusal::IgnoreTtlOff;
+    if (!cacheAvailable) return AutoUpdateRunNowRefusal::Unavailable;
+    if (running) return AutoUpdateRunNowRefusal::AlreadyRunning;
+    return AutoUpdateRunNowRefusal::None;
+}
+
+/// @brief How many blocks one full sweep of @p records needs, at @p batch each.
+///
+/// A sweep walks the **whole** cache — that is what the operator expects from one
+/// "update" — and the configured period counts between sweeps, not between blocks
+/// (stage 180). A cache with nothing in it, or a batch of none, needs no block.
+constexpr uint32_t autoUpdateBlockCount(uint32_t records, uint16_t batch)
+{
+    if (records == 0 || batch == 0) return 0;
+    // Round up: a last, partly filled block still has records to walk.
+    return (records + batch - 1) / batch;
+}
+
+/// @brief True when a pause follows this block.
+///
+/// The pause sits **between** blocks, so the last one of a sweep must not send the
+/// task to sleep for the whole pause — the countdown is re-armed right after the
+/// sweep, and a sleeping sweep is a countdown that has not started yet.
+constexpr bool autoUpdatePauseAfterBlock(uint32_t blockIndex, uint32_t blockCount)
+{
+    return blockIndex + 1 < blockCount;
+}
+
 } // namespace core
 } // namespace dhcp
 

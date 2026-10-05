@@ -274,7 +274,8 @@ bool DnsServer::startPersistJob(bool save, bool force)
     // written in full or not published at all.
     ::dhcp::core::JobRegistry::instance().begin(
         save ? "cache_save" : "cache_load",
-        save ? "jobs.cache_save" : "jobs.cache_load", "");
+        save ? "jobs.cache_save" : "jobs.cache_load", "",
+        0, ::dhcp::core::JobUnit::Records);
     return true;
 }
 
@@ -712,14 +713,11 @@ void DnsServer::applyCacheAutoUpdate(bool enabled, core::AutosavePeriod unit,
                                      uint16_t interval, uint16_t batch,
                                      uint16_t pauseSec)
 {
-    // Stopping the cycle on the scheduler page switches auto-update off for
-    // good, and that has to survive a reboot — the same rule as the autosave.
-    cacheAutoUpdate_.setDisabledHandler([] {
-        auto cfg = core::Config::instance().getDns();
-        cfg.cacheInternalAutoUpdate = false;
-        core::Config::instance().setDns(cfg);
-        ESP_LOGI(TAG, "auto-update stopped and switched off in the settings");
-    });
+    // No disabled handler here, unlike the autosave (stage 184): stopping the
+    // sweep from the scheduler page must not change a saved setting — the
+    // operator ends an operation there, and the switch on the page is the place
+    // to change the setting. The autosave keeps its own rule: its write cannot be
+    // aborted, so its stop means "no more automatic saves".
     // The refresh itself: this server owns the upstream address and the parser.
     cacheAutoUpdate_.setRefreshHandler(
         [this](const string& name, uint16_t qtype, vector<string>& ips,

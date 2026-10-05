@@ -146,6 +146,13 @@ public:
     }
 
     /**
+     * @brief Ask the auto-update for one sweep right away (stage 177).
+     *
+     * @return false when the feature is off — there is no task to ask then.
+     */
+    bool requestCacheAutoUpdateNow() { return cacheAutoUpdate_.requestNow(); }
+
+    /**
      * @brief Built-in cache statistics + per-query counters (main page).
      */
     InternalDnsCache::Stats internalCacheStats() { return internalCache_.stats(); }

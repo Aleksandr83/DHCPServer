@@ -1,5 +1,6 @@
 #include "Config.h"
 #include "core/AutoUpdatePlan.h"
+#include "core/StorageText.h"
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -362,7 +363,10 @@ bool Config::setStaticBindings(const vector<StaticBinding>& bindings)
     string text;
     for (const auto& b : bindings) {
         if (!text.empty()) text += '\n';
-        text += b.mac + '|' + b.ip + '|' + b.name + '|' + b.gateway + '|' +
+        // Sanitized field by field for the same reason as the local hosts: a
+        // name with a '|' moved the gateway and the three flags of that entry.
+        text += storageFieldText(b.mac) + '|' + storageFieldText(b.ip) + '|' +
+                storageFieldText(b.name) + '|' + storageFieldText(b.gateway) + '|' +
                 (b.useGateway ? "1" : "0") + '|' + (b.enabled ? "1" : "0") + '|' +
                 (b.useDns ? "1" : "0");
     }
@@ -571,7 +575,11 @@ bool Config::setLocalHosts(const vector<LocalHostEntry>& hosts)
     string text;
     for (const auto& h : hosts) {
         if (!text.empty()) text += '\n';
-        text += h.name + '|' + h.ip4 + '|' + h.ip6 + '|' + (h.enabled ? "1" : "0");
+        // Every field goes through storageFieldText(): '|' and CR/LF are the
+        // separators of this blob, and a value carrying one would shift every
+        // field after it on the next read (core/StorageText.h).
+        text += storageFieldText(h.name) + '|' + storageFieldText(h.ip4) + '|' +
+                storageFieldText(h.ip6) + '|' + (h.enabled ? "1" : "0");
     }
     if (text.size() > kMaxLocalHostsBytes) {
         ESP_LOGE(TAG, "Local hosts too large: %zu > %zu",

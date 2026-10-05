@@ -178,6 +178,42 @@ int test_writer_literal()
     return 0;
 }
 
+/**
+ * The reading half of escaping (stage 183a). The settings export is written with
+ * `escape()` and read back with `unescape()`, so the two must be one round trip:
+ * a name that leaves the device escaped has to come back exactly as it was typed
+ * — the reader used to stop at the first `"` of the body and return `a\` for a
+ * name holding a quote.
+ */
+int test_writer_unescape()
+{
+    const string typed = "quote\" back\\ nl\n tab\t cr\r and.txt";
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape(JsonWriter::escape(typed)), typed);
+
+    // Cyrillic travels as raw UTF-8: escaping neither encodes nor mangles it.
+    const string cyrillic = "\xd0\xa4\xd0\xb0\xd0\xb9\xd0\xbb \xc2\xab\"x\"\xc2\xbb.txt";
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape(JsonWriter::escape(cyrillic)), cyrillic);
+
+    // A control character the writer drops cannot come back — by design.
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape(JsonWriter::escape(string("x") + '\x01' + "y")),
+                       "xy");
+
+    // What a file written by hand can hold.
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("plain"), "plain");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\\"b"), "a\"b");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\\\b"), "a\\b");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\/b"), "a/b");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("t\\tnl\\nr\\rb\\bf\\f"), "t\tnl\nr\rb\bf\f");
+    // An escape this reader does not know names its character; `\uXXXX` is not
+    // decoded (this writer never produces one) and keeps its digits as text.
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\qb"), "aqb");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\u0041b"), "au0041b");
+    // A backslash at the very end is a character, not a half-written escape.
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape("a\\"), "a\\");
+    TEST_ASSERT_STR_EQ(JsonWriter::unescape(""), "");
+    return 0;
+}
+
 // ─────────────────────────────────────────────────────
 // FileJson
 // ─────────────────────────────────────────────────────
@@ -521,9 +557,34 @@ int test_jobs_payload()
     TEST_ASSERT_STR_EQ(one,
         "{\"jobs\":[{\"id\":\"file_check\",\"title_key\":\"jobs.file_check\","
         "\"arg\":\"sd\",\"state\":\"running\",\"done\":30,\"total\":100,"
-        "\"percent\":30,\"detail\":\"/logs/2026.txt\",\"elapsed_ms\":12345,"
-        "\"cancel_requested\":false,\"repeat_sec\":0}]}");
+        "\"unit\":\"none\",\"percent\":30,\"detail\":\"/logs/2026.txt\","
+        "\"elapsed_ms\":12345,"
+        "\"cancel_requested\":false,\"repeat_sec\":0,\"pause_sec\":0}]}");
     ASSERT_WELL_FORMED(one);
+
+    // A cache job counts records, not bytes (stage 178): the page used to print
+    // "4 B / 50 B" for a sweep of 50 records.
+    ::dhcp::core::JobInfo sweep;
+    sweep.id = "cache_autoupdate";
+    sweep.titleKey = "jobs.cache_autoupdate";
+    sweep.done = 4;
+    sweep.total = 50;
+    sweep.unit = ::dhcp::core::JobUnit::Records;
+    string records = FileJson::jobs({check, sweep});
+    TEST_ASSERT_TRUE(records.find("\"unit\":\"records\"") != string::npos);
+    TEST_ASSERT_TRUE(records.find("\"unit\":\"none\"") != string::npos);
+    ASSERT_WELL_FORMED(records);
+
+    // A pause whose length is known travels as a number (stage 181): the scheduler
+    // counts it down in the state badge, so the sweep between two blocks is not a
+    // frozen "running" row any more.
+    ::dhcp::core::JobInfo pausing = sweep;
+    pausing.state = ::dhcp::core::JobState::Paused;
+    pausing.pauseSec = 42;
+    string countdown = FileJson::jobs({pausing});
+    TEST_ASSERT_TRUE(countdown.find("\"state\":\"paused\"") != string::npos);
+    TEST_ASSERT_TRUE(countdown.find("\"pause_sec\":42") != string::npos);
+    ASSERT_WELL_FORMED(countdown);
 
     // A paused upload: an unknown total gives `percent: -1` (indeterminate bar),
     // and a path that needs escaping travels escaped.
@@ -666,6 +727,7 @@ void app_main()
     failures += test_writer_escaping();
     failures += test_writer_drops_control_chars();
     failures += test_writer_literal();
+    failures += test_writer_unescape();
     failures += test_volumes_empty();
     failures += test_volumes_has_no_leading_comma();
     failures += test_volumes_two();

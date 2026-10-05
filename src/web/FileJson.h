@@ -144,8 +144,18 @@ public:
      * @brief Body of `GET /api/jobs` — the long-running operations of the device.
      *
      * `{"jobs":[{"id":…,"title_key":…,"arg":…,"state":…,"done":…,
-     * "total":…,"percent":…,"detail":…,"elapsed_ms":…,
-     * "cancel_requested":…,"repeat_sec":…}, …]}`
+     * "total":…,"unit":…,"percent":…,"detail":…,"elapsed_ms":…,
+     * "cancel_requested":…,"repeat_sec":…,"pause_sec":…}, …]}`
+     *
+     * `unit` (`none`/`bytes`/`records`, stage 178) says what `done`/`total`
+     * count: the page used to assume bytes and printed `4 B / 50 B` for a cache
+     * cycle that had refreshed 4 of its 50 records.
+     *
+     * `pause_sec` (stage 181) is the seconds left of a pause whose length the
+     * operation knows — the cache sweep waiting between two blocks announces it
+     * once a second, and the page draws the countdown in the state badge. It is
+     * `0` for an operation that is working and for one paused without a known
+     * length (an upload waiting for the operator to resume it).
      *
      * Every entry here is an operation that has not finished, so every one of
      * them can be asked to stop — there is no "cancellable" flag to look at.

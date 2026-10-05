@@ -24,6 +24,22 @@ enum class JobState {
 const char* jobStateText(JobState state);
 
 /**
+ * @brief What a job's `done`/`total` count (stage 178).
+ *
+ * The registry never knew, and the scheduler page assumed bytes: it printed
+ * "4 B / 50 B" for a cache auto-update cycle that had refreshed 4 of its 50
+ * records. A wrong unit is worse than no unit, so the operation states its own.
+ */
+enum class JobUnit {
+    None,     ///< Nothing to show: this operation has no progress of its own.
+    Bytes,    ///< Bytes read or copied (an upload, a transfer, a volume check).
+    Records,  ///< Records refreshed or saved (the cache jobs).
+};
+
+/// @brief Text id of a unit, as it travels in JSON ("none"/"bytes"/"records").
+const char* jobUnitText(JobUnit unit);
+
+/**
  * @brief One long-running operation, as the scheduler page and the API see it.
  *
  * `titleKey` is an i18n key (`jobs.file_check`) and `arg` what the operation
@@ -38,9 +54,12 @@ struct JobInfo {
     JobState state = JobState::Running;
     uint32_t done = 0;      ///< Progress; `total == 0` means "unknown".
     uint32_t total = 0;
+    JobUnit unit = JobUnit::None;   ///< What those two count (stage 178).
     uint32_t durationMs = 0;    ///< Running time so far (frozen once finished).
     bool cancelRequested = false;
     uint32_t repeatSec = 0;     ///< 0 = one-off: the record goes when it finishes.
+    uint32_t pauseSec = 0;      ///< Seconds left of a pause of known length, 0 when
+                                ///< the operation is not pausing (stage 181).
 
     /** @brief Percent for a bar, or -1 when the total is unknown. */
     int percent() const;
@@ -115,12 +134,16 @@ public:
      * @param[in] titleKey    i18n key of the name shown to the operator.
      * @param[in] arg         What it works on (volume id, file path), may be empty.
      * @param[in] total       Expected units of work (0 = unknown, no percentage).
+     * @param[in] unit        What `done`/`total` count (stage 178). The default is
+     *                        `None` on purpose: a caller that forgets to say shows
+     *                        nothing rather than a wrong unit — the page used to
+     *                        append "B" to record counts.
      * @param[in] repeatSec   Seconds until the next scheduled run (0 = one-off).
      * @return false when every slot is taken by a running operation.
      */
     bool begin(const std::string& id, const std::string& titleKey,
                const std::string& arg = "", uint32_t total = 0,
-               uint32_t repeatSec = 0);
+               JobUnit unit = JobUnit::None, uint32_t repeatSec = 0);
 
     /**
      * @brief Update progress of a running operation.
@@ -131,8 +154,21 @@ public:
     void progress(const std::string& id, uint32_t done, uint32_t total = 0,
                   const std::string& detail = "");
 
-    /** @brief Mark the operation as waiting for the operator to continue it. */
-    void pause(const std::string& id, const std::string& detail = "");
+    /**
+     * @brief Mark the operation as waiting: for the operator, or for a pause of
+     *        its own.
+     *
+     * An operation that knows how long it waits (the DNS cache sweep between two
+     * blocks, stage 181) says so in `seconds`, and the scheduler page counts that
+     * number down in the state badge instead of leaving a frozen "running" row.
+     * Announcing the same pause again only moves the number, so the caller may
+     * repeat it once a second without flooding the log.
+     *
+     * @param[in] detail  Current step, may be empty.
+     * @param[in] seconds Seconds left of the pause (0 = unknown, until resumed).
+     */
+    void pause(const std::string& id, const std::string& detail = "",
+               uint32_t seconds = 0);
 
     /**
      * @brief End the operation.

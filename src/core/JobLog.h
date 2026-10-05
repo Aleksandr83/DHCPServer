@@ -44,6 +44,11 @@ namespace core {
  * Only the two ends are written, never progress: an operation reports its
  * percentage dozens of times, and a file that answered "what was going on" would
  * drown in it.
+ *
+ * One operation needed more than that — the cache auto-update, whose whole job is
+ * a list of records — so its per-record lines go to a **second file**
+ * (`logs/AutoUpdate.log`) written by this same task (stage 179). The journal is
+ * untouched: a reader of `Jobs.log` still sees two lines per operation.
  */
 class JobLog : public IJobObserver {
 public:
@@ -67,6 +72,26 @@ public:
     /** @brief Lines lost so far (queue full, target refused them, or no task). */
     uint32_t dropped() const;
 
+    /**
+     * @brief One detail line into `logs/AutoUpdate.log` (stage 179).
+     *
+     * The cache auto-update refreshes one record at a time, and the interesting
+     * part is **which** record and what came back — the journal deliberately
+     * holds only the two ends of an operation (stage 173), so those lines go to a
+     * file of their own. The guarantees are the journal's, and so is the writer:
+     * a queue the producer never blocks on, one low-priority task, the same 64 KB
+     * cap and one `.1` generation, and a FAT write that never stalls the refresh
+     * cycle because it happens in the log's task.
+     *
+     * @param tag  the operation the line belongs to (`cache_autoupdate`)
+     * @param text the line without the stamp (`example.com A refreshed (ttl 300 s)`)
+     * @return false when the line did not fit the queue or the file refused it.
+     */
+    bool autoUpdate(const char* tag, const std::string& text);
+
+    /** @brief The detail file the lines go to ("" before start()). */
+    const std::string& autoUpdateTarget() const;
+
 private:
     JobLog() = default;
     ~JobLog();
@@ -79,6 +104,11 @@ private:
     FreeRtosErrorQueue queue_;
     std::unique_ptr<FileErrorLogTarget> target_;
     std::unique_ptr<ErrorLogCore> core_;
+    /// The per-record detail log of the cache auto-update (stage 179): its own
+    /// queue and target, drained by the same task.
+    FreeRtosErrorQueue detailQueue_;
+    std::unique_ptr<FileErrorLogTarget> detailTarget_;
+    std::unique_ptr<ErrorLogCore> detailCore_;
     TaskHandle_t task_ = nullptr;
     /** Kept separately: before start() there is no core to count into. */
     uint32_t preStartDropped_ = 0;

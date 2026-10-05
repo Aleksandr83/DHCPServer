@@ -192,11 +192,18 @@ string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
     w.str("state", ::dhcp::core::jobStateText(job.state));
     w.num("done", static_cast<int64_t>(job.done));
     w.num("total", static_cast<int64_t>(job.total));
+    // What those two count (stage 178): the page draws the numbers with the
+    // operation's own unit instead of assuming bytes for everything.
+    w.str("unit", ::dhcp::core::jobUnitText(job.unit));
     w.num("percent", job.percent());
     w.str("detail", job.detail);
     w.num("elapsed_ms", static_cast<int64_t>(job.durationMs));
     w.boolean("cancel_requested", job.cancelRequested);
     w.num("repeat_sec", static_cast<int64_t>(job.repeatSec));
+    // Seconds left of a pause that knows its length (stage 181): the scheduler
+    // counts them down in the state badge — the cache sweep between two blocks
+    // used to sit there as a frozen "running" row for the whole pause.
+    w.num("pause_sec", static_cast<int64_t>(job.pauseSec));
     return w.toString();
 }
 

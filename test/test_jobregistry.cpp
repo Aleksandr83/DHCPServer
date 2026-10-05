@@ -28,7 +28,9 @@ using dhcp::core::IJobObserver;
 using dhcp::core::JobInfo;
 using dhcp::core::JobRegistry;
 using dhcp::core::JobState;
+using dhcp::core::JobUnit;
 using dhcp::core::jobStateText;
+using dhcp::core::jobUnitText;
 
 namespace {
 
@@ -68,6 +70,9 @@ static int test_begin_and_progress()
     TEST_ASSERT_EQ(list[0].state, JobState::Running);
     TEST_ASSERT_EQ(list[0].total, 100u);
     TEST_ASSERT_EQ(list[0].done, 0u);
+    // A caller that says nothing claims no unit: the page then shows no number
+    // rather than a wrong one (stage 178).
+    TEST_ASSERT_EQ(list[0].unit, JobUnit::None);
     TEST_ASSERT_EQ(list[0].percent(), 0);
 
     reg().progress("file_check", 30, 0, "/logs/dns.txt");
@@ -81,6 +86,18 @@ static int test_begin_and_progress()
     // Progress of an operation nobody announced changes nothing.
     reg().progress("nobody", 5, 10, "x");
     TEST_ASSERT_EQ(reg().snapshot().size(), 1u);
+
+    // The unit is the operation's own fact (stage 178): a cache job counts
+    // records, and the three texts are what travel in JSON.
+    TEST_ASSERT_STR_EQ(jobUnitText(JobUnit::None), "none");
+    TEST_ASSERT_STR_EQ(jobUnitText(JobUnit::Bytes), "bytes");
+    TEST_ASSERT_STR_EQ(jobUnitText(JobUnit::Records), "records");
+
+    reg().clear();
+    reg().begin("cache_save", "jobs.cache_save", "", 50, JobUnit::Records);
+    list = reg().snapshot();
+    TEST_ASSERT_EQ(list.size(), 1u);
+    TEST_ASSERT_EQ(list[0].unit, JobUnit::Records);
 
     reg().clear();
     return 0;
@@ -116,7 +133,8 @@ static int test_repeat_stays()
 {
     reg().clear();
 
-    TEST_ASSERT_TRUE(reg().begin("auto_check", "jobs.file_check", "sd", 10, 3600));
+    TEST_ASSERT_TRUE(reg().begin("auto_check", "jobs.file_check", "sd", 10,
+                                 JobUnit::None, 3600));
     reg().progress("auto_check", 10, 0, "");
     reg().finish("auto_check", JobState::Done);
 
@@ -147,6 +165,64 @@ static int test_pause_keeps_record()
 
     reg().finish("upload", JobState::Cancelled);
     TEST_ASSERT_EQ(reg().snapshot().size(), 0u);
+
+    reg().clear();
+    return 0;
+}
+
+/** A pause of known length counts down; work and the end of the operation clear
+    it (stage 181 — the scheduler draws those seconds instead of "running"). */
+static int test_pause_with_seconds()
+{
+    reg().clear();
+
+    reg().begin("cache_autoupdate", "jobs.cache_autoupdate", "", 2000, JobUnit::Records);
+    reg().progress("cache_autoupdate", 150, 0, "example.com");
+    TEST_ASSERT_EQ(reg().snapshot()[0].pauseSec, 0u);       // working, not pausing
+
+    // The sweep announces the pause between two blocks with its length.
+    reg().pause("cache_autoupdate", "", 60);
+    auto list = reg().snapshot();
+    TEST_ASSERT_EQ(list.size(), 1u);
+    TEST_ASSERT_EQ(list[0].state, JobState::Paused);
+    TEST_ASSERT_EQ(list[0].pauseSec, 60u);
+    TEST_ASSERT_STR_EQ(list[0].detail, "example.com");       // the step is kept
+
+    // Once a second it says the same thing again: only the number moves.
+    reg().pause("cache_autoupdate", "", 59);
+    list = reg().snapshot();
+    TEST_ASSERT_EQ(list[0].state, JobState::Paused);
+    TEST_ASSERT_EQ(list[0].pauseSec, 59u);
+    TEST_ASSERT_EQ(list[0].done, 150u);
+
+    // The first record of the next block is the end of the pause.
+    reg().progress("cache_autoupdate", 151, 0, "example.org");
+    list = reg().snapshot();
+    TEST_ASSERT_EQ(list[0].state, JobState::Running);
+    TEST_ASSERT_EQ(list[0].pauseSec, 0u);
+    TEST_ASSERT_STR_EQ(list[0].detail, "example.org");
+
+    // A pause nobody timed (an upload waiting for the operator) stays at zero.
+    reg().clear();
+    reg().begin("upload", "jobs.upload", "/a.bin", 100);
+    reg().pause("upload", "/a.bin");
+    list = reg().snapshot();
+    TEST_ASSERT_EQ(list[0].state, JobState::Paused);
+    TEST_ASSERT_EQ(list[0].pauseSec, 0u);
+
+    // Ending the operation drops the pause with it; a repeating record stays.
+    reg().pause("upload", "", 30);
+    TEST_ASSERT_EQ(reg().snapshot()[0].pauseSec, 30u);
+    reg().finish("upload", JobState::Cancelled);
+    TEST_ASSERT_EQ(reg().snapshot().size(), 0u);
+
+    reg().begin("auto", "jobs.cache_autoupdate", "", 10, JobUnit::None, 3600);
+    reg().pause("auto", "", 45);
+    reg().finish("auto", JobState::Done);
+    list = reg().snapshot();
+    TEST_ASSERT_EQ(list.size(), 1u);
+    TEST_ASSERT_EQ(list[0].state, JobState::Done);
+    TEST_ASSERT_EQ(list[0].pauseSec, 0u);
 
     reg().clear();
     return 0;
@@ -207,7 +283,7 @@ static int test_cancel_requests()
 
     // An operation that ended but stays in the list (it repeats) has nothing
     // left to stop, so the request is refused.
-    reg().begin("auto", "jobs.file_check", "sd", 10, 3600);
+    reg().begin("auto", "jobs.file_check", "sd", 10, JobUnit::None, 3600);
     reg().finish("auto", JobState::Done);
     TEST_ASSERT_TRUE(reg().contains("auto"));
     TEST_ASSERT_FALSE(reg().requestCancel("auto"));
@@ -316,6 +392,7 @@ extern "C" int app_main(void)
         { "finish removes a one-off", test_finish_removes_one_off },
         { "repeat stays", test_repeat_stays },
         { "pause keeps the record", test_pause_keeps_record },
+        { "pause with seconds", test_pause_with_seconds },
         { "single flight per id", test_single_flight_per_id },
         { "cancel requests", test_cancel_requests },
         { "capacity", test_capacity },

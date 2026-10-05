@@ -25,6 +25,16 @@ const char* jobStateText(JobState state)
     return "unknown";
 }
 
+const char* jobUnitText(JobUnit unit)
+{
+    switch (unit) {
+        case JobUnit::None:    return "none";
+        case JobUnit::Bytes:   return "bytes";
+        case JobUnit::Records: return "records";
+    }
+    return "none";
+}
+
 // Rule 39: job progress is reported as a percentage.
 constexpr int kPercentScale = 100;
 
@@ -78,7 +88,8 @@ void JobRegistry::setObserver(IJobObserver* observer)
 }
 
 bool JobRegistry::begin(const string& id, const string& titleKey,
-                        const string& arg, uint32_t total, uint32_t repeatSec)
+                        const string& arg, uint32_t total, JobUnit unit,
+                        uint32_t repeatSec)
 {
     if (id.empty()) return false;
 
@@ -104,6 +115,7 @@ bool JobRegistry::begin(const string& id, const string& titleKey,
         job.arg = arg;
         job.state = JobState::Running;
         job.total = total;
+        job.unit = unit;
         job.repeatSec = repeatSec;
         used_[slot] = true;
         started_[slot] = now();
@@ -128,6 +140,7 @@ void JobRegistry::progress(const string& id, uint32_t done, uint32_t total,
         if (!used_[i] || jobs_[i].id != id) continue;
         jobs_[i].state = JobState::Running;
         jobs_[i].done = done;
+        jobs_[i].pauseSec = 0;      // work resumed: the pause it was in is over
         if (total > 0) jobs_[i].total = total;
         if (!detail.empty()) jobs_[i].detail = detail;
         return;
@@ -137,15 +150,20 @@ void JobRegistry::progress(const string& id, uint32_t done, uint32_t total,
     // record here would invent a name and a start time, so it is ignored.
 }
 
-void JobRegistry::pause(const string& id, const string& detail)
+void JobRegistry::pause(const string& id, const string& detail, uint32_t seconds)
 {
     lock_guard<mutex> lock(mutex_);
 
     for (size_t i = 0; i < kMaxJobs; i++) {
         if (!used_[i] || jobs_[i].id != id) continue;
+        // A pause announced once a second (the cache sweep counts its own seconds
+        // down) is one event, not sixty: only the entry into the pause is logged.
+        if (jobs_[i].state != JobState::Paused) {
+            ESP_LOGI(TAG, "job paused: %s", id.c_str());
+        }
         jobs_[i].state = JobState::Paused;
+        jobs_[i].pauseSec = seconds;
         if (!detail.empty()) jobs_[i].detail = detail;
-        ESP_LOGI(TAG, "job paused: %s", id.c_str());
         return;
     }
 }
@@ -163,6 +181,7 @@ void JobRegistry::finish(const string& id, JobState state, const string& detail)
             if (!used_[i] || jobs_[i].id != id) continue;
 
             jobs_[i].state = state;
+            jobs_[i].pauseSec = 0;      // an ended operation is not pausing
             if (!detail.empty()) jobs_[i].detail = detail;
             if (jobs_[i].total > 0 && state == JobState::Done) {
                 jobs_[i].done = jobs_[i].total;

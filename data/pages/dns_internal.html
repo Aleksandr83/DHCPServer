@@ -77,6 +77,15 @@
                     <span data-i18n="dns_internal.autoupdate_next">Next update in</span>
                     <span id="dns-internal-autoupdate-next" class="test-conn-result"></span>
                 </div>
+                <!-- One cycle on demand (stage 177): the job the timer would run
+                     by itself, asked for now. A line of its own above Save, so the
+                     two buttons are never mistaken for each other. The button has
+                     no data-i18n on purpose: its label switches between two keys
+                     (idle and running) and is set from the script below. -->
+                <div id="dns-internal-autoupdate-now-row" style="margin-top:0.8rem; display:none;">
+                    <button class="btn" id="dns-internal-autoupdate-now"
+                            onclick="runInternalAutoupdateNow(this)">Update now</button>
+                </div>
                 <button class="btn btn-primary" id="dns-internal-autoupdate-save"
                         onclick="saveInternalAutoupdatePeriod(this)" data-i18n="dns_internal.autoupdate_save"
                         style="margin-top:0.8rem; display:none;">Save</button>
@@ -342,6 +351,7 @@
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
             }
+            return result;
         }
 
         // The unit and the number are only prepared here: the device is told
@@ -355,10 +365,15 @@
                 out.textContent = tr('dns_internal.saving');
                 out.className = 'test-conn-result test-conn-warn';
             }
-            await saveAutosavePeriod();
-            if (out) {
+            const result = await saveAutosavePeriod();
+            // "Saved" is a claim about the device, so it is only made when the
+            // device said so: a failed save keeps its own message (the dialog)
+            // and the line is not overwritten with a success (stage 185).
+            if (out && (!result || result.status !== 'error')) {
                 out.textContent = tr('dns_internal.saved');
                 out.className = 'test-conn-result test-conn-ok';
+            } else if (out) {
+                out.textContent = '';
             }
             if (btn) btn.disabled = false;
         }
@@ -422,6 +437,7 @@
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
             }
+            return result;
         }
 
         // The unit and the number are only prepared here: the device is told
@@ -435,7 +451,16 @@
                 out.textContent = tr('dns_internal.saving');
                 out.className = 'test-conn-result test-conn-warn';
             }
-            await saveAutoupdateSettings();
+            const result = await saveAutoupdateSettings();
+            if (result && result.status === 'error') {
+                // The dialog has already said why (saveAutoupdateSettings asks for
+                // it); "Saved" would be a lie, so the line is cleared instead —
+                // and the countdown is not refreshed, because nothing was saved
+                // (stage 185).
+                if (out) out.textContent = '';
+                if (btn) btn.disabled = false;
+                return;
+            }
             // Saving re-arms the timer on the device: show the new countdown at
             // once rather than up to a poll later.
             await refreshAutoupdateCountdown();
@@ -444,6 +469,32 @@
                 out.className = 'test-conn-result test-conn-ok';
             }
             if (btn) btn.disabled = false;
+        }
+
+        // One sweep on demand (stage 177). The device runs the very cycle the
+        // timer would, so nothing is decided here: the reply says whether it was
+        // accepted, and the state that follows is read back from the device (the
+        // countdown poll paints it within a second).
+        async function runInternalAutoupdateNow(btn) {
+            if (btn) btn.disabled = true;
+            try {
+                const res = await postJSON('/api/dns/internal-cache/autoupdate', {});
+                if (res.status === 'error') {
+                    await showDialog({ title: tr('common.error'),
+                                       hint: res.message || tr('common.unknown_error'),
+                                       hideCancel: true });
+                } else {
+                    // Accepted: the line above switches to "updating…" at once
+                    // rather than up to a poll later.
+                    autoupdateState.running = true;
+                }
+                await refreshAutoupdateCountdown();
+            } catch (e) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('common.unknown_error'),
+                                   hideCancel: true });
+                if (btn) btn.disabled = false;
+            }
         }
 
         // Auto Update needs Ignore TTL: without it a record expires on its own,
@@ -465,6 +516,8 @@
             if (pause) pause.style.display = on ? '' : 'none';
             const save = document.getElementById('dns-internal-autoupdate-save');
             if (save) save.style.display = on ? '' : 'none';
+            const nowRow = document.getElementById('dns-internal-autoupdate-now-row');
+            if (nowRow) nowRow.style.display = on ? '' : 'none';
             if (on) applyAutoupdateIntervalMax();
             // The countdown exists only while the sweep does.
             if (on) startAutoupdateCountdown(); else stopAutoupdateCountdown();
@@ -499,6 +552,19 @@
             // is not counting, so the line stays away.
             const show = on && (autoupdateState.counting || autoupdateState.running);
             row.style.display = show ? '' : 'none';
+            // The button is blocked while a cycle runs instead of letting the
+            // device refuse it: a refusal dialog is not an answer (stage 177).
+            // Its label switches between two keys, so it is set here rather than
+            // by data-i18n — and this runs on the one-second tick, so a language
+            // change is picked up without a reload.
+            const now = document.getElementById('dns-internal-autoupdate-now');
+            if (now) {
+                now.disabled = autoupdateState.running;
+                const label = autoupdateState.running
+                    ? tr('dns_internal.autoupdate_now_busy')
+                    : tr('dns_internal.autoupdate_now');
+                if (now.textContent !== label) now.textContent = label;
+            }
             if (!show) return;
             out.textContent = autoupdateState.running
                 ? tr('dns_internal.autoupdate_running')
@@ -556,17 +622,26 @@
         }
 
         // Save both period and batch together when the user presses Save or leaves the page.
+        // The answer travels back to the caller: this is the only save on the
+        // page whose result nobody used to look at, so a refused request left
+        // "Saved" on the screen (stage 185).
         async function saveAutoupdateSettings() {
             const unit = document.getElementById('dns-internal-autoupdate-unit');
             const field = document.getElementById('dns-internal-autoupdate-interval');
             const batch = document.getElementById('dns-internal-autoupdate-batch');
             const pause = document.getElementById('dns-internal-autoupdate-pause');
-            await saveDnsPartial({
+            const result = await saveDnsPartial({
                 cache_internal_autoupdate_period: Number(unit.value) || 0,
                 cache_internal_autoupdate_interval: Number(field.value) || 1,
                 cache_internal_autoupdate_batch: Number(batch.value) || 50,
                 cache_internal_autoupdate_pause: Number(pause.value) || 60,
             });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+            }
+            return result;
         }
 
         let persistPollTimer = null;

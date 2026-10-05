@@ -4,6 +4,7 @@
 #include "FileJson.h"
 #include "JsonWriter.h"
 #include "MultipartExtractor.h"
+#include "SettingsImportScan.h"
 #include "WebPrune.h"
 #include "../core/ErrorLog.h"
 #include "../core/Version.h"
@@ -254,7 +255,10 @@ void RestApi::addJsonString(string& json, const string& key,
                              const string& val, bool addComma)
 {
     if (addComma) json += ",";
-    json += "\"" + key + "\":\"" + val + "\"";
+    // Escaped, always: a name, a URL or a timezone is text the operator typed,
+    // and one quote in it used to make the whole settings export invalid JSON
+    // (the page then answered "nothing to export" to a 200 OK).
+    json += "\"" + key + "\":\"" + JsonWriter::escape(val) + "\"";
 }
 
 void RestApi::addJsonBool(string& json, const string& key,
@@ -322,9 +326,16 @@ static string jsonGetStr(const string& json, const string& key)
     while (pos < json.length() && json[pos] == ' ') pos++;
     if (pos >= json.length() || json[pos] != '"') return "";
     pos++;
-    auto end = json.find('"', pos);
-    if (end == string::npos) return "";
-    return json.substr(pos, end - pos);
+    // The closing quote is the first one that is not part of an escape: a value
+    // like `a\"b` holds a quote of its own (JsonWriter::unescape, its reading
+    // half, is what turns the escapes back into characters).
+    size_t end = pos;
+    while (end < json.size() && json[end] != '"') {
+        if (json[end] == '\\') end++;
+        end++;
+    }
+    if (end >= json.size()) return "";
+    return JsonWriter::unescape(json.substr(pos, end - pos));
 }
 
 static bool jsonGetBool(const string& json, const string& key, bool def)
@@ -409,6 +420,76 @@ static size_t jsonFindArrayEnd(const string& json, size_t open)
         else if (c == ']' && --depth == 0) return i;
     }
     return json.size();
+}
+
+// ─── Settings applied to a running server (stage 183b) ───────────────────────
+// One place per subsystem, called both by the settings POST and by the settings
+// import. The import used to store everything in NVS and apply almost nothing, so
+// a restored backup changed the flash and not the running device — the apply
+// calls lived only in the POST handlers, and half of them were never copied.
+
+/// @brief Logging, lease cap and allow-list policy of a stored DHCP config.
+static void applyDhcpSettingsLive(::dhcp::dhcp::IDhcpServer* dhcp,
+                                  const ::dhcp::core::DhcpConfig& cfg)
+{
+    if (!dhcp) return;
+    dhcp->setLogTerminal(cfg.logTerminal);
+    dhcp->setRestLogging(cfg.logRest, cfg.logUrl, cfg.logAuthEnabled,
+                         cfg.logAuthUser, cfg.logAuthPassword);
+    dhcp->applyLeaseLimit();
+    dhcp->reloadAllowedComputers();
+}
+
+/// @brief Every live DNS setting: logging, both caches, autosave and auto-update,
+///        the non-A/AAAA policy and the subnet filter.
+static void applyDnsSettingsLive(::dhcp::dns::DnsServer* dns,
+                                 ::dhcp::dhcp::IDhcpServer* dhcp,
+                                 const ::dhcp::core::DnsConfig& cfg)
+{
+    if (!dns) return;
+    dns->setLogTerminal(cfg.logTerminal);
+    dns->logger().setLogForwarded(cfg.logForwarded);
+    dns->logger().setLogLocal(cfg.logLocal);
+    dns->logger().setLogCache(cfg.logCache);
+    dns->logger().setLogRestSent(cfg.logRestSent);
+    dns->logger().setLogRest(cfg.logRest);
+    dns->logger().setLogUrl(cfg.logUrl);
+    dns->logger().setLogAuth(cfg.logAuthEnabled, cfg.logAuthUser, cfg.logAuthPassword);
+    dns->cache().setEnabled(cfg.cacheRest);
+    dns->cache().setReadEnabled(cfg.cacheRestRead);
+    dns->cache().setWriteEnabled(cfg.cacheRestWrite);
+    dns->cache().setUrl(cfg.cacheUrl);
+    dns->cache().setAuth(cfg.cacheAuthEnabled, cfg.cacheAuthUser, cfg.cacheAuthPassword);
+    dns->applyInternalCache(cfg.cacheInternal, cfg.cacheInternalSizeMb,
+                            cfg.cacheInternalIgnoreTtl);
+    dns->applyCacheAutosave(cfg.cacheInternalAutosave,
+                            cfg.cacheInternalAutosavePeriod,
+                            cfg.cacheInternalAutosaveInterval);
+    dns->applyCacheAutoUpdate(cfg.cacheInternalAutoUpdate,
+                              cfg.cacheInternalAutoUpdatePeriod,
+                              cfg.cacheInternalAutoUpdateInterval,
+                              cfg.cacheInternalAutoUpdateBatch,
+                              cfg.cacheInternalAutoUpdatePause);
+    dns->setBlockForwardNonAA(cfg.blockForwardNonAA);
+    dns->applySubnetFilter();
+    if (dhcp) dhcp->setDnsServerRunning(dns->isRunning());
+}
+
+/// @brief Name, interval, timezone, logging and the access filter of a stored
+///        time-server config. The sync task itself is the caller's business.
+static void applyTimeSettingsLive(::dhcp::time::TimeServer* time,
+                                  const ::dhcp::core::TimeConfig& cfg)
+{
+    if (!time) return;
+    time->setServerName(cfg.externalNtp);
+    time->setSyncIntervalSec(cfg.syncIntervalSec);
+    time->setUtcOffsetHours(cfg.utcOffsetHours);
+    time->setTimezoneName(cfg.timezone);
+    time->applyAccessFilter();
+    time->logger().setLogTerminal(cfg.logTerminal);
+    time->logger().setLogRest(cfg.logRest);
+    time->logger().setLogUrl(cfg.logUrl);
+    time->logger().setLogAuth(cfg.logAuthEnabled, cfg.logAuthUser, cfg.logAuthPassword);
 }
 
 esp_err_t RestApi::handleGetStatus(httpd_req* req)
@@ -673,17 +754,10 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
 
     ::dhcp::core::Config::instance().setDhcp(cfg);
 
-    // Apply enable/disable to running server
+    // Apply enable/disable to running server: the live half sits in one function
+    // that the settings import calls too (stage 183b).
+    applyDhcpSettingsLive(s_dhcp, cfg);
     if (s_dhcp) {
-        s_dhcp->setLogTerminal(cfg.logTerminal);
-        s_dhcp->setRestLogging(cfg.logRest, cfg.logUrl,
-                               cfg.logAuthEnabled, cfg.logAuthUser,
-                               cfg.logAuthPassword);
-        // Re-apply the lease/offer table cap (config was just stored).
-        s_dhcp->applyLeaseLimit();
-        // Re-apply the allow-only policy (the switch just changed).
-        s_dhcp->reloadAllowedComputers();
-
         if (cfg.enabled && !s_dhcp->isRunning()) {
             // Check WiFi before starting
             bool wifiOk = s_wifi && s_wifi->isConnected();
@@ -1187,41 +1261,10 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
             s_dns->stop();
             ESP_LOGI(TAG, "DNS server stopped via API");
         }
-        // Apply logging settings to the running server live
-        s_dns->setLogTerminal(cfg.logTerminal);
-        s_dns->logger().setLogForwarded(cfg.logForwarded);
-        s_dns->logger().setLogLocal(cfg.logLocal);
-        s_dns->logger().setLogCache(cfg.logCache);
-        s_dns->logger().setLogRestSent(cfg.logRestSent);
-        s_dns->logger().setLogRest(cfg.logRest);
-        s_dns->logger().setLogUrl(cfg.logUrl);
-        s_dns->logger().setLogAuth(cfg.logAuthEnabled,
-                                   cfg.logAuthUser, cfg.logAuthPassword);
-        s_dns->cache().setEnabled(cfg.cacheRest);
-        s_dns->cache().setReadEnabled(cfg.cacheRestRead);
-        s_dns->cache().setWriteEnabled(cfg.cacheRestWrite);
-        s_dns->cache().setUrl(cfg.cacheUrl);
-        s_dns->cache().setAuth(cfg.cacheAuthEnabled,
-                               cfg.cacheAuthUser, cfg.cacheAuthPassword);
-        // Built-in PSRAM cache — apply enable/size/ignore-ttl live.
-        s_dns->applyInternalCache(cfg.cacheInternal,
-                                  cfg.cacheInternalSizeMb,
-                                  cfg.cacheInternalIgnoreTtl);
-        // Stage 153: the automatic save of that cache, applied live too.
-        s_dns->applyCacheAutosave(cfg.cacheInternalAutosave,
-                                   cfg.cacheInternalAutosavePeriod,
-                                   cfg.cacheInternalAutosaveInterval);
-        // Stage 172: refresh those records from upstream on a timer, live too.
-        s_dns->applyCacheAutoUpdate(cfg.cacheInternalAutoUpdate,
-                                    cfg.cacheInternalAutoUpdatePeriod,
-                                    cfg.cacheInternalAutoUpdateInterval,
-                                    cfg.cacheInternalAutoUpdateBatch,
-                                    cfg.cacheInternalAutoUpdatePause);
-        // Block forwarding of non-A/AAAA queries — apply live.
-        s_dns->setBlockForwardNonAA(cfg.blockForwardNonAA);
-        s_dns->applySubnetFilter();
-        if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
     }
+    // Every live DNS setting in one call, shared with the settings import so the
+    // two cannot drift apart (stage 183b).
+    applyDnsSettingsLive(s_dns, s_dhcp, cfg);
     // Diagnostic: shows what the client actually sent for the external cache
     // (auth user only — the password is never logged). Helps confirm the
     // values arrive at the backend before NVS persistence.
@@ -1253,9 +1296,9 @@ esp_err_t RestApi::handleGetLocalHosts(httpd_req* req)
     string json = "{\"hosts\":[";
     for (size_t i = 0; i < hosts.size(); i++) {
         if (i > 0) json += ",";
-        json += "{\"name\":\"" + hosts[i].name + "\",";
-        json += "\"ip4\":\"" + hosts[i].ip4 + "\",";
-        json += "\"ip6\":\"" + hosts[i].ip6 + "\",";
+        json += "{\"name\":\"" + JsonWriter::escape(hosts[i].name) + "\",";
+        json += "\"ip4\":\"" + JsonWriter::escape(hosts[i].ip4) + "\",";
+        json += "\"ip6\":\"" + JsonWriter::escape(hosts[i].ip6) + "\",";
         json += string("\"enabled\":") + (hosts[i].enabled ? "true" : "false") + "}";
     }
     json += "]}";
@@ -1872,10 +1915,13 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     json += ",\"static_bindings\":[";
     for (size_t i = 0; i < bindings.size(); i++) {
         if (i > 0) json += ",";
-        json += "{\"mac\":\"" + bindings[i].mac + "\",";
-        json += "\"ip\":\"" + bindings[i].ip + "\",";
-        json += "\"name\":\"" + bindings[i].name + "\",";
-        json += "\"gateway\":\"" + bindings[i].gateway + "\",";
+        // Every value is escaped: these three arrays are built by hand rather
+        // than through addJsonString(), and an unescaped quote in a name made a
+        // file no JSON reader (not even our own import) could read back.
+        json += "{\"mac\":\"" + JsonWriter::escape(bindings[i].mac) + "\",";
+        json += "\"ip\":\"" + JsonWriter::escape(bindings[i].ip) + "\",";
+        json += "\"name\":\"" + JsonWriter::escape(bindings[i].name) + "\",";
+        json += "\"gateway\":\"" + JsonWriter::escape(bindings[i].gateway) + "\",";
         json += string("\"use_gateway\":") +
                 (bindings[i].useGateway ? "true" : "false") + ",";
         json += string("\"enabled\":") +
@@ -1889,8 +1935,8 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     json += ",\"allowed_computers\":[";
     for (size_t i = 0; i < allowed.size(); i++) {
         if (i > 0) json += ",";
-        json += "{\"mac\":\"" + allowed[i].mac + "\",";
-        json += "\"name\":\"" + allowed[i].name + "\",";
+        json += "{\"mac\":\"" + JsonWriter::escape(allowed[i].mac) + "\",";
+        json += "\"name\":\"" + JsonWriter::escape(allowed[i].name) + "\",";
         json += string("\"enabled\":") +
                 (allowed[i].enabled ? "true" : "false") + "}";
     }
@@ -1920,6 +1966,13 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonBool(json, "cache_internal_ignore_ttl", dns.cacheInternalIgnoreTtl, true);
     addJsonBool(json, "cache_internal_save_stats", dns.cacheInternalSaveStats, true);
     addJsonBool(json, "cache_internal_save_cache", dns.cacheInternalSaveCache, true);
+    // The autosave of that cache (stage 183b): it was missing from the backup
+    // altogether, so restoring never brought it back.
+    addJsonBool(json, "cache_internal_autosave", dns.cacheInternalAutosave, true);
+    addJsonInt(json, "cache_internal_autosave_period",
+               static_cast<int>(dns.cacheInternalAutosavePeriod), true);
+    addJsonInt(json, "cache_internal_autosave_interval",
+               static_cast<int>(dns.cacheInternalAutosaveInterval), true);
     addJsonBool(json, "cache_internal_autoupdate", dns.cacheInternalAutoUpdate, true);
     addJsonInt(json, "cache_internal_autoupdate_period",
                static_cast<int>(dns.cacheInternalAutoUpdatePeriod), true);
@@ -1959,9 +2012,9 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     json += ",\"local_hosts\":[";
     for (size_t i = 0; i < hosts.size(); i++) {
         if (i > 0) json += ",";
-        json += "{\"name\":\"" + hosts[i].name + "\",";
-        json += "\"ip4\":\"" + hosts[i].ip4 + "\",";
-        json += "\"ip6\":\"" + hosts[i].ip6 + "\",";
+        json += "{\"name\":\"" + JsonWriter::escape(hosts[i].name) + "\",";
+        json += "\"ip4\":\"" + JsonWriter::escape(hosts[i].ip4) + "\",";
+        json += "\"ip6\":\"" + JsonWriter::escape(hosts[i].ip6) + "\",";
         json += string("\"enabled\":") +
                 (hosts[i].enabled ? "true" : "false") + "}";
     }
@@ -1972,6 +2025,13 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "username", sec.username, false);
     addJsonInt(json, "max_attempts", sec.maxAttempts, true);
     addJsonInt(json, "lockout_period", sec.lockoutPeriodSec, true);
+    // The stored wish for HTTPS and the pair the interface would use (stage 183b).
+    // The certificate and its key are NOT exported: a private key is a secret,
+    // like a password, so a restored device has to be given its own pair.
+    addJsonBool(json, "https_enabled", sec.httpsEnabled, true);
+    addJsonString(json, "cert_storage",
+                  ::dhcp::security::certStorageName(sec.certStorage), true);
+    addJsonString(json, "cert_name", sec.certName, true);
     json += "}";
 
     // ── files section (file explorer access policy) ──
@@ -1994,11 +2054,80 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
 // POST /api/settings/import
 // ─────────────────────────────────────────────────────
 
+/// Keys of a settings document this firmware applies: the sections, their fields
+/// and the fields of the list entries (stage 183b replaced the chain of `key !=`
+/// comparisons with this table, so the report of "not imported" and the import
+/// itself cannot disagree). A new setting is named here, in the export and in the
+/// import — three places, which is why the table is one array.
+static const char* const kKnownSettingsKeys[] = {
+    // ── envelope ──
+    "format", "schema", "firmware_version",
+    // ── sections ──
+    "dhcp", "static_bindings", "allowed_computers", "dns", "time",
+    "local_hosts", "security", "files",
+    // ── dhcp ──
+    "enabled", "server_ip", "start_ip", "end_ip", "subnet", "gateway",
+    "lease_time", "max_lease_entries", "log_terminal", "log_rest", "log_url",
+    "log_auth", "log_auth_user", "dns_mode", "dns_address", "allow_only",
+    // ── entries of the two lists and of the allow-list ──
+    "mac", "ip", "name", "use_gateway", "use_dns", "ip4", "ip6",
+    // ── dns ──
+    "external_dns", "log_forwarded", "log_local", "log_cache", "log_rest_sent",
+    "cache_rest", "cache_rest_read", "cache_rest_write", "cache_url",
+    "cache_auth", "cache_auth_user", "cache_internal", "cache_internal_size_mb",
+    "cache_internal_ignore_ttl", "cache_internal_save_stats",
+    "cache_internal_save_cache", "cache_internal_autosave",
+    "cache_internal_autosave_period", "cache_internal_autosave_interval",
+    "cache_internal_autoupdate", "cache_internal_autoupdate_period",
+    "cache_internal_autoupdate_interval", "cache_internal_autoupdate_batch",
+    "cache_internal_autoupdate_pause", "block_forward_non_aa",
+    "allow_own_subnet",
+    // ── time ──
+    "sync_enabled", "external_ntp", "timezone", "utc_offset_hours",
+    "sync_interval_sec", "rate_limit_per_sec",
+    // ── security ──
+    "username", "max_attempts", "lockout_period", "https_enabled",
+    "cert_storage", "cert_name",
+};
+
+/// @brief `["key","key"]` of the keys this firmware does not know, or `""`.
+static string importSkippedFields(const string& body)
+{
+    vector<string> known;
+    for (const char* key : kKnownSettingsKeys) known.push_back(key);
+
+    const vector<string> unknown = unknownSettingsKeys(body, known);
+    string out;
+    for (const auto& key : unknown) {
+        if (!out.empty()) out += ",";
+        out += "\"" + JsonWriter::escape(key) + "\"";
+    }
+    return out;
+}
+
 esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 {
     if (!checkAuth(req)) return ESP_OK;
 
-    string body = readBody(req, 16384);
+    // The body is either read whole or refused (stage 183b). It used to be cut
+    // at 16 KB silently, which would have applied the sections up to the cut and
+    // left the operator believing the file arrived complete. The cap is far
+    // above anything `GET /api/settings/export` can produce: the three list
+    // blobs it carries are bounded by 512 + 1024 + 512 bytes.
+    constexpr int kMaxImportBodyBytes = 16384;
+    if (req->content_len > kMaxImportBodyBytes) {
+        char message[96];
+        snprintf(message, sizeof(message),
+                 "{\"status\":\"error\",\"message\":\"Settings file too large (%u bytes, limit %d)\"}",
+                 static_cast<unsigned>(req->content_len), kMaxImportBodyBytes);
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, message);
+        ESP_LOGW(TAG, "settings import refused: %u bytes", static_cast<unsigned>(req->content_len));
+        return ESP_OK;
+    }
+
+    string body = readBody(req, kMaxImportBodyBytes);
     if (body.empty()) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
         return ESP_OK;
@@ -2026,75 +2155,21 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
     }
 
-    // ─── 3. Collect unknown top-level keys (cannot be imported) ───
-    // We only know these section keys; anything else is reported as skipped.
-    string skipped;
-    const char* known[] = { "format", "schema", "firmware_version",
-                            "dhcp", "static_bindings", "allowed_computers",
-                            "dns", "time",
-                            "local_hosts", "security", "files" };
-    size_t pos = 0;
-    while ((pos = body.find('"', pos)) != string::npos) {
-        size_t keyStart = pos + 1;
-        size_t keyEnd = body.find('"', keyStart);
-        if (keyEnd == string::npos) break;
-        string key = body.substr(keyStart, keyEnd - keyStart);
-        // A key is a candidate object key if followed by ':' (not part of a
-        // nested value). Keys at top level are followed by ':' and are not
-        // within the known sections (we accept the whole file as flat scan).
-        size_t colon = keyEnd + 1;
-        while (colon < body.size() && body[colon] == ' ') colon++;
-        if (colon < body.size() && body[colon] == ':') {
-            bool isKnown = false;
-            for (const char* k : known) {
-                if (key == k) { isKnown = true; break; }
-            }
-            if (!isKnown && key != "enabled" && key != "server_ip" &&
-                key != "start_ip" && key != "end_ip" && key != "subnet" &&
-                key != "gateway" && key != "lease_time" &&
-                key != "max_lease_entries" &&
-                key != "allow_only" &&
-                key != "log_terminal" && key != "log_rest" &&
-                key != "log_url" && key != "log_auth" &&
-                key != "log_auth_user" && key != "dns_mode" &&
-                key != "dns_address" && key != "mac" && key != "ip" &&
-                key != "name" && key != "use_gateway" && key != "use_dns" &&
-                key != "external_dns" && key != "log_forwarded" &&
-                key != "log_local" && key != "log_cache" &&
-                key != "log_rest_sent" && key != "cache_rest" &&
-                key != "cache_rest_read" && key != "cache_rest_write" &&
-                key != "cache_url" && key != "cache_auth" &&
-                key != "cache_auth_user" && key != "cache_internal" &&
-                key != "cache_internal_size_mb" &&
-                key != "cache_internal_ignore_ttl" &&
-                key != "cache_internal_save_stats" &&
-                key != "cache_internal_save_cache" &&
-                key != "cache_internal_autoupdate" &&
-                key != "cache_internal_autoupdate_period" &&
-                key != "cache_internal_autoupdate_interval" &&
-                key != "cache_internal_autoupdate_batch" &&
-                key != "cache_internal_autoupdate_pause" &&
-                key != "block_forward_non_aa" &&
-                key != "allow_own_subnet" &&
-                key != "external_ntp" && key != "timezone" &&
-                key != "sync_enabled" &&
-                key != "utc_offset_hours" &&
-                key != "sync_interval_sec" &&
-                key != "rate_limit_per_sec" &&
-                key != "ip4" && key != "ip6" &&
-                key != "username" && key != "max_attempts" &&
-                key != "lockout_period") {
-                if (!skipped.empty()) skipped += ",";
-                skipped += "\"" + key + "\"";
-            }
-        }
-        pos = keyEnd + 1;
-    }
+    // ─── 3. Which keys this firmware does not know ───
+    // One table above, one scan in a pure header: the report of "not imported"
+    // and the import itself cannot disagree about what is recognized (stage
+    // 183b). The old inline version also treated a *value* holding a quote and a
+    // colon as a key, so an ordinary setting was reported as unknown.
+    const string skipped = importSkippedFields(body);
 
     // ─── 4. Import sections (recognized fields only; passwords never) ───
     bool importedDhcp = false, importedBind = false, importedDns = false;
     bool importedHosts = false, importedSec = false, importedTime = false;
-    bool importedAllowed = false;
+    bool importedAllowed = false, importedFiles = false;
+    // What the file asked for and the device could not do. The answer used to be
+    // a bare "ok" plus per-section flags, so a refused list read as a successful
+    // restore (stage 183b).
+    vector<string> warnings;
 
     auto& cfgMgr = ::dhcp::core::Config::instance();
     const auto oldDhcp = cfgMgr.getDhcp();  // to detect network-level changes
@@ -2133,23 +2208,29 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                     cur.maxLeaseEntries = static_cast<uint32_t>(maxEntries);
                 }
                 cfgMgr.setDhcp(cur);
+                applyDhcpSettingsLive(s_dhcp, cur);
                 importedDhcp = true;
             }
         }
     }
 
-    // Static bindings (array; we rebuild from recognized entries)
+    // Static bindings (array; we rebuild from recognized entries). The scan stops
+    // at the array's own ']' (stage 183b): the entries of `allowed_computers` and
+    // `local_hosts` carry the same "mac"/"name" keys, and the old unbounded scan
+    // only escaped reading them because they happen to have no "ip".
     {
         size_t s = body.find("\"static_bindings\"");
         if (s != string::npos) {
             size_t open = body.find('[', s);
             if (open != string::npos) {
+                const size_t end = jsonFindArrayEnd(body, open);
                 vector<::dhcp::core::StaticBinding> out;
                 size_t p = open;
-                while ((p = body.find("\"mac\"", p)) != string::npos &&
-                       p < body.size()) {
+                while (p < end) {
+                    p = body.find("\"mac\"", p);
+                    if (p == string::npos || p >= end) break;
                     ::dhcp::core::StaticBinding b;
-                    string seg = body.substr(p);
+                    string seg = body.substr(p, end - p);
                     b.mac = jsonGetStr(seg, "mac");
                     b.ip = jsonGetStr(seg, "ip");
                     b.name = jsonGetStr(seg, "name");
@@ -2157,12 +2238,17 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                     b.useGateway = jsonGetBool(seg, "use_gateway", true);
                     b.enabled = jsonGetBool(seg, "enabled", true);
                     b.useDns = jsonGetBool(seg, "use_dns", true);
-                    if (!b.mac.empty() && !b.ip.empty()) out.push_back(b);
                     p++;
+                    if (!b.mac.empty() && !b.ip.empty()) out.push_back(b);
                 }
-                cfgMgr.setStaticBindings(out);
-                if (s_dhcp) s_dhcp->reloadStaticBindings();
-                importedBind = true;
+                // The setter refuses a list over the NVS budget; the operator has
+                // to hear about that instead of reading "imported" (stage 183b).
+                if (!cfgMgr.setStaticBindings(out)) {
+                    warnings.push_back("static_bindings: too large for the NVS budget");
+                } else {
+                    if (s_dhcp) s_dhcp->reloadStaticBindings();
+                    importedBind = true;
+                }
             }
         }
     }
@@ -2200,8 +2286,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 if (text.size() > ::dhcp::core::Config::kMaxAllowedBytes) {
                     ESP_LOGW(TAG, "Import: allowed computers too large (%zu > %zu)",
                              text.size(), ::dhcp::core::Config::kMaxAllowedBytes);
+                    warnings.push_back(
+                        "allowed_computers: too large for the NVS budget");
+                } else if (!cfgMgr.setAllowedComputers(text)) {
+                    warnings.push_back(
+                        "allowed_computers: refused by the NVS budget");
                 } else {
-                    cfgMgr.setAllowedComputers(text);
+                    if (s_dhcp) s_dhcp->reloadAllowedComputers();
                     importedAllowed = true;
                 }
             }
@@ -2248,6 +2339,21 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.cacheInternalSaveCache =
                     jsonGetBool(seg, "cache_internal_save_cache",
                                 cur.cacheInternalSaveCache);
+                // The autosave of the internal cache (stage 183b): the export did
+                // not carry it, so a restore left the running device with the
+                // timer it happened to have.
+                cur.cacheInternalAutosave =
+                    jsonGetBool(seg, "cache_internal_autosave",
+                                cur.cacheInternalAutosave);
+                cur.cacheInternalAutosavePeriod = core::autosavePeriodFromIndex(
+                    static_cast<uint8_t>(jsonGetInt(
+                        seg, "cache_internal_autosave_period",
+                        static_cast<int>(cur.cacheInternalAutosavePeriod))));
+                cur.cacheInternalAutosaveInterval = core::autosaveClampInterval(
+                    cur.cacheInternalAutosavePeriod,
+                    static_cast<uint16_t>(jsonGetInt(
+                        seg, "cache_internal_autosave_interval",
+                        static_cast<int>(cur.cacheInternalAutosaveInterval))), 0);
                 cur.cacheInternalAutoUpdate =
                     jsonGetBool(seg, "cache_internal_autoupdate",
                                 cur.cacheInternalAutoUpdate);
@@ -2272,6 +2378,8 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.allowOwnSubnet =
                     jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
                 cfgMgr.setDns(cur);
+                // The live half is applied after the start/stop switch below,
+                // in the order POST /api/dns/settings uses it.
                 importedDns = true;
             }
         }
@@ -2316,46 +2424,59 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
                 cfgMgr.setTime(cur);
+                applyTimeSettingsLive(s_time, cur);
                 importedTime = true;
             }
         }
     }
 
-    // Local hosts
+    // Local hosts. The scan stops at the array's own ']' (stage 183b): the same
+    // unbounded scan as in `static_bindings`, and the allow-list entries carry
+    // "mac"/"name" too.
     {
         size_t s = body.find("\"local_hosts\"");
         if (s != string::npos) {
             size_t open = body.find('[', s);
             if (open != string::npos) {
+                const size_t end = jsonFindArrayEnd(body, open);
                 vector<::dhcp::core::LocalHostEntry> out;
                 size_t p = open;
-                while ((p = body.find("\"name\"", p)) != string::npos &&
-                       p < body.size()) {
+                while (p < end) {
+                    p = body.find("\"name\"", p);
+                    if (p == string::npos || p >= end) break;
                     ::dhcp::core::LocalHostEntry e;
-                    string seg = body.substr(p);
+                    string seg = body.substr(p, end - p);
                     e.name = jsonGetStr(seg, "name");
                     e.ip4 = jsonGetStr(seg, "ip4");
                     e.ip6 = jsonGetStr(seg, "ip6");
                     e.enabled = jsonGetBool(seg, "enabled", true);
-                    if (!e.name.empty() && (!e.ip4.empty() || !e.ip6.empty())) out.push_back(e);
                     p++;
+                    if (!e.name.empty() && (!e.ip4.empty() || !e.ip6.empty())) out.push_back(e);
                 }
-                cfgMgr.setLocalHosts(out);
-                if (s_dns) {
-                    s_dns->clearLocalHosts();
-                    for (const auto& h : out) {
-                        if (!h.enabled) continue;
-                        if (!h.ip4.empty()) s_dns->addLocalHost(h.name, h.ip4);
-                        if (!h.ip6.empty()) s_dns->addLocalHost(h.name, h.ip6);
+                // The setter refuses a list over the NVS budget (stage 183b).
+                if (!cfgMgr.setLocalHosts(out)) {
+                    warnings.push_back("local_hosts: too large for the NVS budget");
+                } else {
+                    if (s_dns) {
+                        s_dns->clearLocalHosts();
+                        for (const auto& h : out) {
+                            if (!h.enabled) continue;
+                            if (!h.ip4.empty()) s_dns->addLocalHost(h.name, h.ip4);
+                            if (!h.ip6.empty()) s_dns->addLocalHost(h.name, h.ip6);
+                        }
+                        s_dns->syncLoggerLocalHosts();
                     }
-                    s_dns->syncLoggerLocalHosts();
+                    importedHosts = true;
                 }
-                importedHosts = true;
             }
         }
     }
 
-    // Security (username + limits only; password never imported)
+    // Security (username + limits; password never imported). HTTPS and the volume
+    // of the pair ride in this section too (stage 183b): the old import dropped
+    // them, so restoring a backup left the TLS server exactly as it was. Both go
+    // through the switch the settings page uses; a refusal is a warning here —
+    // the remaining sections of the file are still worth importing.
     {
         size_t s = body.find("\"security\"");
         if (s != string::npos) {
@@ -2366,6 +2487,55 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 string v = jsonGetStr(seg, "username"); if (!v.empty()) cur.username = v;
                 cur.maxAttempts = jsonGetInt(seg, "max_attempts", cur.maxAttempts);
                 cur.lockoutPeriodSec = jsonGetInt(seg, "lockout_period", cur.lockoutPeriodSec);
+                v = jsonGetStr(seg, "cert_name");
+                if (!v.empty()) {
+                    // The NVS reader drops a name that is not a host name and
+                    // falls back to the default, so a bad one is refused here,
+                    // where the operator can be told (stage 183b).
+                    if (::dhcp::security::isValidHostName(v)) {
+                        cur.certName = v;
+                    } else {
+                        warnings.push_back("cert_name: not a valid host name");
+                    }
+                }
+
+                const bool httpsInFile =
+                    jsonGetBool(seg, "https_enabled", cur.httpsEnabled);
+                if (s_web != nullptr && httpsInFile != s_web->httpsEnabled()) {
+                    string reason;
+                    if (s_web->setHttpsEnabled(httpsInFile, &reason)) {
+                        cur.httpsEnabled = httpsInFile;
+                    } else {
+                        warnings.push_back("https_enabled: " + reason);
+                    }
+                } else {
+                    cur.httpsEnabled = httpsInFile;
+                }
+
+                const string storageInFile = jsonGetStr(seg, "cert_storage");
+                if (!storageInFile.empty()) {
+                    ::dhcp::security::CertStorage target = cur.certStorage;
+                    if (!::dhcp::security::certStorageFromName(storageInFile, target)) {
+                        warnings.push_back("cert_storage: unknown volume '" +
+                                           storageInFile + "'");
+                    } else if (target != cur.certStorage) {
+                        // The pair itself is not in the backup (a private key is a
+                        // secret), so the volume is moved only when the pair is
+                        // already waiting there — an empty volume would be a
+                        // certificate the device cannot serve.
+                        if (s_certs == nullptr) {
+                            warnings.push_back("cert_storage: no volume for the pair");
+                        } else if (!s_certs->pairPresentIn(target)) {
+                            warnings.push_back(
+                                string("cert_storage: no certificate on ") +
+                                ::dhcp::security::certStorageName(target));
+                        } else {
+                            s_certs->setStorage(target);
+                            cur.certStorage = target;
+                        }
+                    }
+                }
+
                 cfgMgr.setSecurity(cur);
                 if (s_auth) s_auth->reloadConfig();
                 importedSec = true;
@@ -2384,10 +2554,15 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
             cfgMgr.setFiles(cur);
             if (s_files) s_files->applyAccessFilter();
+            importedFiles = true;
         }
     }
 
-    // ─── 5. Re-apply to running servers (DHCP / DNS restart reads NVS) ───
+    // ─── 5. Start / stop the services (best effort) ───
+    // The live settings went in next to their `set…()` calls above, through the
+    // same helpers the settings POST handlers use. What is left here is the
+    // order those handlers keep: the DHCP half is applied before the switch, and
+    // the DNS half after it, because `DnsServer::start()` configures its cache.
     // A change to the network parameters requires a reboot — the static IP is
     // applied once at Ethernet init and cannot be re-applied on the fly.
     bool rebootRequired = false;
@@ -2398,14 +2573,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                           cur.gateway   != oldDhcp.gateway);
     }
 
-    // Restart DHCP if it should run; stop if disabled (best effort)
+    // Restart DHCP if it should run; stop if disabled
     if (s_dhcp) {
         auto c = cfgMgr.getDhcp();
         if (c.enabled) {
             if (!s_dhcp->isRunning()) s_dhcp->start();
-            s_dhcp->setLogTerminal(c.logTerminal);
-            s_dhcp->setRestLogging(c.logRest, c.logUrl,
-                                   c.logAuthEnabled, c.logAuthUser, c.logAuthPassword);
+            // A server that has just been started has read its lists from NVS;
+            // it has to be told the imported ones.
             s_dhcp->reloadStaticBindings();
             s_dhcp->reloadAllowedComputers();
         } else if (s_dhcp->isRunning()) {
@@ -2419,19 +2593,10 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         } else if (s_dns->isRunning()) {
             s_dns->stop();
         }
-        if (s_dhcp) s_dhcp->setDnsServerRunning(s_dns->isRunning());
+        applyDnsSettingsLive(s_dns, s_dhcp, c);
     }
     if (s_time) {
         auto c = cfgMgr.getTime();
-        s_time->setServerName(c.externalNtp);
-        s_time->setSyncIntervalSec(c.syncIntervalSec);
-        s_time->setUtcOffsetHours(c.utcOffsetHours);
-        s_time->setTimezoneName(c.timezone);
-        s_time->logger().setLogTerminal(c.logTerminal);
-        s_time->logger().setLogRest(c.logRest);
-        s_time->logger().setLogUrl(c.logUrl);
-        s_time->logger().setLogAuth(c.logAuthEnabled,
-                                    c.logAuthUser, c.logAuthPassword);
         if (c.syncEnabled) {
             if (!s_time->isSyncRunning()) s_time->startSync();
             else s_time->restartSync();
@@ -2461,18 +2626,28 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     addJsonBool(json, "time", importedTime, true);
     addJsonBool(json, "local_hosts", importedHosts, true);
     addJsonBool(json, "security", importedSec, true);
+    addJsonBool(json, "files", importedFiles, true);
     json += "}";
     if (!skipped.empty()) json += ",\"skipped_fields\":[" + skipped + "]";
+    // The sections the file asked for but the device could not do (stage 183b):
+    // without them a refused list read as a successful restore.
+    json += ",\"warnings\":[";
+    for (size_t i = 0; i < warnings.size(); i++) {
+        if (i > 0) json += ",";
+        json += "\"" + JsonWriter::escape(warnings[i]) + "\"";
+    }
+    json += "]";
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
-    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d",
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d%d warnings=%u",
              curVer.toString().c_str(), fileVerStr.c_str(),
              versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
              importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
              importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0,
-             importedAllowed ? 1 : 0);
+             importedAllowed ? 1 : 0, importedFiles ? 1 : 0,
+             static_cast<unsigned>(warnings.size()));
     return ESP_OK;
 }
 
@@ -3508,6 +3683,69 @@ esp_err_t RestApi::handleGetInternalCacheAutoUpdate(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// POST /api/dns/internal-cache/autoupdate
+// ─────────────────────────────────────────────────────
+// Starts ONE refresh cycle right away (stage 177) — the same work the timer does
+// by itself. The reply comes back before the cycle ends (the page watches
+// `running` in GET .../autoupdate and blocks the button meanwhile). Refused with
+// 409 when the feature is off, Ignore TTL is off, the cache is not there or a
+// cycle is already running: the reasons are the cycle's own guards
+// (core::autoUpdateRunNowRefusal), so the button never promises a sweep that
+// would walk nothing.
+
+esp_err_t RestApi::handlePostInternalCacheAutoUpdate(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    if (!s_dns) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"DNS server unavailable\"}");
+        return ESP_OK;
+    }
+
+    using Refusal = ::dhcp::core::AutoUpdateRunNowRefusal;
+    const ::dhcp::dns::CacheAutoUpdate::Status st = s_dns->cacheAutoUpdateStatus();
+    const Refusal refusal = ::dhcp::core::autoUpdateRunNowRefusal(
+        st.enabled, s_dns->internalCache().ignoreTtl(), s_dns->internalCache().available(),
+        st.running);
+
+    const char* message = nullptr;
+    switch (refusal) {
+    case Refusal::None:
+        break;
+    case Refusal::NotEnabled:
+        message = "Auto Update is off";
+        break;
+    case Refusal::IgnoreTtlOff:
+        message = "Ignore TTL is off";
+        break;
+    case Refusal::Unavailable:
+        message = "Internal cache is disabled";
+        break;
+    case Refusal::AlreadyRunning:
+        message = "A refresh cycle is already running";
+        break;
+    }
+    if (message != nullptr) {
+        httpd_resp_set_status(req, "409 Conflict");
+        string json = "{\"status\":\"error\",\"message\":\"";
+        json += message;          // our own text: no user data, nothing to escape
+        json += "\"}";
+        httpd_resp_sendstr(req, json.c_str());
+        return ESP_OK;
+    }
+
+    if (!s_dns->requestCacheAutoUpdateNow()) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Could not start the update\"}");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"started\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // POST /api/dns/internal-cache/save
 // ─────────────────────────────────────────────────────
 // Starts a BACKGROUND save of the built-in (PSRAM) DNS cache to
@@ -3746,17 +3984,8 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     // Apply to the running server (start/stop on enable change, update the
     // SNTP server/interval and the logger settings live).
     if (s_time) {
-        s_time->setServerName(cfg.externalNtp);
-        s_time->setSyncIntervalSec(cfg.syncIntervalSec);
-        s_time->setUtcOffsetHours(cfg.utcOffsetHours);
-        s_time->setTimezoneName(cfg.timezone);
-        // Own-subnet filter + per-client rate limit (subnet comes from DHCP).
-        s_time->applyAccessFilter();
-        s_time->logger().setLogTerminal(cfg.logTerminal);
-        s_time->logger().setLogRest(cfg.logRest);
-        s_time->logger().setLogUrl(cfg.logUrl);
-        s_time->logger().setLogAuth(cfg.logAuthEnabled,
-                                    cfg.logAuthUser, cfg.logAuthPassword);
+        // The live half is shared with the settings import (stage 183b).
+        applyTimeSettingsLive(s_time, cfg);
 
         // Clock sync (SNTP client) — independent of serving time.
         if (cfg.syncEnabled) {
@@ -4976,7 +5205,8 @@ void uploadTask(void* arg)
     // (see the read loop), exactly like the Files page's own button does.
     auto& jobs = ::dhcp::core::JobRegistry::instance();
     const string jobId = uploadJobId(path);
-    jobs.begin(jobId, "jobs.upload", path, static_cast<uint32_t>(range.total));
+    jobs.begin(jobId, "jobs.upload", path, static_cast<uint32_t>(range.total),
+               ::dhcp::core::JobUnit::Bytes);
     // A new request for this file replaces whatever was paused before (the
     // registry is single-flight per id), so the remembered pause goes with it.
     forgetPausedUpload(jobId);
