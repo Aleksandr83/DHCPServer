@@ -3,7 +3,7 @@ CONFIG_FW_VER_GLOBAL=1
 # CONFIG_FW_VER_DEVICE
 CONFIG_FW_VER_DEVICE=2
 # CONFIG_FW_VER_RELEASE
-CONFIG_FW_VER_RELEASE=55
+CONFIG_FW_VER_RELEASE=56
 # CONFIG_FW_VER_SUBRELEASE
 CONFIG_FW_VER_SUBRELEASE=0
 # CONFIG_FW_VER_YEAR
@@ -14,7 +14,7 @@ CONFIG_FW_VER_MONTH=9
 CONFIG_FW_VER_REGION="RU"
 # Minimal date/time the operator may set on the clock by hand (Kconfig string,
 # see the "Time server" menu). The version scripts keep it at the build date.
-CONFIG_FW_MIN_DATETIME="2026-10-05 06:00:00"
+CONFIG_FW_MIN_DATETIME="2026-10-12 23:00:00"
 
 # ESP-IDF defaults
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
@@ -25,6 +25,13 @@ CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
 CONFIG_ESP32_SPIRAM_SUPPORT=n
 CONFIG_LWIP_DHCP=y
 CONFIG_LWIP_DNS=y
+# The clock-sync client is given a short list of external NTP servers and has to
+# move to the next one when a server stops answering (stage 195). lwIP keeps that
+# failover only for the indices this limit covers, so a build that leaves it at
+# the default 1 asks one server and waits for ever if that node is dead - which
+# is exactly what happened here: the first address of `pool.ntp.org` answered
+# nothing and three healthy ones sat in the same DNS answer.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
 # More sockets for the web server: the UI polls /api/status periodically and
 # sockets pile up in TIME_WAIT; the default (10) gets exhausted ->
 # "httpd_accept_conn: error in accept (23)". 24 leaves headroom for httpd + DNS.

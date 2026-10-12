@@ -30,11 +30,19 @@ struct NtpPacket {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(NtpPacket) == 48, "NTP packet must be exactly 48 bytes");
+// The wire size of that packet, named so that a buffer is not a bare 48. It has
+// to be here, above the assertion that checks it.
+constexpr size_t kNtpPacketBytes = 48;
+
+static_assert(sizeof(NtpPacket) == kNtpPacketBytes, "NTP packet must be exactly 48 bytes");
 
 // ─── Constants ──────────────────────────────────────
 // Seconds between the NTP epoch (1900-01-01) and the Unix epoch (1970-01-01).
 constexpr uint32_t kNtpUnixOffset = 2208988800UL;
+
+// The port the protocol lives on: the same number for the client that asks and
+// for the server that answers (RFC 5905).
+constexpr uint16_t kNtpPort = 123;
 
 // NTP mode values (RFC 5905, section 7.3).
 constexpr uint8_t kNtpModeSymmetricActive = 1;
@@ -53,6 +61,7 @@ constexpr uint8_t kNtpShiftLeap    = 6;
 // a compliant client has to be able to see that the time is unusable.
 constexpr uint8_t  kNtpLeapNoWarning         = 0;   // LI = 0, the clock is fine
 constexpr uint8_t  kNtpLeapNotSynchronized   = 3;   // LI = 3, it is not
+constexpr uint8_t  kNtpStratumKissOfDeath    = 0;   // stratum 0: "do not ask me again"
 constexpr uint8_t  kNtpStratumUnsynchronized = 16;  // stratum 16 means "unsynced"
 constexpr int8_t   kNtpPrecisionUs           = -20; // ~1 us (log2 of the precision)
 constexpr uint32_t kNtpOneSecond16_16        = 0x00010000UL; // 1 s as 16.16

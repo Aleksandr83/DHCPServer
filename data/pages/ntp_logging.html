@@ -28,6 +28,14 @@
             </label>
         </div>
 
+        <div class="card toggle-row">
+            <span data-i18n="time_logging.log_file">Log to File</span>
+            <label class="toggle-switch">
+                <input type="checkbox" id="time-log-file" onchange="toggleTimeLogFile()">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>
+
         <div class="card">
             <label data-i18n="time_logging.log_url">Logging URL (REST)</label>
             <input type="text" id="time-log-url" placeholder="https://dhcpserverweb/api/v1/ntp/log">
@@ -72,6 +80,7 @@
             return {
                 log_terminal: document.getElementById('time-log-terminal').checked,
                 log_rest: document.getElementById('time-log-rest').checked,
+                log_file: document.getElementById('time-log-file').checked,
                 log_url: document.getElementById('time-log-url').value,
                 log_auth: document.getElementById('time-log-auth').checked,
                 log_auth_user: document.getElementById('time-log-auth-user').value,
@@ -83,6 +92,7 @@
             const data = await fetchJSON('/api/time/settings');
             document.getElementById('time-log-terminal').checked = data.log_terminal || false;
             document.getElementById('time-log-rest').checked = data.log_rest || false;
+            document.getElementById('time-log-file').checked = data.log_file || false;
             document.getElementById('time-log-url').value = data.log_url || '';
             document.getElementById('time-log-auth').checked = data.log_auth || false;
             document.getElementById('time-log-auth-user').value = data.log_auth_user || '';
@@ -120,6 +130,8 @@
         async function toggleTimeLogTerminal() { await toggleTimeField('log_terminal', 'time-log-terminal'); }
 
         async function toggleTimeLogRest() { await toggleTimeField('log_rest', 'time-log-rest'); }
+
+        async function toggleTimeLogFile() { await toggleTimeField('log_file', 'time-log-file'); }
 
         async function toggleTimeLogAuth() {
             const checked = document.getElementById('time-log-auth').checked;

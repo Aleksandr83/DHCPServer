@@ -881,6 +881,34 @@ th {
     overflow-x: auto;
 }
 
+/* The caption and the buttons of the text editor share one row: the file name
+   owns the free space, the buttons sit together on the right. They keep their own
+   margins as the spacing between them, so no gap is added here. */
+.files-editor-actions {
+    display: flex;
+    align-items: center;
+}
+
+/* The Reload button of the editor is an ordinary button whose label is an icon,
+   and the two buttons of this row have to be the same height: an icon button
+   that is shorter than the word button beside it reads as a different kind of
+   control (the operator saw exactly that). Equal heights come from construction
+   rather than from a number copied out of `.btn`: one line of content of the
+   same height whether that content is a word (`line-height: 1`) or the icon
+   (which is given the same height in the same units). */
+.files-editor-actions .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+.files-editor-actions .btn svg {
+    display: block;
+    width: 1em;
+    height: 1em;
+}
+
 /* Row action buttons in the listing stay compact */
 #files-tbody .btn {
     padding: 0.25rem 0.55rem;

@@ -165,6 +165,29 @@ public:
                                 const DhcpAllowedList& list,
                                 const std::vector<StaticRef>& bindings);
 
+    /**
+     * @brief The same policy for a client known only by its address (stage 196).
+     *
+     * An NTP request carries an address and nothing else, so the NTP server asks
+     * the DHCP side who owns that address (the lease table, or an enabled static
+     * binding that owns it) and hands the owner's MAC in here. @p haveOwner says
+     * whether there was one at all.
+     *
+     * What this function decides is the case the operator had to choose: an
+     * address with **no** owner - a client that configured its address by hand, a
+     * lease that has gone, or a stranger - is refused while the switch is on, so
+     * "only allowed computers" cannot be walked around by not asking DHCP for an
+     * address. With the switch off nothing is looked at, owner or not.
+     *
+     * @param allowOnly The switch on the page that uses this policy.
+     * @param haveOwner Whether the caller found an owner for the address; when
+     *                  false, @p mac is not read (it may be null).
+     * @param mac       The owner's MAC, in the canonical 6-byte form.
+     */
+    static bool isAddressAllowed(bool allowOnly, bool haveOwner, const uint8_t mac[6],
+                                 const DhcpAllowedList& list,
+                                 const std::vector<StaticRef>& bindings);
+
 private:
     struct Slot {
         uint8_t mac[6];

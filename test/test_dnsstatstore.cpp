@@ -367,6 +367,33 @@ static void test_remove_is_idempotent_enough_for_a_factory_reset()
     check(!DnsStatStore::remove(path), "deleting it twice reports the miss, does not crash");
 }
 
+// ── The size the page prints next to the statistics buttons (stage 188) ──
+//
+// The page shows the statistics file in bytes rather than kilobytes: the record
+// is 92 of them, and "0.1 KB" would be a rounding of the whole file. The number
+// is worth a check because it is also the second half of "is the file there" —
+// and the case that matters is the missing one, which must answer false instead
+// of a zero the page would print as an empty file.
+static void test_file_size_is_reported_for_the_page()
+{
+    printf("test_file_size_is_reported_for_the_page\n");
+    const string path = g_dir + "/sized.dat";
+    ::remove(path.c_str());
+
+    uint64_t bytes = 12345;   // deliberately not zero: a miss must not touch it
+    check(!DnsStatStore::fileSize(path, bytes), "a file that is not there answers false");
+    check(bytes == 12345, "and it leaves the caller's number alone");
+
+    DnsStatTotals totals;
+    totals.hits = 7;
+    check(DnsStatStore::save(path, totals), "the file can be written");
+    bytes = 0;
+    check(DnsStatStore::fileSize(path, bytes), "the size of a real file is reported");
+    check(bytes == DnsStatStore::kRecordSize, "and it is the record size, not a guess");
+    check(DnsStatStore::exists(path), "exists() and fileSize() agree about the file");
+    DnsStatStore::remove(path);
+}
+
 // ── Writing in place, over an existing file (stage 125) ──
 //
 // The point of this test is a defect the board revealed and the host could have:
@@ -633,6 +660,7 @@ int main()
     test_a_torn_write_is_refused_by_the_format();
     test_missing_and_unwritable_paths_are_reported();
     test_remove_is_idempotent_enough_for_a_factory_reset();
+    test_file_size_is_reported_for_the_page();
     test_retry_is_silent_when_the_first_attempt_works();
     test_retry_removes_the_file_and_logs_every_step();
     test_retry_keeps_the_file_out_of_the_way_when_it_can();

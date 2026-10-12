@@ -12,15 +12,23 @@
     <main class="container">
         <h1 data-i18n="files.title">Files</h1>
 
-        <!-- Access policy (LAN-only by default) -->
-        <div class="card toggle-row">
-            <span data-i18n="files.allow_own_subnet">Allow only own subnet</span>
-            <label class="toggle-switch">
-                <input type="checkbox" id="files-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
-                <span class="toggle-slider"></span>
-            </label>
+        <!-- Access policy (LAN-only by default). The switch and both lines that
+             belong to it live in ONE card: the hint says what the switch closes
+             (it describes the switch, not its current position, so it is honest
+             in either state), and the line below it is the warning that appears
+             only when there is something to warn about — a filter that could not
+             be applied, or requests that were refused. -->
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="files.allow_own_subnet">Allow only own subnet</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="files-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="files.allow_own_subnet_hint">When on, file REST requests (listing, download, upload, editing) are served only from the device's own subnet; every other address is refused. The subnet is the device's own address and mask from the DHCP settings, whether or not the DHCP server is on.</p>
+            <p class="hint" id="files-subnet-hint"></p>
         </div>
-        <p class="hint" id="files-subnet-hint"></p>
 
         <!-- Volumes -->
         <div class="card">
@@ -147,7 +155,25 @@
         <div class="card" id="files-editor-card" style="display:none;">
             <div class="toggle-row" style="margin-bottom:0.5rem;">
                 <span id="files-editor-path"></span>
-                <button class="btn" onclick="closeEditor()" data-i18n="files.editor_close">Close</button>
+                <span class="files-editor-actions">
+                    <!-- "Reload" (stage 197): reads the file from the device again,
+                         so an outside change reaches the editor and a save that came
+                         back as a conflict can be tried again. It is an ordinary
+                         button (the same class as Close beside it) whose label is an
+                         icon, which is what keeps the two the same height; the icon
+                         is hidden from the screen reader and the button carries its
+                         tooltip instead, set from the dictionary in JS. -->
+                    <button class="btn" id="files-editor-reload" onclick="reloadEditor()"
+                            aria-label="" title="">
+                        <svg viewBox="0 0 16 16" aria-hidden="true" fill="none"
+                             stroke="currentColor" stroke-width="1.6"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M13.1 8a5.1 5.1 0 1 1-1.5-3.6"></path>
+                            <path d="M13.3 2.7v3.1h-3.1"></path>
+                        </svg>
+                    </button>
+                    <button class="btn" onclick="closeEditor()" data-i18n="files.editor_close">Close</button>
+                </span>
             </div>
             <textarea id="files-editor-text" class="files-editor" spellcheck="false" rows="18"></textarea>
             <div class="test-conn-row" style="margin-top:0.6rem;">
@@ -226,6 +252,10 @@
             // mtime of the file currently open in the editor (conflict token)
             editorMtime: -1,
             editorPath: '',
+            // The text as the DEVICE gave it. The field is compared with this to
+            // tell "the operator has unsaved edits" from "the operator only
+            // looked", which is what the Reload button asks about (stage 197).
+            editorText: '',
         };
 
         /* ─── Path helpers ──────────────────────────────── */
@@ -1927,21 +1957,69 @@
         }
 
         /* ─── Text editor ────────────────────────────────── */
-        async function openEditor(name) {
-            const path = filesJoin(filesState.path, name);
+        /* Reads a file as text from the device. Answers the parsed body, or null
+           after saying why in the status line — the editor has two ways in (open
+           the file, read it again) and both have to fail the same way. */
+        async function fetchEditorText(path) {
             const url = '/api/files/text?volume=' + encodeURIComponent(filesState.volume) +
                         '&path=' + encodeURIComponent(path);
-            const resp = await apiFetch(url);
+            let resp;
+            try {
+                resp = await apiFetch(url);
+            } catch (e) {
+                filesStatus(tr('files.edit_fail') + ': ' + e, 'fail');
+                return null;
+            }
             if (!resp.ok) {
                 filesStatus(tr('files.edit_fail') + ': ' + await filesError(resp), 'fail');
-                return;
+                return null;
             }
-            const data = await resp.json();
-            filesState.editorPath = data.path || path;
+            return await resp.json();
+        }
+
+        /* The answer line of the editor. A success is a confirmation of one press,
+           so it clears itself after a few seconds — a line left standing reads as
+           the state of the file rather than as the answer to what was just done
+           (the same rule the Time Server page uses for its reset confirmation, and
+           the operator asked for it here as well); a failure stays, because its
+           reason is what has to be read. The timer is dropped by every new
+           message, so a press during the wait cannot be erased by the previous
+           answer. */
+        const kEditorStatusHideMs = 5000;
+        let editorStatusTimer = null;
+
+        function setEditorStatus(text, ok, hideByItself) {
+            const out = document.getElementById('files-editor-status');
+            if (!out) return;
+            if (editorStatusTimer) {
+                clearTimeout(editorStatusTimer);
+                editorStatusTimer = null;
+            }
+            out.textContent = text || '';
+            out.className = 'test-conn-result ' + (text ? (ok ? 'test-conn-ok' : 'test-conn-fail') : '');
+            if (text && hideByItself) {
+                editorStatusTimer = setTimeout(() => {
+                    setEditorStatus('');
+                }, kEditorStatusHideMs);
+            }
+        }
+
+        /* Puts what the device answered into the editor: the path, the conflict
+           token, the text, and the text remembered as the device's own version. */
+        function showEditorFile(data, fallbackPath) {
+            filesState.editorPath = data.path || fallbackPath || filesState.editorPath;
             filesState.editorMtime = data.mtime || 0;
+            filesState.editorText = data.text || '';
             document.getElementById('files-editor-path').textContent = filesState.editorPath;
-            document.getElementById('files-editor-text').value = data.text || '';
-            document.getElementById('files-editor-status').textContent = '';
+            document.getElementById('files-editor-text').value = filesState.editorText;
+            setEditorStatus('');      // also drops the pending auto-clear of the previous answer
+        }
+
+        async function openEditor(name) {
+            const path = filesJoin(filesState.path, name);
+            const data = await fetchEditorText(path);
+            if (!data) return;
+            showEditorFile(data, path);
             document.getElementById('files-editor-card').style.display = '';
             document.getElementById('files-editor-card').scrollIntoView({ behavior: 'smooth' });
         }
@@ -1950,11 +2028,55 @@
             document.getElementById('files-editor-card').style.display = 'none';
             filesState.editorPath = '';
             filesState.editorMtime = -1;
+            filesState.editorText = '';
+        }
+
+        /* "Reload": reads the open file from the device again (stage 197). The
+           device is the truth here — this is how an outside change reaches the
+           editor, and how a save that was refused as a conflict is tried again,
+           because the read also brings a fresh `mtime`.
+
+           The field holds the operator's work, so it is not overwritten while it
+           carries edits that were never saved: that is asked, and asked only then,
+           so a file nobody has touched reloads in one press. */
+        async function reloadEditor() {
+            if (filesState.editorPath === '') return;
+            const field = document.getElementById('files-editor-text');
+            if (field.value !== filesState.editorText) {
+                const confirmed = await filesModalOpen({
+                    title: tr('files.editor_reload_ask'),
+                    hint: tr('files.editor_reload_ask_hint'),
+                    danger: true,
+                    okLabel: tr('files.editor_reload'),
+                });
+                if (!confirmed) return;
+            }
+
+            const before = filesState.editorMtime;
+            const data = await fetchEditorText(filesState.editorPath);
+            if (!data) return;
+            const changed = (data.mtime || 0) !== before;
+            showEditorFile(data);
+            setEditorStatus(changed ? tr('files.editor_reload_changed')
+                                    : tr('files.editor_reload_ok'), true, true);
+            // The row of the listing carries the size and the date of that file,
+            // and both have just been read again: keep the table in step.
+            loadList();
+        }
+
+        /* The button is an icon, so its meaning lives in the tooltip, which is an
+           attribute and therefore set here — and set again on every language
+           switch (`i18n-applied`), like the other icon buttons of this page. */
+        function updateEditorTitles() {
+            const btn = document.getElementById('files-editor-reload');
+            if (!btn) return;
+            const tip = tr('files.editor_reload');
+            btn.title = tip;
+            btn.setAttribute('aria-label', tip);
         }
 
         async function saveEditor() {
             const text = document.getElementById('files-editor-text').value;
-            const statusEl = document.getElementById('files-editor-status');
 
             // `text` MUST be the last member: the firmware reads volume/path/mtime
             // from the part of the body that precedes it.
@@ -1971,14 +2093,15 @@
                 body: body,
             });
             if (!resp.ok) {
-                statusEl.className = 'test-conn-result test-conn-fail';
-                statusEl.textContent = tr('files.editor_fail') + ': ' + await filesError(resp);
+                setEditorStatus(tr('files.editor_fail') + ': ' + await filesError(resp), false, false);
                 return;
             }
             const data = await resp.json();
             filesState.editorMtime = data.mtime || 0;
-            statusEl.className = 'test-conn-result test-conn-ok';
-            statusEl.textContent = tr('files.editor_saved');
+            // What is in the field is what the device now holds, so the next
+            // "Reload" must not treat it as an unsaved edit.
+            filesState.editorText = text;
+            setEditorStatus(tr('files.editor_saved'), true, true);
             loadList();
         }
 
@@ -1988,6 +2111,7 @@
         document.addEventListener('DOMContentLoaded', async () => {
             updateActionsTitle();
             updateUploadTitles();
+            updateEditorTitles();
             await loadVolumes();
             await loadList();
             await loadFilesSettings();
@@ -2001,6 +2125,7 @@
         document.addEventListener('i18n-applied', () => {
             updateActionsTitle();
             updateUploadTitles();
+            updateEditorTitles();
             if (filesState.volumes.length === 0) return;   // nothing loaded yet
             renderVolumeTabs();
             renderVolumeInfo();

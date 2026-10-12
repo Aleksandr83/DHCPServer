@@ -1473,6 +1473,57 @@ bool DhcpServer::getMacByIp(uint32_t ip, uint8_t mac[6]) const
     return true;
 }
 
+bool DhcpServer::macByIpArp(uint32_t ip, uint8_t mac[6]) const
+{
+    // The mirror of clientIpByMac(): the NTP filter knows the address and needs
+    // the owner. Same lock, because the cache belongs to the lwIP core.
+    LOCK_TCPIP_CORE();
+    bool found = false;
+    for (size_t i = 0; i < ARP_TABLE_SIZE && !found; i++) {
+        ip4_addr_t* entryIp = nullptr;
+        struct netif* nif = nullptr;
+        struct eth_addr* eth = nullptr;
+        if (etharp_get_entry(i, &entryIp, &nif, &eth) != 1 || !entryIp || !eth) continue;
+        if (entryIp->addr == ip) {
+            memcpy(mac, eth->addr, DHCP_HWADDR_LEN);
+            found = true;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    return found;
+}
+
+bool DhcpServer::isClientAddressAllowed(uint32_t ip, bool allowOnly) const
+{
+    // The switch comes first: with it off the address is not looked at at all,
+    // and finding its owner costs an ARP-cache walk on the packet path.
+    if (!allowOnly) return true;
+    // Who owns the address: the lease table first (this device handed it out),
+    // then the ARP cache. Without a MAC the allow-list cannot be asked anything,
+    // and that is the "nobody owns it" answer the shared policy refuses.
+    uint8_t mac[DHCP_HWADDR_LEN];
+    if (getMacByIp(ip, mac) || macByIpArp(ip, mac)) {
+        return DhcpAllowedList::isAddressAllowed(allowOnly, true, mac,
+                                                 allowedList_, allowedStaticRefs_);
+    }
+    // No lease and nothing in the ARP cache: an ENABLED static binding that owns
+    // the address is the client's only record here, and the DHCP policy counts
+    // such a binding as an allowance by itself (a client with a fixed address may
+    // never have asked for a lease at all), so the binding's own MAC is offered
+    // to the policy.
+    for (const auto& binding : staticBindings_) {
+        if (binding.enabled && binding.ip == ip) {
+            return DhcpAllowedList::isAddressAllowed(allowOnly, true, binding.mac,
+                                                     allowedList_, allowedStaticRefs_);
+        }
+    }
+    // Nobody owns the address at all: the shared policy calls a stranger asking
+    // from it "not an allowed computer", which is the strict answer the operator
+    // chose for this switch.
+    return DhcpAllowedList::isAddressAllowed(allowOnly, false, nullptr,
+                                             allowedList_, allowedStaticRefs_);
+}
+
 // ─────────────────────────────────────────────────────
 // REST event logging
 // ─────────────────────────────────────────────────────

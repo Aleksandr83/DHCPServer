@@ -412,6 +412,45 @@ static int test_policy_switch_on()
     return 0;
 }
 
+/**
+ * The same policy for a client known only by its address - which is all an NTP
+ * request carries (stage 196). Finding the owner of the address is the caller's
+ * job (the DHCP lease table, or an enabled static binding that owns it); what is
+ * decided here is what an address with NO owner means while the switch is on:
+ * the operator chose "refuse", so a client that took its address outside DHCP,
+ * or whose lease is gone, does not get the time either.
+ */
+static int test_policy_by_address()
+{
+    Built built({entry("24:0a:c4:01:23:45", "listed")});
+
+    unsigned char listed[6];
+    unsigned char stranger[6];
+    TEST_ASSERT_TRUE(macOf("24:0a:c4:01:23:45", listed));
+    TEST_ASSERT_TRUE(macOf("aa:bb:cc:dd:ee:03", stranger));
+
+    // Switch OFF: the address is not looked at at all, not even one with no owner.
+    TEST_ASSERT_TRUE(DhcpAllowedList::isAddressAllowed(false, false, nullptr, built.list_, {}));
+    TEST_ASSERT_TRUE(DhcpAllowedList::isAddressAllowed(false, true, stranger, built.list_, {}));
+
+    // Switch ON: an owned address follows the policy as it knows it by MAC...
+    TEST_ASSERT_TRUE(DhcpAllowedList::isAddressAllowed(true, true, listed, built.list_, {}));
+    TEST_ASSERT_FALSE(DhcpAllowedList::isAddressAllowed(true, true, stranger, built.list_, {}));
+    // ...and an address nobody owns is refused.
+    TEST_ASSERT_FALSE(DhcpAllowedList::isAddressAllowed(true, false, nullptr, built.list_, {}));
+
+    // A client with no lease but covered by an ENABLED binding: the caller hands
+    // in the binding's MAC as the owner, and the binding is the allowance by
+    // itself - the rule the DHCP side uses as well.
+    unsigned char bound[6];
+    TEST_ASSERT_TRUE(macOf("aa:bb:cc:dd:ee:01", bound));
+    vector<DhcpAllowedList::StaticRef> bindings(1);
+    memcpy(bindings[0].mac, bound, 6);
+    bindings[0].enabled = true;
+    TEST_ASSERT_TRUE(DhcpAllowedList::isAddressAllowed(true, true, bound, built.list_, bindings));
+    return 0;
+}
+
 /** A switched-off entry is kept in the list but never enters the table. */
 static int test_disabled_entry_is_not_allowed()
 {
@@ -461,6 +500,7 @@ void app_main()
     failures += test_unavailable_fails_open();
     failures += test_policy_switch_off_ignores_list();
     failures += test_policy_switch_on();
+    failures += test_policy_by_address();
 
     if (failures == 0) {
         printf("All DhcpAllowedList tests PASSED!\n");

@@ -1,22 +1,42 @@
 #include "TimeServer.h"
 #include "NtpMessage.h"
+#include "NtpProbe.h"
+#include "PosixTimezone.h"
+#include "TimeMath.h"
+#include "core/ErrorLogCore.h"
 #include "../core/Config.h"
 #include "../core/Subnet.h"
-
+#include "../dhcp/IDhcpServer.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <string>
+#include <vector>
 #include <time.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
 #include "sys/time.h"
+// `CONFIG_LWIP_SNTP_MAX_SERVERS` below is the build's limit on configured
+// servers, which lwipopts.h turns into lwIP's own SNTP_MAX_SERVERS. lwIP's
+// `lwip/apps/sntp.h` is deliberately NOT included here: it redeclares the same
+// API `esp_sntp.h` declares, and the two do not compile together.
+#include "sdkconfig.h"
 
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
 using namespace std;
+// Rule 40/42 note: `time` is a namespace here, so the log helpers and the clock
+// are named in full — `core::ntpSyncStateDelaySec`, `std::time`.
+using dhcp::core::NtpDnsVerdict;
+using dhcp::core::ntpDnsVerdictText;
+using dhcp::core::ntpLogClockShiftText;
+using dhcp::core::ntpResolverChainText;
+using dhcp::core::ntpSyncStateDelaySec;
+using dhcp::core::ntpSyncStateText;
 
 namespace {
 
@@ -26,11 +46,20 @@ constexpr int kTmYearBase = 1900;
 constexpr int kTmMonthBase = 1;
 constexpr int64_t kSecondsPerHour = 3600;
 
+// Rule 39: the scale `esp_timer` counts in, which is how a delay in seconds
+// becomes the delay the timer wants.
+constexpr uint64_t kMicrosecondsPerSecond = 1000000ULL;
+
 // Rule 39: the NTP task formats replies and touches no large buffer.
 constexpr uint32_t kServerTaskStackBytes = 4096;
 
 // Rule 39: "255.255.255.255" plus the NUL, the room a client address needs.
 constexpr size_t kIp4TextLen = 16;
+
+// How many servers lwIP can be given at all: its own failover covers the indices
+// this build's limit holds, so a name handed over beyond it would be stored and
+// never asked - the list would look longer than it is.
+constexpr size_t kServersLwipAccepts = CONFIG_LWIP_SNTP_MAX_SERVERS;
 
 } // namespace
 
@@ -52,6 +81,11 @@ TimeServer::TimeServer()
 TimeServer::~TimeServer()
 {
     stop();
+    stopSyncStateTimer();
+    if (syncStateTimer_ != nullptr) {
+        esp_timer_delete(syncStateTimer_);
+        syncStateTimer_ = nullptr;
+    }
     logger_.stopRestSender();
 }
 
@@ -81,7 +115,7 @@ bool TimeServer::start()
     }
     state_ = TimeServerState::RUNNING;
     ESP_LOGI(TAG, "NTP server started (UDP %d, external NTP: %s)",
-             kPort, serverName_.c_str());
+             kPort, serverText().c_str());
     return true;
 }
 
@@ -103,44 +137,293 @@ void TimeServer::startSync()
     if (sntpStarted_) return;
     s_instance = this;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, serverName_.c_str());
+    // The whole list goes to lwIP, which keeps one name per index and hands over
+    // to the next one when a server stops answering (SNTP_RECV_TIMEOUT, 15 s):
+    // that failover is the reason for the list at all, since the client used to
+    // be pinned to the first address of its resolver's answer (stage 195). The
+    // loop stops at the number of servers this build can hold.
+    const size_t asked = servers_.size() < kServersLwipAccepts
+                             ? servers_.size()
+                             : kServersLwipAccepts;
+    for (size_t i = 0; i < asked; ++i) {
+        esp_sntp_setservername(static_cast<u8_t>(i), servers_[i].c_str());
+    }
+    // The indices a shorter list no longer uses are cleared: lwIP keeps them for
+    // the life of the process, and a name left there would still be asked.
+    for (size_t i = asked; i < kServersLwipAccepts; ++i) {
+        esp_sntp_setservername(static_cast<u8_t>(i), nullptr);
+    }
     esp_sntp_set_time_sync_notification_cb(&TimeServer::onSyncNotification);
     esp_sntp_set_sync_interval(syncIntervalSec_ * 1000u);
     esp_sntp_init();
     sntpStarted_ = true;
-    ESP_LOGI(TAG, "SNTP client started (server=%s, interval=%us)",
-             serverName_.c_str(), (unsigned)syncIntervalSec_);
+    // Poll mode asks the server right away, so the next poll is one interval
+    // from this moment — that is what the page counts down (stage 190).
+    markSyncBaseline();
+    ESP_LOGI(TAG, "SNTP client started (servers=%s, interval=%us)",
+             serverText().c_str(), (unsigned)syncIntervalSec_);
+
+    // The device's own attempts go into the log as well (stage 192): a device
+    // that cannot synchronise has to say so itself, or the only thing in the file
+    // is what its clients asked.
+    syncRunUptimeSec_ = uptimeSec();
+    syncStateIndex_ = 0;
+    probeRunning_ = false;
+    rememberClockReading();
+    logger_.logEvent("SNTP client started: " + serverText() + ", interval " +
+                     to_string(syncIntervalSec_) + " s");
+    logResolverChain();
+    armSyncStateTimer();
+}
+
+void TimeServer::setServers(const vector<string>& names)
+{
+    // A settings save that did not touch the list must not stir the client: the
+    // clock-sync switch is one of those saves, and its "off" has to reach the
+    // journal as the stop it is - the stop path writes that line, not this one.
+    if (names == servers_) return;
+    // lwIP keeps the POINTER to each name, not a copy, so the storage has to
+    // outlive the client's use of it: replacing the list under a running client
+    // would free the strings the resolver is still reading. Stopping it here
+    // means any caller order is safe - the apply that follows starts it again.
+    stopSyncQuiet();
+    servers_ = names;
+}
+
+string TimeServer::serverText() const
+{
+    string out;
+    for (const string& name : servers_) {
+        if (!out.empty()) out += ", ";
+        out += name;
+    }
+    return out;
+}
+
+void TimeServer::rememberClockReading()
+{
+    prevClockUtcSec_ = static_cast<int64_t>(nowUtcSec());
+    prevClockUptimeSec_ = uptimeSec();
+    // A clock that has never been set is not a reading to compare against: the
+    // success line says so instead of reporting a shift of half a century.
+    prevClockSet_ = core::ErrorLogCore::clockIsSet(static_cast<uint64_t>(prevClockUtcSec_));
+}
+
+void TimeServer::armSyncStateTimer()
+{
+    if (syncStateTimer_ == nullptr) {
+        esp_timer_create_args_t cfg = {};
+        cfg.callback = &TimeServer::onSyncStateTimer;
+        cfg.arg = this;
+        cfg.name = "ntp_syncstate";
+        if (esp_timer_create(&cfg, &syncStateTimer_) != ESP_OK) {
+            syncStateTimer_ = nullptr;   // the log then simply has no state lines
+            return;
+        }
+    }
+    esp_timer_stop(syncStateTimer_);   // harmless when it is not running
+    const uint64_t delayUs = static_cast<uint64_t>(ntpSyncStateDelaySec(syncStateIndex_)) *
+                             kMicrosecondsPerSecond;
+    esp_timer_start_once(syncStateTimer_, delayUs);
+}
+
+void TimeServer::stopSyncStateTimer()
+{
+    if (syncStateTimer_ != nullptr) esp_timer_stop(syncStateTimer_);
+    syncStateIndex_ = 0;
+}
+
+void TimeServer::onSyncStateTimer(void* arg)
+{
+    auto* self = static_cast<TimeServer*>(arg);
+    if (self == nullptr) return;
+
+    // A reply arrived, or the client was stopped: the schedule is over. No line
+    // is written here — the success line is the notification's job (and a manual
+    // clock set lifts the same flag, which is why this test is the flag and not
+    // the client's state).
+    if (self->synced_ || !self->sntpStarted_) {
+        self->stopSyncStateTimer();
+        return;
+    }
+
+    // The beat itself is the probe's, because the probe must not run here: this
+    // is an esp_timer callback, and a resolution plus a socket wait would block
+    // every other timer on the device. It hands the work to a task that writes
+    // both lines and re-arms this schedule when it is done, so the two lines of
+    // one beat stay in order and the next beat is measured from the last one.
+    if (self->probeRunning_) {
+        // Cannot normally happen: the probe re-arms this timer only after it has
+        // finished. If it does, the probe is the owner of the schedule.
+        return;
+    }
+    self->startProbeTask();
+}
+
+void TimeServer::startProbeTask()
+{
+    if (servers_.empty()) {
+        // Nothing configured: there is no name to ask and no address to report,
+        // so the state line goes out on its own.
+        writeSyncStateLine();
+        return;
+    }
+    probeRunning_ = true;
+    if (xTaskCreate(&TimeServer::probeTask, kProbeTaskName, kProbeTaskStackBytes, this,
+                    kProbeTaskPriority, nullptr) != pdPASS) {
+        // Out of task memory: the diagnostic is the first thing to lose, and the
+        // line says the lookup has no result rather than inventing one.
+        probeRunning_ = false;
+        writeSyncStateLine();
+    }
+}
+
+void TimeServer::probeTask(void* arg)
+{
+    auto* self = static_cast<TimeServer*>(arg);
+    if (self == nullptr) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // The run this probe belongs to: a settings save restarts the client, and a
+    // probe that outlives its run must not write lines for the new one.
+    const uint32_t runUptime = self->syncRunUptimeSec_;
+    const vector<string> servers = self->servers_;
+
+    const NtpProbe probe;
+    const vector<NtpProbeEntry> entries = probe.run(servers);
+
+    const bool currentRun = (self->syncRunUptimeSec_ == runUptime);
+    if (currentRun) {
+        // A reply arrived (or the clock was set by hand) while the probe ran: the
+        // verdicts are stale and "still not synchronised" would be a lie.
+        if (self->sntpStarted_ && !self->synced_) {
+            self->logger_.logEvent(ntpProbeLine(entries, kNtpProbeTimeoutMs));
+            self->writeSyncStateLine(entries);
+        }
+        self->probeRunning_ = false;
+    }
+    vTaskDelete(nullptr);
+}
+
+void TimeServer::writeSyncStateLine(const vector<NtpProbeEntry>& entries)
+{
+    const uint32_t waited = uptimeSec() - syncRunUptimeSec_;
+
+    // The verdict is the first server's - the one the client asks first. With no
+    // probe result at all the line says the lookup is pending instead of claiming
+    // a failure it never observed.
+    NtpDnsVerdict verdict = NtpDnsVerdict::Pending;
+    string resolvedIp;
+    if (!entries.empty()) {
+        resolvedIp = entries.front().ip;
+        switch (entries.front().verdict) {
+            case NtpProbeVerdict::Replied:
+            case NtpProbeVerdict::NoReply:   verdict = NtpDnsVerdict::Ok; break;
+            case NtpProbeVerdict::Unresolved: verdict = NtpDnsVerdict::Failed; break;
+            case NtpProbeVerdict::NotAsked:  verdict = NtpDnsVerdict::Pending; break;
+        }
+    }
+
+    logger_.logEvent(ntpSyncStateText(waited, serverText(),
+                                      ntpDnsVerdictText(verdict, resolvedIp)));
+    rememberClockReading();
+    ++syncStateIndex_;
+    armSyncStateTimer();
+}
+
+void TimeServer::logResolverChain()
+{
+    // Read from the settings, not from the network: the point is to show what the
+    // device *would* ask, next to the verdict of asking it.
+    auto dhcp = core::Config::instance().getDhcp();
+    auto dns = core::Config::instance().getDns();
+    logger_.logEvent(ntpResolverChainText(dhcp.serverIp, dns.externalDns, dhcp.gateway));
+}
+
+void TimeServer::markSyncBaseline()
+{
+    lastSyncUptimeSec_ = uptimeSec();
+    syncBaselineSet_ = true;
+}
+
+TimeServer::SyncStatus TimeServer::syncStatus() const
+{
+    SyncStatus status;
+    status.periodSec = syncIntervalSec_;
+    if (!sntpStarted_ || !syncBaselineSet_) return status;   // nothing to count
+    status.counting = true;
+    status.remainingSec = TimeMath::remainingSec(uptimeSec(), lastSyncUptimeSec_,
+                                                 syncIntervalSec_);
+    return status;
+}
+
+void TimeServer::stopSyncQuiet()
+{
+    // The stop half with neither the journal line nor the terminal log: a restart
+    // and a settings change are one event, and the "started" line that follows
+    // says everything the pair would (the same shape restartSync() always had).
+    if (sntpStarted_) {
+        esp_sntp_stop();
+        sntpStarted_ = false;
+        stopSyncStateTimer();
+    }
 }
 
 void TimeServer::stopSync()
 {
     if (sntpStarted_) {
-        esp_sntp_stop();
-        sntpStarted_ = false;
+        stopSyncQuiet();
         ESP_LOGI(TAG, "SNTP client stopped");
+        logger_.logEvent("SNTP client stopped");
     }
 }
 
 void TimeServer::restartSync()
 {
-    if (sntpStarted_) {
-        esp_sntp_stop();
-        sntpStarted_ = false;
-    }
+    stopSyncQuiet();
     startSync();
-    ESP_LOGI(TAG, "SNTP restarted (server=%s, interval=%us)",
-             serverName_.c_str(), (unsigned)syncIntervalSec_);
+    ESP_LOGI(TAG, "SNTP restarted (servers=%s, interval=%us)",
+             serverText().c_str(), (unsigned)syncIntervalSec_);
 }
 
 // ─────────────────────────────────────────────────────
 // Access control
 // ─────────────────────────────────────────────────────
 
+void TimeServer::applyTimezone()
+{
+    // Read from the settings, like applyAccessFilter() above: this is called when
+    // they change and at boot, and a copy in a member would be one more thing that
+    // can disagree with what the operator saved.
+    const auto timeCfg = core::Config::instance().getTime();
+    utcOffsetHours_ = timeCfg.utcOffsetHours;   // nowLocalString() reads this one
+
+    const std::string tz = time::posixTimezone(utcOffsetHours_);
+#if defined(_WIN32)
+    // The host tests never come here: TZ in the tests would make them depend on
+    // the machine they run on. Kept honest for a host build of the server anyway.
+    _putenv_s("TZ", tz.c_str());
+    _tzset();
+#else
+    setenv("TZ", tz.c_str(), 1);
+    tzset();
+#endif
+    ESP_LOGI(TAG, "timezone applied: TZ=%s (UTC%+d), localtime() follows it",
+             tz.c_str(), utcOffsetHours_);
+}
+
 void TimeServer::applyAccessFilter()
 {
     const auto timeCfg = core::Config::instance().getTime();
     allowOwnSubnet_ = timeCfg.allowOwnSubnet;
+    // The allowed-computers filter is the DHCP side's list and policy (stage
+    // 196); it needs the DHCP server to resolve an address to its owner.
+    onlyAllowedComputers_ = timeCfg.onlyAllowedComputers;
     rateLimitPerSec_ = timeCfg.rateLimitPerSec;
+    ESP_LOGI(TAG, "Client filters: own subnet %s, allowed computers %s",
+             allowOwnSubnet_ ? "on" : "off", onlyAllowedComputers_ ? "on" : "off");
 
     if (!allowOwnSubnet_) {
         subnetNet_ = 0;
@@ -213,6 +496,25 @@ void TimeServer::onSyncNotification(struct timeval* tv)
 {
     if (!s_instance) return;
     s_instance->synced_ = true;
+    // A confirmed answer is the other moment the interval starts counting from
+    // (stage 190): the next poll is one interval away, and that is what the
+    // page's "Next sync in" row shows.
+    s_instance->markSyncBaseline();
+
+    // The answer itself goes into the log (stage 192), with an estimate of how far
+    // the clock was off: ESP-IDF sets the clock before calling us, so the shift is
+    // what the clock says now against what the last reading said it would be by
+    // now. A device that had no clock at all says that instead of a number.
+    s_instance->stopSyncStateTimer();
+    const int64_t nowUtc = static_cast<int64_t>(s_instance->nowUtcSec());
+    const string shift = ntpLogClockShiftText(s_instance->prevClockUtcSec_,
+                                              s_instance->prevClockUptimeSec_,
+                                              nowUtc, s_instance->uptimeSec(),
+                                              s_instance->prevClockSet_);
+    s_instance->logger_.logEvent("SNTP synchronised: " + s_instance->serverText() +
+                                 " (" + shift + ")");
+    s_instance->rememberClockReading();
+
     if (tv) {
         ESP_LOGI(TAG, "SNTP synchronised: %ld.%06ld",
                  (long)tv->tv_sec, (long)tv->tv_usec);
@@ -306,6 +608,12 @@ bool TimeServer::setUtcTime(uint32_t unixUtc)
     // deliberately left running — a later sync may correct this value).
     synced_ = true;
     ESP_LOGI(TAG, "System clock set manually to %s UTC", nowUtcString().c_str());
+    // A hand-set clock is worth a line of its own in the log (stage 192): it
+    // explains a device that serves time (and stops waiting for a reply) without
+    // any NTP answer having arrived.
+    stopSyncStateTimer();
+    rememberClockReading();
+    logger_.logEvent("clock set by hand: " + nowLocalString());
     notifyClockSet();
     return true;
 }
@@ -381,6 +689,15 @@ void TimeServer::serverLoop()
             !core::Subnet::contains(subnetNet_, subnetMask_, clientAddr)) {
             ++foreignDropped_;
             dropReason = "outside the local subnet";
+        } else if (dhcpServer_ != nullptr &&
+                   !dhcpServer_->isClientAddressAllowed(from.sin_addr.s_addr,
+                                                        onlyAllowedComputers_)) {
+            // The address, not the MAC: an NTP request carries no hardware
+            // address, and the DHCP side answers who owns the one it came from
+            // - by lease, by the ARP cache, or by a static binding. Nobody
+            // owning it counts as "not allowed" (stage 196).
+            ++notAllowedDropped_;
+            dropReason = "not an allowed computer";
         } else if (rateLimited(clientAddr, nowMs)) {
             ++rateLimited_;
             dropReason = "rate limit exceeded";
@@ -391,9 +708,11 @@ void TimeServer::serverLoop()
                 lastDropLogMs_ = nowMs;
                 char clientIpStr[kIp4TextLen];
                 inet_ntop(AF_INET, &from.sin_addr, clientIpStr, sizeof(clientIpStr));
-                ESP_LOGW(TAG, "NTP request from %s dropped (%s; totals: %u subnet, %u rate)",
+                ESP_LOGW(TAG, "NTP request from %s dropped (%s; totals: %u subnet, "
+                              "%u not allowed, %u rate)",
                          clientIpStr, dropReason,
                          static_cast<unsigned>(foreignDropped_),
+                         static_cast<unsigned>(notAllowedDropped_),
                          static_cast<unsigned>(rateLimited_));
             }
             continue;
@@ -446,13 +765,14 @@ void TimeServer::serverLoop()
 
         char clientIp[kIp4TextLen];
         inet_ntop(AF_INET, &from.sin_addr, clientIp, sizeof(clientIp));
+        // The reply's own stratum is what the client saw, and it is the honest
+        // number for the log: 16 when the clock is not verified.
+        logger_.logRequest(clientIp, resp.stratum, !unsynced);
         if (unsynced) {
-            // Not counted/logged as a served request — the time was not
-            // trustworthy (the client is expected to ignore the reply).
-            ESP_LOGD(TAG, "NTP request from %s ignored (clock not synchronised)",
+            // Kept at debug level for the serial console; the request itself is no
+            // longer dropped from the log just because the clock is not set.
+            ESP_LOGD(TAG, "NTP request from %s answered unsynchronised (clock not verified)",
                      clientIp);
-        } else {
-            logger_.logRequest(clientIp, stratum_);
         }
     }
 

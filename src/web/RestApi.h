@@ -97,6 +97,17 @@ public:
     static esp_err_t handlePostDeviceRebootPrepare(httpd_req* req);
     // Progress/verdict of the background statistics write (Statistica.dat)
     static esp_err_t handleGetStatsProgress(httpd_req* req);
+
+    // The countdowns of the two autosaves (stage 189), one route for both.
+    static esp_err_t handleGetAutosave(httpd_req* req);
+
+    // The statistics file itself, on the operator's command (stage 188): its
+    // state, a write now, a read back into the counters, and a reset that zeroes
+    // the counters and drops the file.
+    static esp_err_t handleGetStatsFile(httpd_req* req);
+    static esp_err_t handlePostStatsSave(httpd_req* req);
+    static esp_err_t handlePostStatsLoad(httpd_req* req);
+    static esp_err_t handlePostStatsReset(httpd_req* req);
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     static esp_err_t handleGetInternalCacheFile(httpd_req* req);
     static esp_err_t handleGetInternalCacheProgress(httpd_req* req);
@@ -110,6 +121,12 @@ public:
     // Time (NTP) server
     static esp_err_t handleGetTimeSettings(httpd_req* req);
     static esp_err_t handlePostTimeSettings(httpd_req* req);
+    // Stage 194: the "Reset to default" button of the Time Server page puts the
+    // settings that page owns — and only those — back to the factory values.
+    static esp_err_t handlePostTimeSettingsReset(httpd_req* req);
+    // Stage 195: the "Check" button of that page probes the servers in the field
+    // and reports which of them answers.
+    static esp_err_t handlePostTimeTest(httpd_req* req);
     static esp_err_t handleGetTimeNow(httpd_req* req);
     static esp_err_t handlePostTimeSet(httpd_req* req);
     // File explorer (FAT volumes)

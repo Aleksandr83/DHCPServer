@@ -27,25 +27,48 @@
             </label>
         </div>
 
-        <div class="card toggle-row">
-            <span data-i18n="time.enable_disable">Enable NTP server</span>
-            <label class="toggle-switch">
-                <input type="checkbox" id="time-enabled" onchange="toggleTimeEnable()">
-                <span class="toggle-slider"></span>
-            </label>
-        </div>
-
-        <div class="card toggle-row">
-            <span data-i18n="time.allow_own_subnet">Allow only own subnet</span>
-            <label class="toggle-switch">
-                <input type="checkbox" id="time-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
-                <span class="toggle-slider"></span>
-            </label>
+        <!-- The switches that belong to the NTP server itself share one card,
+             because none of them means anything while the server is off: both
+             narrow WHO gets an answer, so they are hidden until `enabled` is
+             true and shown again the moment it is switched on (stage 196). -->
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="time.enable_disable">Enable NTP server</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="time-enabled" onchange="toggleTimeEnable()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="toggle-row" id="time-allow-own-subnet-row" style="display:none;margin-top:0.5rem;">
+                <span data-i18n="time.allow_own_subnet">Allow only own subnet</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="time-allow-own-subnet" onchange="toggleAllowOwnSubnet()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" id="time-allow-own-subnet-hint" style="display:none;" data-i18n="time.allow_own_subnet_hint">The NTP server answers only computers of its own subnet - everyone else gets no reply at all.</p>
+            <div class="toggle-row" id="time-only-allowed-row" style="display:none;margin-top:0.5rem;">
+                <span data-i18n="time.only_allowed">Only allowed computers</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="time-only-allowed" onchange="toggleOnlyAllowed()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" id="time-only-allowed-hint" style="display:none;" data-i18n="time.only_allowed_hint">Answer only computers on the Allowed computers list (DHCP menu). An address with no known owner gets no reply either.</p>
         </div>
 
         <div class="card">
             <label data-i18n="time.external_ntp">External NTP server</label>
-            <input type="text" id="time-external-ntp" placeholder="pool.ntp.org">
+            <!-- The field and its "Check" button share one row: the check is about
+                 what stands in the field, so it belongs next to it. The button
+                 sends the text as typed - unsaved edits included - and the device
+                 answers with one verdict per server (stage 195). -->
+            <div style="display:flex;gap:0.5rem;align-items:center;">
+                <input type="text" id="time-external-ntp" placeholder="pool.ntp.org, time.google.com, time.cloudflare.com" style="flex:1;">
+                <button class="btn" onclick="testNtpServers(this)" data-i18n="time.probe" style="white-space:nowrap;">Check</button>
+            </div>
+            <p class="hint" data-i18n="time.external_ntp_hint">Up to three servers, separated by a comma or a semicolon. When one stops answering the device asks the next one.</p>
+            <p id="time-probe-status" class="test-conn-result"></p>
 
             <label data-i18n="time.timezone" style="margin-top:0.8rem;display:block;">Timezone</label>
             <select id="time-timezone" onchange="onTimezoneChange()"></select>
@@ -57,6 +80,15 @@
 
             <label data-i18n="time.sync_interval" style="margin-top:0.8rem;display:block;">Sync interval (hours)</label>
             <input type="number" id="time-sync-hours" min="1" max="168" step="1" placeholder="24">
+
+            <!-- The caption is a <label> like every other line of this card: a
+                 bare <span> would take the card's own colour and stand out as
+                 the only white line in the block. Margins are dropped because
+                 this one sits inside a flex row, not above a field. -->
+            <div class="toggle-row" id="time-next-sync-row" style="display:none;margin-top:0.4rem;">
+                <label data-i18n="time.next_sync" style="margin:0;">Next sync in</label>
+                <span id="time-next-sync" class="test-conn-result"></span>
+            </div>
 
             <label data-i18n="time.rate_limit" style="margin-top:0.8rem;display:block;">Replies per second per IP</label>
             <input type="number" id="time-rate-limit" min="1" max="100" step="1" placeholder="5">
@@ -79,6 +111,20 @@
             <button class="btn" onclick="useComputerTime()" data-i18n="time.manual_from_pc" style="margin-top:0.8rem;margin-left:0.5rem;">Use computer time</button>
             <p id="time-manual-status" class="test-conn-result" style="margin-top:0.6rem;"></p>
         </div>
+
+        <!-- The factory values live in the firmware, so this button only asks the
+             device to put them back and then re-reads the page; the row is drawn
+             from `is_default` and stays out of sight while the page already
+             matches it (stage 194). It sits outside the cards at the bottom of
+             the page because it belongs to the page as a whole, not to one of its
+             blocks — and it is left-aligned like everything else here. The answer
+             of a press lives in its own line BELOW the row: after a successful
+             reset the row itself is gone, and a message inside it would go with
+             it. -->
+        <div id="time-reset-row" style="display:none;margin-top:1rem;">
+            <button class="btn" onclick="resetTimeDefaults(this)" data-i18n="time.reset_defaults">Reset to default</button>
+        </div>
+        <p id="time-reset-status" class="test-conn-result" style="margin-top:0.6rem;"></p>
     </main>
 
     <div id="footer-placeholder"></div>
@@ -183,9 +229,10 @@
         }
 
         // Time Server General page — owns {enabled, sync_enabled, external_ntp,
-        // timezone, utc_offset_hours, sync_interval_sec}. The Logging sub-page
-        // owns the rest of the settings object; every save merges with the
-        // current server state via saveTimePartial().
+        // timezone, utc_offset_hours, sync_interval_sec, allow_own_subnet,
+        // only_allowed_computers}. The Logging sub-page owns the rest of the
+        // settings object; every save merges with the current server state via
+        // saveTimePartial().
         function readTimeForm() {
             const hours = parseInt(document.getElementById('time-sync-hours').value, 10);
             const sel = document.getElementById('time-timezone');
@@ -194,6 +241,7 @@
                 enabled: document.getElementById('time-enabled').checked,
                 sync_enabled: document.getElementById('time-sync-enabled').checked,
                 allow_own_subnet: document.getElementById('time-allow-own-subnet').checked,
+                only_allowed_computers: document.getElementById('time-only-allowed').checked,
                 external_ntp: document.getElementById('time-external-ntp').value,
                 // Empty timezone = custom fixed offset.
                 timezone: isCustom ? '' : sel.value,
@@ -332,9 +380,54 @@
             }
         }
 
+        // ─── "Next sync in" (stage 190) ───
+        //
+        // The device counts the interval from the moment it last had a reason
+        // to — a confirmed answer from the external NTP server, or the (re)start
+        // of the SNTP client, which asks the server straight away — and it
+        // counts in uptime seconds, so correcting the clock cannot move the
+        // number. The page only draws it: a local tick every second keeps it
+        // moving between the five-second polls (the same pattern the cache
+        // autosave row uses). When the client is off, or has had no confirmed
+        // answer and no start to count from yet, the device says so with
+        // `next_sync_counting: false` and the row stays hidden rather than
+        // showing a number that means nothing.
+        const kCountdownTickMs = 1000;
+        let nextSyncCounting = false;
+        let nextSyncRemaining = 0;
+        let nextSyncTick = null;
+
+        function renderNextSync() {
+            const row = document.getElementById('time-next-sync-row');
+            const out = document.getElementById('time-next-sync');
+            if (!row || !out) return;
+            row.style.display = nextSyncCounting ? '' : 'none';
+            if (nextSyncCounting) out.textContent = formatCountdown(nextSyncRemaining);
+        }
+
+        function tickNextSync() {
+            if (nextSyncRemaining > 0) nextSyncRemaining -= 1;
+            renderNextSync();
+        }
+
+        function applyNextSync(data) {
+            nextSyncCounting = data.next_sync_counting === true;
+            nextSyncRemaining = Math.max(0, Math.floor(Number(data.next_sync_sec) || 0));
+            renderNextSync();
+            if (nextSyncCounting && !nextSyncTick) {
+                nextSyncTick = setInterval(tickNextSync, kCountdownTickMs);
+            } else if (!nextSyncCounting && nextSyncTick) {
+                clearInterval(nextSyncTick);
+                nextSyncTick = null;
+            }
+        }
+
         function updateTimeStatus(data) {
             lastTimeData = data;
             if (data.min_datetime) minDateTime = data.min_datetime;
+            applyNextSync(data);
+            renderResetRow(data);
+            updateServerFilterVisibility();
             const el = document.getElementById('time-server-state');
             if (!el) return;
             const state = data.server_state || 'unknown';
@@ -383,8 +476,10 @@
             const hours = Math.round((data.sync_interval_sec || 86400) / 3600);
             document.getElementById('time-sync-hours').value = hours;
             document.getElementById('time-allow-own-subnet').checked = data.allow_own_subnet === true;
+            document.getElementById('time-only-allowed').checked = data.only_allowed_computers === true;
             document.getElementById('time-rate-limit').value = data.rate_limit_per_sec || 5;
             updateTimeStatus(data);
+            updateServerFilterVisibility();
             fillManualTimeFields(data, false);
         }
 
@@ -399,6 +494,7 @@
             } else {
                 await loadTimeSettings();
             }
+            updateServerFilterVisibility();
         }
 
         async function toggleTimeSync() {
@@ -430,8 +526,124 @@
             }
         }
 
+        // "Only allowed computers" (stage 196): the narrower of the two filters.
+        // The device asks the DHCP side who owns the address the request came
+        // from and answers only when that computer is allowed - in the DHCP
+        // allow-list, or covered by an enabled static binding. An address nobody
+        // owns gets no reply.
+        async function toggleOnlyAllowed() {
+            const checked = document.getElementById('time-only-allowed').checked;
+            const result = await saveTimePartial({ only_allowed_computers: checked });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                document.getElementById('time-only-allowed').checked = !checked;
+            } else {
+                await loadTimeSettings();
+            }
+        }
+
+        // Both filters narrow WHO the NTP server answers, so neither means
+        // anything while the server is off: the rows and their hints belong to
+        // the "Enable NTP server" card and follow its switch, not the last
+        // answer from the device (stage 196).
+        function updateServerFilterVisibility() {
+            const box = document.getElementById('time-enabled');
+            const on = !!(box && box.checked);
+            const ids = ['time-allow-own-subnet-row', 'time-allow-own-subnet-hint',
+                         'time-only-allowed-row', 'time-only-allowed-hint'];
+            for (const id of ids) {
+                const el = document.getElementById(id);
+                if (el) el.style.display = on ? '' : 'none';
+            }
+        }
+
+        // ─── The server list (stage 195) ───
+        //
+        // The device keeps at most three servers and stores the list as one
+        // canonical text. The page checks the count before sending, so a fourth
+        // name is refused with a reason instead of quietly not being asked - the
+        // only other place it would show up is the journal's "SNTP client
+        // started" line, which names the servers the client actually got.
+        const kMaxNtpServers = 3;
+
+        function splitNtpServers(text) {
+            return (text || '').split(/[,;]/).map(s => s.trim()).filter(s => s.length > 0);
+        }
+
+        // ─── "Check" (stage 195) ───
+        //
+        // The device runs its own probe - the same one whose line the journal gets
+        // while the device cannot synchronise - and answers with one verdict per
+        // server. The page words those verdicts here, so the sentence is in the
+        // operator's language while the names the device sends stay a stable
+        // contract (`replied`, `no_reply`, `unresolved`, `not_asked`).
+        function describeProbe(answer) {
+            const seconds = Math.max(1, Math.round((answer.timeout_ms || 0) / 1000));
+            return (answer.servers || []).map(s => {
+                // An address typed as the server is not repeated in brackets.
+                const where = (s.ip && s.ip !== s.name) ? s.name + ' (' + s.ip + ')' : s.name;
+                if (s.verdict === 'replied') {
+                    return where + ' — ' + tr('time.probe_replied') + ' ' + s.stratum;
+                }
+                if (s.verdict === 'no_reply') {
+                    return where + ' — ' + tr('time.probe_no_reply') + ' ' + seconds +
+                           ' ' + tr('time.probe_seconds');
+                }
+                if (s.verdict === 'unresolved') {
+                    return s.name + ' — ' + tr('time.probe_unresolved');
+                }
+                return s.name + ' — ' + tr('time.probe_not_asked');
+            }).join('; ');
+        }
+
+        async function testNtpServers(btn) {
+            const out = document.getElementById('time-probe-status');
+            const text = document.getElementById('time-external-ntp').value;
+            const servers = splitNtpServers(text);
+            if (!servers.length) {
+                out.textContent = tr('time.probe_none');
+                out.className = 'test-conn-result test-conn-fail';
+                return;
+            }
+            if (servers.length > kMaxNtpServers) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('time.external_ntp_too_many'),
+                                   hideCancel: true });
+                return;
+            }
+
+            if (btn) btn.disabled = true;
+            out.textContent = tr('time.probe_running');
+            out.className = 'test-conn-result';
+            try {
+                const answer = await postJSON('/api/time/test', { servers: text });
+                const results = answer.servers || [];
+                // The colour says what the list is worth, not that the request
+                // went through: one server answering is a working setup, none
+                // answering is a warning the operator has to see.
+                const answered = results.some(s => s.verdict === 'replied');
+                const ok = answer.status === 'ok' && results.length > 0;
+                out.textContent = ok ? describeProbe(answer) : tr('time.probe_failed');
+                out.className = 'test-conn-result ' +
+                                (!ok ? 'test-conn-fail' : (answered ? 'test-conn-ok' : 'test-conn-warn'));
+            } catch (e) {
+                out.textContent = tr('time.probe_failed') + ': ' + e;
+                out.className = 'test-conn-result test-conn-fail';
+            }
+            if (btn) btn.disabled = false;
+        }
+
         async function saveTimeSettings() {
-            const result = await saveTimePartial(readTimeForm());
+            const form = readTimeForm();
+            if (splitNtpServers(form.external_ntp).length > kMaxNtpServers) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: tr('time.external_ntp_too_many'),
+                                   hideCancel: true });
+                return;
+            }
+            const result = await saveTimePartial(form);
             if (result.status === 'error') {
                 await showDialog({ title: tr('common.error'),
                                    hint: result.message || tr('common.unknown_error'),
@@ -441,6 +653,91 @@
             await loadTimeSettings();
             await showDialog({ title: tr('time.saved'),
                                hideCancel: true });
+        }
+
+        // ─── "Reset to default" (stage 194) ───
+        //
+        // The button is offered only while this page differs from the factory
+        // values, and the device says whether it does (`is_default`): the values
+        // it restores are the ones the firmware boots with, so a copy of them
+        // here would be a second answer that drifts. The request carries no
+        // values either — the device puts its own defaults back, keeps the
+        // logging settings (they belong to the Logging sub-page), applies the
+        // result live, and the page then re-reads itself.
+        //
+        // The result of a press is written into a line of its own BELOW the row,
+        // because a successful reset takes the row away: a message inside it
+        // would disappear in the same moment it was written. That line is cleared
+        // when the offer comes back — on the next change of a setting, not on
+        // every poll, so the failure message of a press stays readable — and the
+        // confirmation clears itself after a few seconds, because a line left
+        // standing under a row that is gone reads as the state of the page rather
+        // than as the answer to one press (the operator asked for that).
+        const kResetStatusHideMs = 5000;
+        let resetRowShown = false;
+        let resetStatusTimer = null;
+
+        function setResetStatus(text, ok, hideByItself) {
+            const out = document.getElementById('time-reset-status');
+            if (!out) return;
+            if (resetStatusTimer) {
+                clearTimeout(resetStatusTimer);
+                resetStatusTimer = null;
+            }
+            out.textContent = text || '';
+            out.className = 'test-conn-result ' + (text ? (ok ? 'test-conn-ok' : 'test-conn-fail') : '');
+            if (text && hideByItself) {
+                resetStatusTimer = setTimeout(() => {
+                    out.textContent = '';
+                    out.className = 'test-conn-result';
+                    resetStatusTimer = null;
+                }, kResetStatusHideMs);
+            }
+        }
+
+        function renderResetRow(data) {
+            const row = document.getElementById('time-reset-row');
+            if (!row) return;
+            const shown = data.is_default !== true;
+            row.style.display = shown ? '' : 'none';
+            if (shown && !resetRowShown) setResetStatus('');
+            resetRowShown = shown;
+        }
+
+        async function resetTimeDefaults(btn) {
+            const answer = await showDialog({
+                title: tr('time.reset_defaults_ask'),
+                hint: tr('time.reset_defaults_hint'),
+                okLabel: tr('time.reset_defaults'),
+                cancelLabel: tr('common.cancel'),
+                danger: true,
+            });
+            if (!answer) return;
+
+            if (btn) btn.disabled = true;
+            setResetStatus(tr('time.resetting'), true);
+            try {
+                const resp = await apiFetch('/api/time/settings/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const data = await resp.json();
+                const ok = resp.ok && data.status === 'ok';
+                // Re-read first: that is what hides the row, and the answer is
+                // written after it so the line is not cleared by the reload.
+                if (ok) await loadTimeSettings();
+                if (ok) {
+                    setResetStatus(tr('time.reset_defaults_done'), true, true);
+                } else {
+                    // A refusal stays on screen: the reason is what the operator
+                    // has to read, and it is not replaced by anything.
+                    setResetStatus(data.message || tr('time.reset_defaults_failed'), false);
+                }
+            } catch (e) {
+                setResetStatus(tr('time.reset_defaults_failed'), false);
+            }
+            if (btn) btn.disabled = false;
         }
 
         // Re-render the timezone <option> labels after the dictionary loads

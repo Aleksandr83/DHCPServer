@@ -436,7 +436,16 @@ Get DNS server configuration.
 > `cache_internal_autosave_interval` — the built-in cache saves itself on a
 > timer: `_period` is the unit (`0` = hours, `1` = days, `2` = minutes) and
 > `_interval` how many of that unit (bounded by the unit, and for days by the
-> length of the running month). Off by default.
+> length of the running month). Off by default, and the period of a device that
+> never saved one is a day.
+> `stats_autosave`, `stats_autosave_period` and `stats_autosave_interval` — the
+> **statistics file** saves itself on a timer of its own (stage 189), with the
+> same three values and the same bounds as the cache's autosave; its unit
+> defaults to `1` (days) and its interval to one, and since stage 189 the cache's
+> autosave defaulted to a day as well. The two timers are independent on purpose:
+> they write different files — `cache.dat` against `Statistica.dat` — and the page
+> shows them in different blocks. Their countdowns are read from
+> `GET /api/dns/autosave`.
 > `cache_internal_autoupdate`, `cache_internal_autoupdate_period`,
 > `cache_internal_autoupdate_interval`, `cache_internal_autoupdate_batch` and
 > `cache_internal_autoupdate_pause` — the built-in cache refreshes its records
@@ -1405,9 +1414,10 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "block_forward_non_aa": false, "allow_own_subnet": true
   },
   "time": {
-    "enabled": true, "sync_enabled": true, "external_ntp": "pool.ntp.org",
+    "enabled": true, "sync_enabled": true, "external_ntp": "pool.ntp.org, time.google.com, time.cloudflare.com",
     "timezone": "MSK-3", "utc_offset_hours": 3, "sync_interval_sec": 3600,
     "rate_limit_per_sec": 10, "allow_own_subnet": true,
+    "only_allowed_computers": false,
     "log_terminal": false, "log_rest": false, "log_url": "",
     "log_auth": false, "log_auth_user": ""
   },
@@ -1735,6 +1745,121 @@ answers `busy` and the caller waits for the running one.
 
 ---
 
+## The statistics file — `Statistica.dat` on FAT
+
+The counters of the main page (From cache / Forward / Avg hit) survive a planned
+restart in a 92-byte record, and since stage 188 the file can be managed by hand
+as well: the three buttons of the **Statistics** block on the Internal Cache page
+are the mirror of the cache's three, with the same dialogs and the same shape of
+answers. One difference is deliberate: the page's switch ("Save statistics before
+reboot") means *keep the statistics across a restart*, so it governs the
+**automatic** writes and not the button. A save the operator pressed himself
+writes the file whether that switch is on or off — the switch is a policy, the
+button is an order. The boot restore keeps its own gate, because there nothing
+asked.
+
+#### `GET /api/dns/stats/file`
+
+State of the file, for the line above the buttons (auth required).
+
+**Response `200 OK`:**
+```json
+{ "exists": true, "path": "/fat/Statistica.dat", "size_bytes": 92 }
+```
+
+| field | meaning |
+|-------|---------|
+| `exists` | there is a file at `path` |
+| `size_bytes` | its size in bytes; the interface prints bytes rather than kilobytes here, because 92 is the whole file and “0.1 KB” would be a rounding of it |
+
+#### `POST /api/dns/stats/save`
+
+Write the file now (auth required). It is the **same background job** the restart
+path uses, so this answer says only that it started, and the verdict comes from
+`GET /api/dns/stats/progress` — including the write-read-back-and-retry rule that
+endpoint describes. The request body is not read, so `{}` is enough.
+
+**Response `200 OK`:**
+```json
+{ "status": "started", "op": "save" }
+```
+
+**Response `409 Conflict`:** a statistics job is already running, and it is that
+one which will finish: `{"status":"error","message":"A save is already running"}`.
+
+**Response `500 Internal Server Error`:** the DNS server is not there, or the job
+task could not be created.
+
+#### `POST /api/dns/stats/load`
+
+Read the file back into the counters (auth required). Synchronous on purpose: one
+record has nothing for a page to poll. The numbers in the file replace the
+counters as a whole — the file is “the state that was saved”, not a set of
+increments — through the same helper the boot restore uses, so a manual load and a
+restart cannot come to mean different things.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok" }
+```
+
+**Response `404 Not Found`:** there is no file to load:
+`{"status":"error","message":"No statistics file"}`.
+
+**Response `409 Conflict`:** a file is there and was refused — damaged,
+half-written, or not one of ours. `detail` carries the device's own reason, in the
+same words the progress endpoint reports (`unexpected size`, `truncated file`,
+`checksum mismatch`):
+
+```json
+{ "status": "error", "message": "The statistics file was refused",
+  "detail": "checksum mismatch" }
+```
+
+#### `POST /api/dns/stats/reset`
+
+Zero the counters of the main page **and delete the file** (auth required). Both
+halves are the point: a device with zeroed counters and the old record still on the
+volume would read the same numbers back at the next boot, so a reset that spared
+the file would last exactly until the next restart. The page asks the operator
+first, with the same danger dialog the cache's Reset shows.
+
+**Request:** `{}`
+
+**Response `200 OK`:**
+```json
+{ "status": "ok" }
+```
+
+**Response `500 Internal Server Error`:** the DNS server is not there.
+
+---
+
+## GET /api/dns/autosave
+
+The countdowns of the **two** autosaves — the cache's (stage 153) and the
+statistics' (stage 189) — for the "Next update in" rows of the Internal Cache
+page. One route rather than two because the page shows both cards at once.
+
+**Response `200 OK`:**
+```json
+{ "cache": { "enabled": true, "counting": true, "remaining_sec": 3599, "period_sec": 3600 },
+  "stats": { "enabled": false, "counting": false, "remaining_sec": 0, "period_sec": 0 } }
+```
+
+| field | values | meaning |
+|-------|--------|---------|
+| `enabled` | `true` / `false` | the switch of that autosave is on |
+| `counting` | `true` / `false` | a countdown is **really** running. False while the clock is not set, because the timer is parked then: a device that does not know the date cannot honour "every hour", and a number that never moves would be worse than none |
+| `remaining_sec` | number | seconds left of the current period (0 when nothing is counting) |
+| `period_sec` | number | length of the whole period, as the device computed it (the day bound depends on the running month) |
+
+A manual save shifts the countdown of its own autosave by a whole period: a save
+is a save, and the next automatic one should be a full period away rather than
+around the corner.
+
+---
+
 ## GET /api/time/settings
 
 Get the NTP (time) server configuration and runtime status.
@@ -1749,15 +1874,21 @@ Get the NTP (time) server configuration and runtime status.
   "now_utc": "2026-09-11 14:24:00",
   "now_local": "2026-09-11 17:24:00",
   "uptime_sec": 1234,
-  "external_ntp": "pool.ntp.org",
+  "external_ntp": "pool.ntp.org, time.google.com, time.cloudflare.com",
   "timezone": "Europe/Moscow",
   "utc_offset_hours": 3,
   "sync_interval_sec": 86400,
+  "next_sync_counting": true,
+  "next_sync_sec": 3599,
+  "next_sync_period_sec": 86400,
   "allow_own_subnet": true,
+  "only_allowed_computers": false,
   "rate_limit_per_sec": 5,
+  "is_default": true,
   "min_datetime": "2026-09-11 00:00:00",
   "log_terminal": false,
   "log_rest": false,
+  "log_file": false,
   "log_url": "",
   "log_auth": false,
   "log_auth_user": "",
@@ -1768,13 +1899,56 @@ Get the NTP (time) server configuration and runtime status.
 > `server_state` — `running` / `stopped` / `error`; `synced` (read-only) is
 > true once the SNTP client has synchronised at least once; `now_utc` /
 > `now_local` are read-only current-time snapshots (UTC and UTC+offset);
-> `uptime_sec` is seconds since boot. `enabled` is the **NTP server** switch
+> `uptime_sec` is seconds since boot.
+> `next_sync_counting` / `next_sync_sec` / `next_sync_period_sec` (read-only,
+> stage 190) feed the page's "Next sync in" row: the seconds left in the SNTP
+> client's current interval, counted **in uptime seconds** from the last
+> confirmed answer (or from the (re)start of the client, whose poll mode asks
+> the server immediately), so correcting the clock cannot move the number.
+> `next_sync_counting` is false when the client is stopped or has no moment to
+> count from yet, and the page then hides the row. The interval is a schedule
+> and not a promise: an unanswered poll is retried by the network stack, sooner
+> than this countdown says.
+> `enabled` is the **NTP server** switch
 > (serving LAN clients) and `sync_enabled` is the **SNTP clock-sync** switch —
 > they are independent: the device clock can be synchronised even when the NTP
 > server is off. Clients always receive **UTC** — the
-> `timezone` / `utc_offset_hours` values are used only for local display/logging
-> (`timezone` is the zone id, e.g. `Europe/Moscow`; an empty string means a
-> custom offset, in which case `utc_offset_hours` is authoritative).
+> `timezone` / `utc_offset_hours` values are used for local display and for the
+> local clock the device itself keeps (`timezone` is the zone id, e.g.
+> `Europe/Moscow`, and is **display-only**; an empty string means a custom
+> offset, in which case `utc_offset_hours` is authoritative, and it is that
+> number the operating system's `TZ` is built from — see
+> [Local time and the clocks in the logs](#local-time-and-the-clocks-in-the-logs)).
+
+### Local time and the clocks in the logs
+
+The device keeps **one** local clock, built from `utc_offset_hours`: applying the
+time settings (at boot and on every change of this page) sets the process's `TZ`
+to the POSIX form of that offset (`UTC-3` for Moscow — POSIX counts hours *west*
+of Greenwich), so `localtime()` answers the operator's time everywhere.
+
+That matters because three things now read the same clock:
+
+| Where | What it shows |
+| --- | --- |
+| the pages (`now_local`, the date/time line, `/api/status`) | UTC + offset |
+| `logs/Errors.log`, `logs/Jobs.log` | local time, e.g. `[2026-10-11 01:34:07]` |
+| `<card>/log/AutoUpdate/2026.10.11_01.34.log` | local time, in the name and in every line |
+
+Until the time settings reach the device, the clock is UTC (`TZ` is not set at
+all), which is what a fresh device reports as "not synced". A zone *name* is
+never used for this: newlib would need the tzdata of a named zone, which this
+build does not carry, and daylight saving is not modelled — the saved offset is
+the offset in force all year. NTP clients are unaffected: they are served **UTC**
+(RFC 5905), which is what the protocol requires.
+> `is_default` (stage 194) is **true** while every setting the Time Server page
+> owns — `enabled`, `sync_enabled`, `allow_own_subnet`,
+> `only_allowed_computers`, `external_ntp`,
+> `timezone`, `utc_offset_hours`, `sync_interval_sec`, `rate_limit_per_sec` — is
+> at the value the firmware boots with; the page shows its "Reset to default"
+> offer only while it is false. The `log_*` settings are **not** part of that
+> answer: they belong to the Logging sub-page, so switching the file log on does
+> not offer a reset of this page and a reset here cannot switch it off.
 > `allow_own_subnet` (default **on**) makes the NTP server answer only clients
 > inside the device's own subnet (address + netmask from the DHCP settings — the
 > same policy as the DNS filter); requests from other addresses and requests
@@ -1783,12 +1957,86 @@ Get the NTP (time) server configuration and runtime status.
 > service nor a reflection amplifier. Both are counted and logged at most once
 > per 5 s; if the filter is on while the DHCP subnet cannot be parsed it is
 > skipped with a warning (fail-open).
+> `only_allowed_computers` (stage 196, default **off**) is the narrower of the two
+> filters and **belongs to the server as well**: the device asks the DHCP side who
+> owns the address the request came from — the lease table, then the ARP cache,
+> then an enabled static binding — and answers only when that computer is an
+> allowed one (in the allow-list of the DHCP page, or covered by a binding). An
+> address nobody owns is **refused**: the strict policy the operator chose, so a
+> computer with a hand-set address that no lease and no binding mentions gets no
+> time. Both switches are hidden on the page while the server itself is off, since
+> neither means anything then. The filter is a read of the DHCP allow-list, not a
+> second copy of it: `TimeServer` holds a pointer to `IDhcpServer` (the same
+> injection the DNS server uses), and the answer is a hash lookup over the PSRAM
+> table the DHCP side built at boot — the ARP walk only happens for a request from
+> an address that has no lease yet.
+> `external_ntp` is an **ordered list of up to three servers inside one string**
+> (stage 195): either a comma or a semicolon separates the names, spaces around
+> them are ignored and empty entries are dropped, and the device stores the
+> canonical form (`a, b, c`) - so the field is shown back exactly as the client
+> will ask. What does not fit (a fourth name) is left out rather than truncated.
+> The clock-sync client is given the whole list and moves to the next server when
+> one stops answering, which is what keeps one dead node in a pool from costing
+> the clock; `POST /api/time/test` asks the same servers on demand.
 > `min_datetime` (read-only) is a **build constant** — the lowest date/time the
 > "Set date/time manually" form accepts. It uses the `YYYY-MM-DD HH:00:00` form
 > (hour granularity: the minutes and seconds are always zero). It is kept at the
 > firmware build date by the version scripts (`scripts/inc_firmware_ver.py`,
 > `scripts/set_firmware_date.py`, from `CONFIG_FW_MIN_DATETIME`); the web page
 > rejects earlier values, while the device itself does not enforce the limit.
+> `log_file` (stage 191) is the third logging destination: served requests are
+> appended to `/fat/logs/Ntp.log`, and when that file reaches 64 KB it is
+> archived to the card as `log/Archive/Ntp/<first day>-<last day>/Ntp.log` and the
+> live file starts again. With no card the new file keeps the last ten lines;
+> with a card that refuses the write the full file is kept, `Errors.log` gets a
+> line, and the attempt is repeated on the next request up to ten times, after
+> which the tail is carried as if there were no card. Each line carries the
+> device's **local** time with seconds — `[2026.10.12 19:22:14] NTP request from
+> 192.168.1.5 -> stratum 3` — and the placeholder `[----.--.-- --:--:--]` while
+> the clock has never been set (the same width, so a file still lines up across
+> the first synchronisation). Requests the server answered with "the clock is not
+> trustworthy" are recorded too, with the stratum the client was told and the mark
+> `-> stratum 16 (clock not verified)`: they are the proof that clients ask at all
+> while the device cannot synchronise. The terminal and `log_rest` destinations
+> keep counting **only** verified replies, which is what they always did. Archives
+> on the card are never pruned.
+>
+> Since stage 192 the same file also carries **the device's own** attempts, in the
+> same shape: `SNTP client started: pool.ntp.org, time.google.com,
+> time.cloudflare.com, interval 86400 s`, `SNTP client stopped`,
+> `SNTP synchronised: pool.ntp.org, time.google.com, time.cloudflare.com (the clock
+> was 3 s behind)`, `clock set by hand: 2026.10.12 20:20:00`, and — while no
+> confirmed reply has arrived — `still not synchronised: 60 s since the client
+> started, server=pool.ntp.org, time.google.com, time.cloudflare.com, no confirmed
+> reply yet`, repeated at most three times a minute apart, then every 2, 5 and 10
+> minutes and every 10 minutes from then on (a device that can never synchronise
+> must keep saying so without filling the volume it lives on). Booting with clock
+> sync switched off writes `SNTP client not started: clock sync is disabled in the
+> settings`. The shift in the success line is an **estimate** built from the last
+> reading of the clock that the writer took — ESP-IDF sets the clock before it
+> notifies us, so the server's own offset is not available — and a device that
+> never had a real clock says `the clock had no real time yet` instead of a number.
+>
+> Since stage 193 the same lines name the reason a reply may never come. The client
+> start writes the resolver chain — `resolver: this device (192.168.0.10), upstream
+> 192.168.1.1, gateway 192.168.0.1` — and every "still not synchronised" line
+> carries a verdict for the **first** server of the list: `(DNS -> 5.61.32.14)`,
+> `(DNS lookup failed)`, or `(DNS lookup still pending)` when the probe had no
+> result to report at all. Since stage 195 that verdict comes from the device's own
+> probe, which also writes a line of its own on the same beat, naming every
+> configured server and who answered:
+> `NTP probe: pool.ntp.org (51.250.53.172) - no reply in 3 s; time.google.com
+> (216.239.35.8) - replied (stratum 1); time.cloudflare.com - not asked (an earlier
+> server replied)`. The probe is lwIP's own resolution step
+> (`getaddrinfo`) plus a 48-byte request of the device's own, and it accepts a
+> datagram as an answer only when it echoes that request's transmit stamp. It runs
+> on a task of its own, because the `esp_timer` callback that owns the schedule
+> cannot wait for a socket, and a run that a settings save has overtaken writes
+> nothing. The device resolves through **itself** (`EthManager` points the system
+> resolver at its own address so `.lo` names work), and the built-in DNS server
+> forwards external names to `external_dns` — which is why one wrong upstream
+> address, or a DNS server switched off, is enough to leave the device without name
+> resolution while its LAN clients keep working.
 
 ---
 
@@ -1804,11 +2052,12 @@ response (read-only fields are ignored). Values are clamped:
 {
   "enabled": true,
   "sync_enabled": true,
-  "external_ntp": "pool.ntp.org",
+  "external_ntp": "pool.ntp.org, time.google.com, time.cloudflare.com",
   "timezone": "Europe/Moscow",
   "utc_offset_hours": 3,
   "sync_interval_sec": 86400,
   "allow_own_subnet": true,
+  "only_allowed_computers": false,
   "rate_limit_per_sec": 5,
   "log_terminal": true,
   "log_rest": false,
@@ -1836,6 +2085,86 @@ response (read-only fields are ignored). Values are clamped:
 > NTP server answers with **LI=3 ("clock not synchronized") + stratum 16**
 > (RFC 5905) instead of a (wrong) time — compliant clients ignore such a reply
 > and never set their clock from an unsynchronised server.
+
+---
+
+## POST /api/time/settings/reset
+
+Put the settings the **Time Server page** owns back to their factory values
+(stage 194). The request carries no body — the values live in the firmware, and
+the page's "Reset to default" button only asks for them, so there is no second
+copy of the defaults anywhere.
+
+The settings it touches are the ones that page shows: `enabled`,
+`sync_enabled`, `allow_own_subnet`, `only_allowed_computers`, `external_ntp`,
+`timezone`,
+`utc_offset_hours`, `sync_interval_sec` and `rate_limit_per_sec`. The `log_*`
+settings are **left exactly as they were**: they belong to the
+[`GET /api/time/settings`](#get-apitimesettings) logging block, which has its
+own page.
+
+**Request body:** none (an empty JSON object is accepted too).
+
+**Response `200 OK`:**
+```json
+{ "status": "ok" }
+```
+
+> The defaults are not neutral: the factory page means **clock sync on, NTP
+> server off**, so this call can start the SNTP client *and* stop the NTP
+> server. They are applied live, exactly like a save (`POST
+> /api/time/settings`): the client is started, stopped or restarted, the server
+> is started or stopped, and no reboot is needed. `GET
+> /api/time/settings` then reports `is_default: true`, which is what makes the
+> page hide its reset offer.
+
+---
+
+## POST /api/time/test
+
+Ask the configured NTP servers who answers, right now (stage 195) — the same probe
+the journal writes while the device cannot synchronise, on demand, for the servers
+in the field. Nothing is stored: this endpoint answers a question.
+
+**Request body:**
+```json
+{ "servers": "pool.ntp.org; time.google.com" }
+```
+
+> `servers` is the text of the "External NTP server" field as typed, and it is
+> normalised exactly like `external_ntp` in `POST /api/time/settings`: either
+> separator, spaces ignored, empty entries dropped, at most three names. An empty
+> value is answered about the servers the device is really using, so a client that
+> sends nothing still gets a meaningful answer.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok",
+  "timeout_ms": 3000,
+  "elapsed_ms": 3120,
+  "servers": [
+    { "name": "pool.ntp.org",     "ip": "51.250.53.172", "verdict": "no_reply", "stratum": 0 },
+    { "name": "time.google.com",  "ip": "216.239.35.8",  "verdict": "replied",  "stratum": 1 },
+    { "name": "ntp1.vniiftri.ru", "ip": "",              "verdict": "not_asked", "stratum": 0 }
+  ]
+}
+```
+
+> `verdict` is one of `replied` (a valid NTP answer came back), `no_reply` (the
+> address answered nothing within `timeout_ms`), `unresolved` (the name did not
+> resolve, so nothing could be asked) or `not_asked` (an earlier server answered,
+> so this one was left alone) — the page words them in the operator's language, so
+> these names are a contract. `stratum` is the stratum of a reply, and `0` there
+> means kiss-of-death: the server answered "go away", which is an answer and is
+> named as such by the journal. `ip` is the address the name resolved to, empty when
+> it did not resolve.
+>
+> The run asks the servers in the order they are listed and **stops at the first
+> answer**, so a healthy list costs about a second and one resolution; the worst
+> case is a list of names that resolve and never answer, which costs one
+> `timeout_ms` each. The request blocks for that time (the "Test connection"
+> buttons of the DNS pages behave the same way).
 
 ---
 

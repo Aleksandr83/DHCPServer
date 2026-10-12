@@ -151,6 +151,23 @@ static int test_format_and_back()
     return 0;
 }
 
+static int test_period_remaining()
+{
+    // Inside the period: the whole interval minus what has already run.
+    TEST_ASSERT_EQ(TimeMath::remainingSec(1000u, 400u, 3600u), 3000u);
+    // The very moment the period starts: the full interval.
+    TEST_ASSERT_EQ(TimeMath::remainingSec(400u, 400u, 3600u), 3600u);
+    // Run out exactly — and long after that — never a negative count.
+    TEST_ASSERT_EQ(TimeMath::remainingSec(4000u, 400u, 3600u), 0u);
+    TEST_ASSERT_EQ(TimeMath::remainingSec(100000u, 400u, 3600u), 0u);
+    // A period of zero has nothing to wait for.
+    TEST_ASSERT_EQ(TimeMath::remainingSec(400u, 400u, 0u), 0u);
+    // Uptime-second wrap: the baseline is above the current reading, and the
+    // difference is still a difference.
+    TEST_ASSERT_EQ(TimeMath::remainingSec(10u, 4294967290u, 3600u), 3584u);
+    return 0;
+}
+
 void app_main()
 {
     printf("Running TimeMath tests...\n");
@@ -163,6 +180,7 @@ void app_main()
     failures += test_parse_fail();
     failures += test_to_unix_sec();
     failures += test_format_and_back();
+    failures += test_period_remaining();
 
     if (failures == 0) {
         printf("All TimeMath tests PASSED!\n");

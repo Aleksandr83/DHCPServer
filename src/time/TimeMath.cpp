@@ -299,5 +299,17 @@ string TimeMath::format(const DateTime& dt)
     return string(buf);
 }
 
+uint32_t TimeMath::remainingSec(uint32_t nowSec, uint32_t startSec, uint32_t periodSec)
+{
+    if (periodSec == 0) return 0;   // a period that never ends has nothing to wait for
+
+    // Both readings come from the same monotonic counter, so the unsigned
+    // subtraction survives a wrap of that counter: the difference stays the
+    // difference instead of a negative (and then huge) number.
+    const uint32_t elapsedSec = nowSec - startSec;
+    if (elapsedSec >= periodSec) return 0;   // run out: never a negative count
+    return periodSec - elapsedSec;
+}
+
 } // namespace time
 } // namespace dhcp

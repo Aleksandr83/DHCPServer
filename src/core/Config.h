@@ -3,6 +3,7 @@
 
 #include "core/NetworkDefaults.h"
 #include "core/AutosavePeriod.h"
+#include "core/NtpServers.h"
 #include "security/CertStore.h"
 
 #include <string>
@@ -111,9 +112,24 @@ struct DnsConfig {
     /// @brief Autosave the internal cache on a timer (stage 153).
     bool cacheInternalAutosave = false;
     /// @brief The unit of the interval: minutes, hours or days.
-    AutosavePeriod cacheInternalAutosavePeriod = AutosavePeriod::Hour;
+    /// Days by default with an interval of one: the operator asked for "Save
+    /// every: 1 day" for both autosaves, so neither block starts at an hour.
+    AutosavePeriod cacheInternalAutosavePeriod = AutosavePeriod::Day;
     /// @brief Every N of that unit (1..60 minutes, 1..24 hours, 1..month days).
     uint16_t cacheInternalAutosaveInterval = 1;
+    /// @brief Autosave the statistics file on a timer (stage 189).
+    ///
+    /// The statistics are 92 bytes and the cache is megabytes, so the two
+    /// autosaves are separate settings with separate timers: the operator asked
+    /// for the block that keeps the counters to look after its own file, and off
+    /// by default, the way the cache's autosave is.
+    bool statsAutosave = false;
+    /// @brief The unit of the statistics interval: minutes, hours or days.
+    /// Days by default, with an interval of one: the cache's autosave was asked
+    /// for in hours (stage 153), the statistics were asked for as "every day".
+    AutosavePeriod statsAutosavePeriod = AutosavePeriod::Day;
+    /// @brief Every N of that unit, with the same bounds as the cache's.
+    uint16_t statsAutosaveInterval = 1;
     /// @brief Automatically refresh entries from upstream DNS.
     bool cacheInternalAutoUpdate = false;
     /// @brief The unit of the interval: hours or days.
@@ -202,7 +218,7 @@ struct SecurityConfig {
 struct TimeConfig {
     bool enabled = false;             // master switch for the NTP server
     bool syncEnabled = true;          // SNTP client: sync the device clock
-    std::string externalNtp = "pool.ntp.org"; // upstream NTP server (SNTP)
+    std::string externalNtp = kNtpDefaultServers; // upstream NTP servers (SNTP), in order
     std::string timezone = "Europe/Moscow"; // zone id (display only); empty = custom offset
     int32_t utcOffsetHours = 3;       // timezone offset (display only, MSK)
     uint32_t syncIntervalSec = 86400; // SNTP re-sync interval (24 h)
@@ -212,8 +228,20 @@ struct TimeConfig {
     bool allowOwnSubnet = true;
     // Maximum NTP replies per second and per client address (1..100).
     uint32_t rateLimitPerSec = 5;
+    // Answer only computers the DHCP side would allow as well: the entries of the
+    // "Allowed computers" list (DHCP menu) and clients covered by an ENABLED
+    // static binding. An NTP request carries an address and no MAC, so the owner
+    // of that address is looked up in the lease table first; an address nobody
+    // owns is refused - a client that configured its address by hand must not be
+    // able to walk around the list (stage 196). OFF by default: an appliance that
+    // started filtering after an update would stop serving time to the LAN it had
+    // been serving a minute earlier.
+    bool onlyAllowedComputers = false;
     bool logTerminal = false;         // log NTP requests to the terminal
     bool logRest = false;             // log NTP requests to an external REST
+    // Log NTP requests to `/fat/logs/Ntp.log`, archived to the card when full
+    // (stage 191). `time_log_file` is 13 characters, inside the 15 NVS allows.
+    bool logFile = false;
     std::string logUrl;               // REST logging URL
     bool logAuthEnabled = false;      // HTTP Basic auth for REST logging
     std::string logAuthUser;

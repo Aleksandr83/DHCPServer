@@ -80,6 +80,20 @@ public:
     /** @brief Format as "YYYY-MM-DD HH:MM:SS". */
     static std::string format(const DateTime& dt);
 
+    /**
+     * @brief Whole seconds left in a period of @p periodSec that began at
+     *        @p startSec (stage 190).
+     *
+     * Both readings are seconds of one monotonic counter, which is the point:
+     * a countdown measured against the wall clock would jump whenever SNTP (or
+     * the operator) corrects that clock, and this one does not. The unsigned
+     * subtraction handles a wrap of the counter.
+     *
+     * Returns 0 once the period has run out, and 0 for a period of zero, so a
+     * caller drawing a countdown never has to defend against a negative one.
+     */
+    static uint32_t remainingSec(uint32_t nowSec, uint32_t startSec, uint32_t periodSec);
+
 private:
     /** @brief Parse exactly @p count ASCII digits; false on any other char. */
     static bool parseDigits(const char* text, int count, int& out);

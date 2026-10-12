@@ -266,6 +266,23 @@ void CacheAutoUpdate::runSweep()
     size_t retryTaken = 0;
 
     uint32_t done = 0;
+
+    // The per-record log of this sweep lives in a file of its own, opened here
+    // and closed on every way out (stage 186): the whole sweep survives in one
+    // file instead of the last few hundred lines the 64 KB cap of the other logs
+    // would keep. A stop pressed in the middle of a pause returns from inside the
+    // loop, so the closing cannot be a plain statement after it — the guard is
+    // what makes it certain, and the explicit call below puts the file's closing
+    // line into the journal **before** the operation's own end.
+    const bool detail = core::JobLog::instance().beginAutoUpdateFile();
+    struct DetailFileGuard {
+        bool active;
+        ~DetailFileGuard()
+        {
+            if (active) core::JobLog::instance().endAutoUpdateFile();
+        }
+    } guard{detail};
+
     for (uint32_t block = 0; block < blocks && enabled_; ++block) {
         // One block: the retries first, then the oldest records still in the
         // cache. `oldestEntries` orders by the time a record was stored and a
@@ -302,8 +319,8 @@ void CacheAutoUpdate::runSweep()
                 rememberFailed(item.name, item.qtype);
             }
             // The journal holds only the two ends of the sweep; the operator asked
-            // for the records as well, and they go to the auto-update's own file
-            // (stage 179) — the same task writes both.
+            // for the records as well, and they go to the sweep's own file
+            // (stages 179 and 186) — the same task writes both.
             core::JobLog::instance().autoUpdate(
                 kJobId, autoUpdateRecordText(item.name, item.qtype, refreshed, ttl));
             ++done;
@@ -318,8 +335,7 @@ void CacheAutoUpdate::runSweep()
         // The pause sits between blocks (stage 180) and never after the last one:
         // one tick at a time, so the auto-update being switched off is seen within
         // a second, and the countdown is re-armed the moment the sweep ends.
-        if (!core::autoUpdatePauseAfterBlock(block, blocks)) continue;
-        // The scheduler shows that pause instead of a frozen row (stage 181): the
+        if (!core::autoUpdatePauseAfterBlock(block, blocks)) continue;        // The scheduler shows that pause instead of a frozen row (stage 181): the
         // row turns into "paused, 60 s" and counts down, because the seconds left
         // are announced once a second rather than the pause staying invisible.
         const uint32_t pauseSec = static_cast<uint32_t>(pauseSec_);
@@ -335,6 +351,10 @@ void CacheAutoUpdate::runSweep()
         // seconds for upstream, and the row must not keep saying "paused" meanwhile.
         jobs.progress(kJobId, done, records);
     }
+
+    // The normal way out: close the file before the journal says the sweep ended,
+    // so the operator reads "detailed log closed: … (N lines)" next to it.
+    core::JobLog::instance().endAutoUpdateFile();
 
     running_ = false;
 

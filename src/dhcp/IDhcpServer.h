@@ -50,6 +50,26 @@ public:
     virtual uint32_t leaseCount() const = 0;
 
     /**
+     * @brief May this client get an answer, judged by the address it asked from?
+     *
+     * The NTP server has an address and nothing else (stage 196), so this asks the
+     * DHCP side the same question its own policy answers by MAC: is the owner of
+     * that address an allowed computer? The owner comes from the lease table, then
+     * from the ARP cache (a computer with an address of its own - set by hand, or
+     * handed out before this device was installed - has no lease here but is still
+     * reachable on the wire), and a client with neither can still be covered by an
+     * ENABLED static binding that owns the address - the same "a binding is an
+     * allowance by itself" rule the DHCP policy uses. An address nobody owns is
+     * refused.
+     *
+     * @param ip        IPv4 address in network byte order.
+     * @param allowOnly The caller's own "only allowed computers" switch, passed in
+     *                  the way the DHCP packet path passes its own: with the switch
+     *                  off the address is not looked at and the answer is yes.
+     */
+    virtual bool isClientAddressAllowed(uint32_t ip, bool allowOnly) const = 0;
+
+    /**
      * @brief Look up the MAC address for an IP in the active lease table.
      *
      * Used by the DNS server to resolve a client IP → MAC (DHCP fallback

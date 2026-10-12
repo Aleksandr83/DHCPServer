@@ -2,6 +2,7 @@
 #define DHCP_CORE_ERRORLOGCORE_H
 
 #include <cstdint>
+#include <ctime>
 #include <functional>
 #include <string>
 
@@ -105,6 +106,21 @@ public:
 
     /** @brief True when the stamp can be a real date instead of an uptime. */
     static bool clockIsSet(uint64_t nowEpochSec);
+
+    /**
+     * @brief Local time, thread-safe — and spelled differently on the two
+     *        platforms.
+     *
+     * The device (newlib) has `localtime_r`; MinGW has `localtime_s` with its own
+     * argument order. Public because the same clock is needed outside this file:
+     * the per-sweep log file is named after the local minute a sweep started
+     * (stage 186), and a second copy of the `#if defined(_WIN32)` branch is how
+     * the two ends of a project come to disagree about the time.
+     *
+     * The zone comes from `TZ`, which `TimeServer::applyTimezone()` sets from the
+     * operator's offset — before that call this is still UTC.
+     */
+    static bool localTime(std::time_t now, std::tm& out);
 
     /** @brief Cut a message to one queue item, marking the cut. */
     static std::string clampMessage(const std::string& message);

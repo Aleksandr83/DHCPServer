@@ -69,6 +69,15 @@ public:
     /// @brief True while the task is waiting for the next period.
     bool active() const { return enabled_; }
 
+    /// @brief State of the timer, for `GET /api/dns/autosave`.
+    struct Status {
+        bool enabled = false;       ///< the switch is on
+        bool counting = false;      ///< a countdown is really running (the clock is set)
+        uint32_t remainingSec = 0;  ///< seconds left of the period
+        uint32_t periodSec = 0;     ///< length of the whole period
+    };
+    Status status() const;
+
 private:
     static void taskEntry(void* arg);
     void run();

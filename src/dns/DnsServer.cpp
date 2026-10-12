@@ -146,6 +146,9 @@ bool DnsServer::start()
                          dnsCfg.cacheInternalAutoUpdateInterval,
                          dnsCfg.cacheInternalAutoUpdateBatch,
                          dnsCfg.cacheInternalAutoUpdatePause);
+    // Stage 189: the timer that keeps the statistics file up to date on its own.
+    applyStatsAutosave(dnsCfg.statsAutosave, dnsCfg.statsAutosavePeriod,
+                       dnsCfg.statsAutosaveInterval);
     blockForwardNonAA_ = dnsCfg.blockForwardNonAA;
     applySubnetFilter();
     // The cache lookup runs in a dedicated worker task so the DNS server
@@ -709,6 +712,22 @@ void DnsServer::applyCacheAutosave(bool enabled, core::AutosavePeriod unit,
     cacheAutosave_.configure(enabled, unit, interval);
 }
 
+void DnsServer::applyStatsAutosave(bool enabled, core::AutosavePeriod unit,
+                                   uint16_t interval)
+{
+    // The same rule as the cache's autosave, and for the same reason: a write
+    // that cannot be interrupted answers "stop this" with "stop doing it
+    // automatically", and that has to survive a reboot — so the setting is
+    // written here, not in the page.
+    statsAutosave_.setDisabledHandler([] {
+        auto cfg = core::Config::instance().getDns();
+        cfg.statsAutosave = false;
+        core::Config::instance().setDns(cfg);
+        ESP_LOGI(TAG, "statistics autosave stopped and switched off in the settings");
+    });
+    statsAutosave_.configure(enabled, unit, interval);
+}
+
 void DnsServer::applyCacheAutoUpdate(bool enabled, core::AutosavePeriod unit,
                                      uint16_t interval, uint16_t batch,
                                      uint16_t pauseSec)
@@ -889,9 +908,20 @@ void DnsServer::statsJobTask(void* arg)
     vTaskDelete(nullptr);
 }
 
-DnsServer::RestartSave DnsServer::startStatsSaveJob()
+DnsServer::RestartSave DnsServer::startStatsSaveJob(StatsSaveOrigin origin)
 {
-    const bool enabled = core::Config::instance().getDns().cacheInternalSaveStats;
+    // A save the operator asked for is an order, not a policy: the switch on the
+    // page governs the automatic writes a restart asks for, and a button (or the
+    // autosave the operator turned on himself) that quietly did nothing while
+    // that switch was off would be a lie (stages 188/189). writeStatsNow() reads
+    // the same flag before it looks at the switch.
+    const bool asked = (origin == StatsSaveOrigin::AskedFor);
+    const bool enabled = asked || core::Config::instance().getDns().cacheInternalSaveStats;
+    statsJobManual_ = asked;
+
+    // A save is a save: the next automatic one is a full period away rather than
+    // around the corner. The rule the cache's autosave follows as well.
+    if (asked) statsAutosave_.notifyManualSave();
 
     RestartSaveJobState::StartResult started = RestartSaveJobState::StartResult::Failed;
     if (statsJobMutex_) {
@@ -981,7 +1011,7 @@ bool DnsServer::saveStatsBeforeRestart()
 RestartSaveJobState::Verdict DnsServer::writeStatsNow(string& detail)
 {
     detail.clear();
-    if (!core::Config::instance().getDns().cacheInternalSaveStats) {
+    if (!statsJobManual_ && !core::Config::instance().getDns().cacheInternalSaveStats) {
         ESP_LOGI(TAG, "statistics are not kept before a reboot (disabled)");
         return RestartSaveJobState::Verdict::Skipped;
     }
@@ -1061,6 +1091,16 @@ bool DnsServer::restoreStatsFromFile()
         return false;
     }
 
+    applyStatsTotals(totals);
+
+    ESP_LOGI(TAG, "statistics restored: hits=%u forward=%u avg=%u us wait=%u us",
+             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs(),
+             static_cast<unsigned>(totals.avgWaitUs()));
+    return true;
+}
+
+void DnsServer::applyStatsTotals(const DnsStatTotals& totals)
+{
     // Saturate instead of wrapping: four billion hits is far away, but a counter
     // that passes through zero would look like a device that lost its cache.
     internalCacheHits_ = (totals.hits > DNS_COUNTER_MAX)
@@ -1076,10 +1116,87 @@ bool DnsServer::restoreStatsFromFile()
     internalCache_.restoreMeasurement(totals.waitUs, totals.walkedNodes,
                                       totals.stores, totals.evictScans,
                                       totals.evictScanUs, totals.evictScanNodes);
+}
 
-    ESP_LOGI(TAG, "statistics restored: hits=%u forward=%u avg=%u us wait=%u us",
-             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs(),
-             static_cast<unsigned>(totals.avgWaitUs()));
+// ─────────────────────────────────────────────────────
+// The statistics file, on the operator's command (stage 188)
+// ─────────────────────────────────────────────────────
+
+DnsServer::StatsFileInfo DnsServer::statsFileInfo() const
+{
+    StatsFileInfo info;
+    info.exists = DnsStatStore::exists(DnsStatStore::kPath);
+    if (info.exists) DnsStatStore::fileSize(DnsStatStore::kPath, info.size);
+    return info;
+}
+
+// Read the file back into the counters. Deliberately not gated by the switch:
+// that switch says "keep the statistics across a restart", and a button the
+// operator pressed himself is not an automatic write. The boot restore keeps its
+// gate, because there the switch is the only thing that can have expressed a
+// wish — nothing else asked.
+bool DnsServer::loadStatsFileNow(string& detail)
+{
+    detail.clear();
+
+    DnsStatTotals totals;
+    string why;
+    if (!DnsStatStore::load(DnsStatStore::kPath, totals, &why)) {
+        detail = why;
+        ESP_LOGW(TAG, "statistics could not be loaded from %s (%s)",
+                 DnsStatStore::kPath, why.c_str());
+        return false;
+    }
+
+    applyStatsTotals(totals);
+    ESP_LOGI(TAG, "statistics loaded from the file: hits=%u forward=%u avg=%u us",
+             internalCacheHits_, forwardedCount_, internalCacheAvgHitUs());
+    return true;
+}
+
+// Zero the counters and drop the file. Deleting it is not a bonus: a device with
+// zeroed counters and the old record still on the volume would read the same
+// numbers back at the very next boot, and the operator who pressed Reset would
+// watch his statistics return.
+void DnsServer::resetStats()
+{
+    DnsStatTotals zero;
+    applyStatsTotals(zero);
+
+    const bool removed = DnsStatStore::remove(DnsStatStore::kPath);
+    ESP_LOGI(TAG, "statistics reset from the web interface (file %s)",
+             removed ? "removed" : "was not there");
+}
+
+// What the statistics autosave hands itself as a `WriteHandler` (stage 189):
+// start the job the reboot path and the page's button use, wait for it, and
+// report the verdict in the device's own words. Deliberately not a second way to
+// write the file — one implementation, one read-back check, one retry.
+bool DnsServer::writeStatsFileNow(string& detail)
+{
+    detail.clear();
+
+    const RestartSave started = startStatsSaveJob(StatsSaveOrigin::AskedFor);
+    if (started == RestartSave::Busy) {
+        // A manual save is in flight; that one writes the same file, so this
+        // period is skipped rather than queued behind it.
+        detail = "a save is already running";
+        return false;
+    }
+    if (started != RestartSave::Ok) {
+        detail = "could not start the save";
+        return false;
+    }
+    if (!waitForStatsJob(kPersistStallMs)) {
+        detail = "the save did not finish in time";
+        return false;
+    }
+
+    const StatsProgress p = statsProgress();
+    if (p.result != RestartSaveJobState::Verdict::Ok) {
+        detail = p.detail.empty() ? "the save failed" : p.detail;
+        return false;
+    }
     return true;
 }
 

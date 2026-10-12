@@ -21,11 +21,10 @@
         </div>
 
         <div id="dns-internal-options" style="display:none;">
-            <!-- One card, two switches: Ignore TTL and Auto Update. The statistics
-                 switch was moved down into the Cache card where the rest of the
-                 cache controls live. Auto Update (and everything below it) only
-                 shows while Ignore TTL is on: without it the records expire on
-                 their own, so there is nothing for the sweep to do. -->
+            <!-- One card, two switches: Ignore TTL and Auto Update. Auto Update
+                 (and everything below it) only shows while Ignore TTL is on:
+                 without it the records expire on their own, so there is nothing
+                 for the sweep to do. -->
             <div class="card">
                 <div class="toggle-row" style="margin-bottom:0.5rem;">
                     <span data-i18n="dns_internal.ignore_ttl">Ignore TTL</span>
@@ -102,13 +101,6 @@
                     <button class="btn" onclick="loadInternalCacheFile(this)" data-i18n="dns_internal.load_file">Load from file</button>
                     <button class="btn" onclick="resetInternalCache(this)" data-i18n="dns_internal.reset">Reset</button>
                 </div>
-                <div class="toggle-row" style="margin-bottom:0.5rem;">
-                    <span data-i18n="dns_internal.save_stats">Save statistics before reboot</span>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="dns-internal-save-stats" onchange="toggleInternalSaveStats()">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
                 <div class="toggle-row">
                     <span data-i18n="dns_internal.save_cache">Save cache before reboot</span>
                     <label class="toggle-switch">
@@ -134,9 +126,13 @@
                                 onchange="applyAutosaveIntervalMax()">
                             <option value="2" data-i18n="dns_internal.period_minute">minutes</option>
                             <option value="0" data-i18n="dns_internal.period_hour">hours</option>
-                            <option value="1" data-i18n="dns_internal.period_day">days</option>
+                            <option value="1" data-i18n="dns_internal.period_day" selected>days</option>
                         </select>
                     </span>
+                </div>
+                <div class="toggle-row" id="dns-internal-autosave-next-row" style="display:none;">
+                    <span data-i18n="dns_internal.autosave_next">Next update in</span>
+                    <span id="dns-internal-autosave-next" class="test-conn-result"></span>
                 </div>
                 <button class="btn btn-primary" id="dns-internal-autosave-save"
                         onclick="saveInternalAutosavePeriod(this)" data-i18n="dns_internal.autosave_save"
@@ -154,6 +150,61 @@
                     <p id="dns-internal-progress-done" class="hint"></p>
                 </div>
                 <p class="hint" data-i18n="dns_internal.file_hint">The cache is written to /fat/cache.dat and restored automatically on boot.</p>
+            </div>
+
+            <!-- The counters of the main page (From cache / Forward / Avg hit) are
+                 kept across a restart by a setting of their own: the firmware
+                 writes three numbers to Statistica.dat, so this is not a cache-file
+                 control (stage 187). The file is managed here as well — the three
+                 buttons work on Statistica.dat, not on cache.dat, which has its own
+                 buttons above (stage 188). It stays inside this options block on
+                 purpose, as the block itself follows the internal-cache switch. -->
+            <div class="card" id="dns-internal-stats">
+                <div class="toggle-row">
+                    <h3 data-i18n="dns_internal.stats_block">Statistics</h3>
+                    <span id="dns-stats-file-status" class="test-conn-result"></span>
+                </div>
+                <div class="test-conn-row">
+                    <button class="btn btn-primary" onclick="saveStatsFile(this)" data-i18n="dns_internal.save_file">Save to file</button>
+                    <button class="btn" onclick="loadStatsFile(this)" data-i18n="dns_internal.load_file">Load from file</button>
+                    <button class="btn" onclick="resetStats(this)" data-i18n="dns_internal.reset">Reset</button>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="dns_internal.save_stats">Save statistics before reboot</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-internal-save-stats" onchange="toggleInternalSaveStats()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span data-i18n="dns_internal.autosave">Autosave</span>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dns-stats-autosave" onchange="toggleStatsAutosave()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="toggle-row" id="dns-stats-autosave-period-row" style="display:none;">
+                    <span data-i18n="dns_internal.autosave_period">Save every</span>
+                    <span>
+                        <input type="number" id="dns-stats-autosave-interval"
+                               min="1" max="24" step="1" value="1" style="width:4.5rem;"
+                               oninput="applyStatsAutosaveIntervalMax()">
+                        <select id="dns-stats-autosave-unit" style="width:6.5rem;"
+                                onchange="applyStatsAutosaveIntervalMax()">
+                            <option value="2" data-i18n="dns_internal.period_minute">minutes</option>
+                            <option value="0" data-i18n="dns_internal.period_hour">hours</option>
+                            <option value="1" data-i18n="dns_internal.period_day" selected>days</option>
+                        </select>
+                    </span>
+                </div>
+                <div class="toggle-row" id="dns-stats-autosave-next-row" style="display:none;">
+                    <span data-i18n="dns_internal.autosave_next">Next update in</span>
+                    <span id="dns-stats-autosave-next" class="test-conn-result"></span>
+                </div>
+                <button class="btn btn-primary" id="dns-stats-autosave-save"
+                        onclick="saveStatsAutosavePeriod(this)" data-i18n="dns_internal.autosave_save"
+                        style="margin-top:0.8rem; display:none;">Save</button>
+                <p class="hint" data-i18n="dns_internal.stats_file_hint">The counters are written to /fat/Statistica.dat and read back at boot.</p>
             </div>
         </div>
 
@@ -190,7 +241,18 @@
             const field = document.getElementById('dns-internal-autosave-interval');
             field.value = String(Number(data.cache_internal_autosave_interval) || 1);
             applyAutosaveIntervalMax();
-            updateAutosavePeriodVisibility();
+            // The statistics autosave (stage 189): its own switch and period.
+            // The switch follows the cache's master toggle like the rest of the
+            // block; the fields are filled from the settings either way.
+            const statsAuto = document.getElementById('dns-stats-autosave');
+            statsAuto.checked = !!data.stats_autosave;
+            statsAuto.disabled = !internalAvailable;
+            const statsUnit = document.getElementById('dns-stats-autosave-unit');
+            statsUnit.value = String(Number(data.stats_autosave_period) || 0);
+            const statsField = document.getElementById('dns-stats-autosave-interval');
+            statsField.value = String(Number(data.stats_autosave_interval) || 1);
+            applyStatsAutosaveIntervalMax();
+            updateAutosaveVisibility();
             // Auto Update: interval and unit.
             const au = document.getElementById('dns-internal-auto-update');
             au.checked = !!data.cache_internal_autoupdate;
@@ -247,6 +309,7 @@
             }
             updateInternalOptionsVisibility();
             if (cb.checked) updateInternalCacheFileStatus();
+            if (cb.checked) updateStatsFileStatus();
         }
 
         async function toggleInternalIgnoreTtl() {
@@ -279,6 +342,146 @@
             }
         }
 
+        /* ─── The statistics file itself (stage 188) ───
+           Three buttons on Statistica.dat, the mirror of the cache's three on
+           cache.dat: write it now, read it back into the counters, and a reset
+           that zeroes the counters and drops the file. The device answers a write
+           with "started" — the job runs on its own task — so the verdict comes
+           from GET /api/dns/stats/progress, the same endpoint the reboot path's
+           step line reads. */
+        const kStatsPollMs = 500;
+        const kStatsStatusRefreshMs = 2000;
+
+        async function updateStatsFileStatus() {
+            const el = document.getElementById('dns-stats-file-status');
+            if (!el) return;
+            try {
+                const d = await fetchJSON('/api/dns/stats/file');
+                if (d.exists) {
+                    // Bytes, not kilobytes: the record is 92 of them, and "0.1 KB"
+                    // would be a rounding of the whole file.
+                    el.textContent = tr('dns_internal.file_exists') + ' ' + d.size_bytes + ' B';
+                    el.className = 'test-conn-result test-conn-ok';
+                } else {
+                    el.textContent = tr('dns_internal.stats_file_missing');
+                    el.className = 'test-conn-result test-conn-warn';
+                }
+            } catch (e) {
+                el.textContent = tr('dns_internal.stats_file_missing');
+                el.className = 'test-conn-result test-conn-warn';
+            }
+        }
+
+        function setStatsBusy(busy, what) {
+            document.querySelectorAll('#dns-internal-stats button').forEach(b => {
+                b.disabled = busy;
+            });
+            if (what) showStatsResult(what, null);
+        }
+
+        /* ok === null keeps the "in progress" colour: a failure is red, a result
+           is green, and "saving" is neither. */
+        function showStatsResult(text, ok) {
+            const el = document.getElementById('dns-stats-file-status');
+            if (!el) return;
+            el.textContent = text;
+            el.className = 'test-conn-result ' +
+                            (ok === null ? 'test-conn-warn' : (ok ? 'test-conn-ok' : 'test-conn-fail'));
+        }
+
+        async function saveStatsFile(btn) {
+            setStatsBusy(true, tr('dns_internal.saving'));
+            try {
+                const resp = await apiFetch('/api/dns/stats/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const d = await resp.json();
+                if (!resp.ok || d.status !== 'started') {
+                    setStatsBusy(false);
+                    showStatsResult(d.message || tr('dns_internal.stats_save_failed'), false);
+                    return;
+                }
+            } catch (e) {
+                setStatsBusy(false);
+                showStatsResult(tr('dns_internal.stats_save_failed'), false);
+                return;
+            }
+
+            const timer = setInterval(async () => {
+                let p = { busy: true };
+                try { p = await fetchJSON('/api/dns/stats/progress'); } catch (e) { /* keep waiting */ }
+                if (p.busy) return;
+                clearInterval(timer);
+                setStatsBusy(false);
+                if (p.last_result === 'ok') {
+                    showStatsResult(tr('dns_internal.stats_saved'), true);
+                } else {
+                    // The device's own words travel with the verdict, and without
+                    // a terminal they are the only explanation the operator gets.
+                    showStatsResult((p.last_detail ? p.last_detail + ' — ' : '') +
+                                    tr('dns_internal.stats_save_failed'), false);
+                }
+                setTimeout(updateStatsFileStatus, kStatsStatusRefreshMs);
+            }, kStatsPollMs);
+        }
+
+        async function loadStatsFile(btn) {
+            setStatsBusy(true, tr('dns_internal.loading'));
+            try {
+                const resp = await apiFetch('/api/dns/stats/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'ok') {
+                    showStatsResult(tr('dns_internal.stats_loaded'), true);
+                } else if (resp.status === 404) {
+                    showStatsResult(tr('dns_internal.stats_file_missing'), false);
+                } else {
+                    showStatsResult((d.detail ? d.detail + ' — ' : '') +
+                                    (d.message || tr('dns_internal.stats_load_failed')), false);
+                }
+            } catch (e) {
+                showStatsResult(tr('dns_internal.stats_load_failed'), false);
+            }
+            setStatsBusy(false);
+        }
+
+        // Zero the counters and delete the file. Unlike the cache's Reset — which
+        // leaves cache.dat alone, because that file is the operator's backup — this
+        // one must take the file with it: the counters come back from it at the
+        // next boot, so a reset that spared it would last until the next restart.
+        async function resetStats(btn) {
+            const answer = await showDialog({
+                title: tr('dns_internal.stats_reset_ask'),
+                hint: tr('dns_internal.stats_reset_hint'),
+                okLabel: tr('dns_internal.reset'),
+                cancelLabel: tr('common.cancel'),
+                danger: true,
+            });
+            if (!answer) return;
+
+            setStatsBusy(true, tr('dns_internal.resetting'));
+            try {
+                const resp = await apiFetch('/api/dns/stats/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const d = await resp.json();
+                const ok = resp.ok && d.status === 'ok';
+                showStatsResult(ok ? tr('dns_internal.stats_reset_done')
+                                   : tr('dns_internal.stats_reset_failed'), ok);
+            } catch (e) {
+                showStatsResult(tr('dns_internal.stats_reset_failed'), false);
+            }
+            setStatsBusy(false);
+            setTimeout(updateStatsFileStatus, kStatsStatusRefreshMs);
+        }
+
         /* The cache itself (cache.dat) is kept across a planned restart the same
            way: the device writes the whole table to /fat/cache.dat before it
            reboots — the Reboot button, a firmware update or the terminal menu —
@@ -304,14 +507,14 @@
         async function toggleInternalAutosave() {
             const box = document.getElementById('dns-internal-autosave');
             const checked = box.checked;
-            updateAutosavePeriodVisibility();
+            updateAutosaveVisibility();
             const result = await saveDnsPartial({ cache_internal_autosave: checked });
             if (result.status === 'error') {
                 await showDialog({ title: tr('common.error'),
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
                 box.checked = !checked;
-                updateAutosavePeriodVisibility();
+                updateAutosaveVisibility();
             }
         }
 
@@ -339,54 +542,241 @@
             if (value < 1) field.value = '1';
         }
 
-        async function saveAutosavePeriod() {
-            const unit = document.getElementById('dns-internal-autosave-unit');
-            const field = document.getElementById('dns-internal-autosave-interval');
-            const result = await saveDnsPartial({
-                cache_internal_autosave_period: Number(unit.value) || 0,
-                cache_internal_autosave_interval: Number(field.value) || 1,
-            });
+        /* ─── One Save saves the whole page (stage 189) ───
+           The page has three Save buttons — under the "Save every" of the cache's
+           autosave, of its auto-update and of the statistics' autosave — and the
+           operator's rule is that any of them saves **every** change on the page:
+           a number typed in one block must not be lost by pressing the Save of
+           another. The device is told once, and `saveDnsPartial()` reads the
+           stored object first, so the fields this page does not own (the cache
+           size, the logging settings, the external DNS) come back unchanged. */
+        function intFromField(id, fallback) {
+            const value = Number(document.getElementById(id).value);
+            return Number.isFinite(value) ? value : fallback;
+        }
+
+        function collectCachePageSettings() {
+            // Clamp first: a value the operator typed is brought into its range
+            // before it travels, so the device never receives one outside it.
+            applyAutosaveIntervalMax();
+            applyStatsAutosaveIntervalMax();
+            applyAutoupdateIntervalMax();
+            applyAutoupdateBatchMax();
+            applyAutoupdatePauseMax();
+            return {
+                cache_internal: document.getElementById('dns-internal').checked,
+                cache_internal_ignore_ttl: document.getElementById('dns-internal-ignore-ttl').checked,
+                cache_internal_save_stats: document.getElementById('dns-internal-save-stats').checked,
+                cache_internal_save_cache: document.getElementById('dns-internal-save-cache').checked,
+                cache_internal_autosave: document.getElementById('dns-internal-autosave').checked,
+                cache_internal_autosave_period: intFromField('dns-internal-autosave-unit', 1),
+                cache_internal_autosave_interval: intFromField('dns-internal-autosave-interval', 1),
+                cache_internal_autoupdate: document.getElementById('dns-internal-auto-update').checked,
+                cache_internal_autoupdate_period: intFromField('dns-internal-autoupdate-unit', 0),
+                cache_internal_autoupdate_interval: intFromField('dns-internal-autoupdate-interval', 1),
+                cache_internal_autoupdate_batch: intFromField('dns-internal-autoupdate-batch', 50),
+                cache_internal_autoupdate_pause: intFromField('dns-internal-autoupdate-pause', 60),
+                stats_autosave: document.getElementById('dns-stats-autosave').checked,
+                stats_autosave_period: intFromField('dns-stats-autosave-unit', 1),
+                stats_autosave_interval: intFromField('dns-stats-autosave-interval', 1),
+            };
+        }
+
+        // Any Save on this page saves every field of it, so every line on the page
+        // says so: the cache's own line (whose card holds one of the three Save
+        // buttons, and which has no other way to report a save) and the statistics'
+        // (which describes Statistica.dat again a moment later). One action, one
+        // story — a save that showed its progress in one block while the other
+        // said nothing was exactly what the operator noticed.
+        async function saveCachePage(btn) {
+            const out = document.getElementById('dns-internal-file-status');
+            const sayBoth = (text, kind) => {
+                if (out) {
+                    out.textContent = text;
+                    out.className = 'test-conn-result ' +
+                        (kind === 'ok' ? 'test-conn-ok' : (kind === 'busy' ? 'test-conn-warn' : ''));
+                }
+                if (kind === 'idle') return;   // the statistics line goes back to the file state below
+                showStatsResult(text, kind === 'ok' ? true : null);
+            };
+
+            if (btn) btn.disabled = true;
+            sayBoth(tr('dns_internal.saving'), 'busy');
+            const result = await saveDnsPartial(collectCachePageSettings());
+            if (result.status === 'error') {
+                // The dialog already says why; "Saved" would be a lie, so both
+                // lines are cleared instead (stage 185) — and the statistics one
+                // returns to the state of its file rather than keeping "Saving…".
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                sayBoth('', 'idle');
+                await updateStatsFileStatus();
+                if (btn) btn.disabled = false;
+                return result;
+            }
+            sayBoth(tr('dns_internal.saved'), 'ok');
+            // Saving re-arms the timers on the device: show the new countdowns at
+            // once rather than up to a poll later.
+            refreshAutosaveCountdown();
+            await refreshAutoupdateCountdown();
+            setTimeout(updateStatsFileStatus, kStatsStatusRefreshMs);
+            if (btn) btn.disabled = false;
+            return result;
+        }
+
+        // The three Save buttons of the page: all of them save the whole page and
+        // all of them report the same way; they differ only in where they sit.
+        async function saveInternalAutosavePeriod(btn) {
+            await saveCachePage(btn);
+        }
+
+        // (The old single-block save is gone: every Save button of this page goes
+        // through `saveCachePage()` above, so none of them can drop the edits made
+        // in another block.)
+
+        // The periods, the Save buttons and the countdowns make sense only while
+        // their own switch is on, and each block has its own switch: the cache's
+        // writes cache.dat, the statistics' writes Statistica.dat (stage 189).
+        function updateAutosaveVisibility() {
+            const cacheBox = document.getElementById('dns-internal-autosave');
+            const cacheOn = !!(cacheBox && cacheBox.checked);
+            const cacheRow = document.getElementById('dns-internal-autosave-period-row');
+            if (cacheRow) cacheRow.style.display = cacheOn ? '' : 'none';
+            const cacheSave = document.getElementById('dns-internal-autosave-save');
+            if (cacheSave) cacheSave.style.display = cacheOn ? '' : 'none';
+            if (cacheOn) applyAutosaveIntervalMax();
+
+            const statsBox = document.getElementById('dns-stats-autosave');
+            const statsOn = !!(statsBox && statsBox.checked);
+            const statsRow = document.getElementById('dns-stats-autosave-period-row');
+            if (statsRow) statsRow.style.display = statsOn ? '' : 'none';
+            const statsSave = document.getElementById('dns-stats-autosave-save');
+            if (statsSave) statsSave.style.display = statsOn ? '' : 'none';
+            if (statsOn) applyStatsAutosaveIntervalMax();
+
+            if (cacheOn || statsOn) startAutosaveCountdown();
+            else stopAutosaveCountdown();
+        }
+
+        // ─── The second autosave: the statistics file (stage 189) ───
+        //
+        // The same three rows as the cache's block — the switch, "Save every" and
+        // the countdown — but about `Statistica.dat`, 92 bytes written on a timer
+        // of its own. The rules the device follows are the cache autosave's,
+        // because they were decided once: the countdown shifts after a manual
+        // save, the timer is parked while the clock is not set, and stopping it on
+        // the scheduler page switches the setting off.
+
+        async function toggleStatsAutosave() {
+            const box = document.getElementById('dns-stats-autosave');
+            const checked = box.checked;
+            updateAutosaveVisibility();
+            const result = await saveDnsPartial({ stats_autosave: checked });
             if (result.status === 'error') {
                 await showDialog({ title: tr('common.error'),
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
+                box.checked = !checked;
+                updateAutosaveVisibility();
             }
-            return result;
         }
 
-        // The unit and the number are only prepared here: the device is told
-        // when the operator presses Save, so a half-typed interval never reaches
-        // the settings (and never restarts the timer twice).
-        async function saveInternalAutosavePeriod(btn) {
-            applyAutosaveIntervalMax();
-            const out = document.getElementById('dns-internal-file-status');
-            if (btn) btn.disabled = true;
-            if (out) {
-                out.textContent = tr('dns_internal.saving');
-                out.className = 'test-conn-result test-conn-warn';
-            }
-            const result = await saveAutosavePeriod();
-            // "Saved" is a claim about the device, so it is only made when the
-            // device said so: a failed save keeps its own message (the dialog)
-            // and the line is not overwritten with a success (stage 185).
-            if (out && (!result || result.status !== 'error')) {
-                out.textContent = tr('dns_internal.saved');
-                out.className = 'test-conn-result test-conn-ok';
-            } else if (out) {
-                out.textContent = '';
-            }
-            if (btn) btn.disabled = false;
+        function applyStatsAutosaveIntervalMax() {
+            const unit = document.getElementById('dns-stats-autosave-unit');
+            const field = document.getElementById('dns-stats-autosave-interval');
+            if (!unit || !field) return;
+            const max = autosaveIntervalMax(unit.value);   // the same bounds
+            field.max = String(max);
+            const value = Number(field.value) || 1;
+            if (value > max) field.value = String(max);
+            if (value < 1) field.value = '1';
         }
 
-        // The period only makes sense while the switch is on.
-        function updateAutosavePeriodVisibility() {
-            const box = document.getElementById('dns-internal-autosave');
-            const on = !!(box && box.checked);
-            const row = document.getElementById('dns-internal-autosave-period-row');
-            if (row) row.style.display = on ? '' : 'none';
-            const save = document.getElementById('dns-internal-autosave-save');
-            if (save) save.style.display = on ? '' : 'none';
-            if (on) applyAutosaveIntervalMax();
+        // The unit and the number are read by `collectCachePageSettings()` when
+        // the operator presses Save, so a half-typed interval never reaches the
+        // settings (and never restarts the timer twice).
+        async function saveStatsAutosavePeriod(btn) {
+            await saveCachePage(btn);
+        }
+
+        // ─── The two autosave countdowns (stage 189) ───
+        //
+        // One endpoint for both halves (`GET /api/dns/autosave`): each block shows
+        // its own "Next update in" under "Save every" while its switch is on. The
+        // device owns the remaining seconds, the page ticks them locally and
+        // re-reads them every few seconds — the same arrangement as the Auto
+        // Update countdown above. `counting` is false while the clock is not set:
+        // a device that does not know the date has no countdown, and a frozen
+        // number would be worse than none.
+        const kAutosavePollMs = 5000;
+        let autosavePoll = null;
+        let autosaveTick = null;
+        let autosaveState = { cache: { counting: false, remaining: 0 },
+                              stats: { counting: false, remaining: 0 } };
+
+        const autosaveHalves = [
+            { key: 'cache', box: 'dns-internal-autosave',
+              row: 'dns-internal-autosave-next-row', out: 'dns-internal-autosave-next' },
+            { key: 'stats', box: 'dns-stats-autosave',
+              row: 'dns-stats-autosave-next-row', out: 'dns-stats-autosave-next' },
+        ];
+
+        // The row follows two things, and both are needed: the switch, because the
+        // page knows about that click at once, and the device's `counting`, because
+        // a timer with no clock behind it has no countdown to show. Waiting for the
+        // device alone would leave a countdown of a switched-off autosave on screen
+        // for as long as the next poll takes.
+        function renderAutosaveCountdown() {
+            autosaveHalves.forEach(h => {
+                const row = document.getElementById(h.row);
+                const out = document.getElementById(h.out);
+                if (!row || !out) return;
+                const box = document.getElementById(h.box);
+                const on = !!(box && box.checked);
+                const st = autosaveState[h.key];
+                row.style.display = (on && st.counting) ? '' : 'none';
+                if (on && st.counting) out.textContent = formatCountdown(st.remaining);
+            });
+        }
+
+        async function refreshAutosaveCountdown() {
+            try {
+                const d = await fetchJSON('/api/dns/autosave');
+                autosaveHalves.forEach(h => {
+                    const st = d[h.key] || {};
+                    autosaveState[h.key] = { counting: !!st.counting,
+                                             remaining: Number(st.remaining_sec) || 0 };
+                });
+            } catch (e) {
+                // The device did not answer: keep the last value instead of
+                // inventing one.
+            }
+            renderAutosaveCountdown();
+        }
+
+        function startAutosaveCountdown() {
+            if (autosavePoll) { refreshAutosaveCountdown(); return; }
+            refreshAutosaveCountdown();
+            autosavePoll = setInterval(refreshAutosaveCountdown, kAutosavePollMs);
+            autosaveTick = setInterval(() => {
+                autosaveHalves.forEach(h => {
+                    const st = autosaveState[h.key];
+                    if (st.counting && st.remaining > 0) st.remaining -= 1;
+                });
+                renderAutosaveCountdown();
+            }, 1000);
+        }
+
+        function stopAutosaveCountdown() {
+            if (autosavePoll) clearInterval(autosavePoll);
+            if (autosaveTick) clearInterval(autosaveTick);
+            autosavePoll = null;
+            autosaveTick = null;
+            autosaveHalves.forEach(h => {
+                const row = document.getElementById(h.row);
+                if (row) row.style.display = 'none';
+            });
         }
 
         // ─── Auto Update ───
@@ -425,50 +815,11 @@
             if (value < 1) field.value = '1';
         }
 
-        async function saveAutoupdatePeriod() {
-            const unit = document.getElementById('dns-internal-autoupdate-unit');
-            const field = document.getElementById('dns-internal-autoupdate-interval');
-            const result = await saveDnsPartial({
-                cache_internal_autoupdate_period: Number(unit.value) || 0,
-                cache_internal_autoupdate_interval: Number(field.value) || 1,
-            });
-            if (result.status === 'error') {
-                await showDialog({ title: tr('common.error'),
-                                   hint: result.message || tr('common.unknown_error'),
-                                   hideCancel: true });
-            }
-            return result;
-        }
-
-        // The unit and the number are only prepared here: the device is told
-        // when the operator presses Save, so a half-typed interval never reaches
-        // the settings (and never restarts the timer twice).
+        // The Auto Update fields travel with the whole page like the rest of them
+        // (stage 189), so this is the shared save; every Save of the page reports
+        // the same way.
         async function saveInternalAutoupdatePeriod(btn) {
-            applyAutoupdateIntervalMax();
-            const out = document.getElementById('dns-internal-file-status');
-            if (btn) btn.disabled = true;
-            if (out) {
-                out.textContent = tr('dns_internal.saving');
-                out.className = 'test-conn-result test-conn-warn';
-            }
-            const result = await saveAutoupdateSettings();
-            if (result && result.status === 'error') {
-                // The dialog has already said why (saveAutoupdateSettings asks for
-                // it); "Saved" would be a lie, so the line is cleared instead —
-                // and the countdown is not refreshed, because nothing was saved
-                // (stage 185).
-                if (out) out.textContent = '';
-                if (btn) btn.disabled = false;
-                return;
-            }
-            // Saving re-arms the timer on the device: show the new countdown at
-            // once rather than up to a poll later.
-            await refreshAutoupdateCountdown();
-            if (out) {
-                out.textContent = tr('dns_internal.saved');
-                out.className = 'test-conn-result test-conn-ok';
-            }
-            if (btn) btn.disabled = false;
+            await saveCachePage(btn);
         }
 
         // One sweep on demand (stage 177). The device runs the very cycle the
@@ -532,14 +883,8 @@
         let autoupdateTick = null;
         let autoupdateState = { counting: false, running: false, remaining: 0 };
 
-        function formatCountdown(totalSec) {
-            const s = Math.max(0, Math.floor(Number(totalSec) || 0));
-            const days = Math.floor(s / 86400);
-            const hours = Math.floor((s % 86400) / 3600);
-            const mins = Math.floor((s % 3600) / 60);
-            const pad = n => String(n).padStart(2, '0');
-            return days + 'd ' + pad(hours) + ':' + pad(mins);
-        }
+        // The "Nd HH:MM" shape itself lives in app.js (formatCountdown), because
+        // the Time Server page draws its sync countdown with the same one.
 
         function renderAutoupdateCountdown() {
             const row = document.getElementById('dns-internal-autoupdate-next-row');
@@ -621,28 +966,8 @@
             if (value > 3600) field.value = '3600';
         }
 
-        // Save both period and batch together when the user presses Save or leaves the page.
-        // The answer travels back to the caller: this is the only save on the
-        // page whose result nobody used to look at, so a refused request left
-        // "Saved" on the screen (stage 185).
-        async function saveAutoupdateSettings() {
-            const unit = document.getElementById('dns-internal-autoupdate-unit');
-            const field = document.getElementById('dns-internal-autoupdate-interval');
-            const batch = document.getElementById('dns-internal-autoupdate-batch');
-            const pause = document.getElementById('dns-internal-autoupdate-pause');
-            const result = await saveDnsPartial({
-                cache_internal_autoupdate_period: Number(unit.value) || 0,
-                cache_internal_autoupdate_interval: Number(field.value) || 1,
-                cache_internal_autoupdate_batch: Number(batch.value) || 50,
-                cache_internal_autoupdate_pause: Number(pause.value) || 60,
-            });
-            if (result.status === 'error') {
-                await showDialog({ title: tr('common.error'),
-                                   hint: result.message || tr('common.unknown_error'),
-                                   hideCancel: true });
-            }
-            return result;
-        }
+        // The Auto Update fields are read by `collectCachePageSettings()`; there
+        // is no per-block save left on this page (stage 189).
 
         let persistPollTimer = null;
 
@@ -857,6 +1182,7 @@
                 return;
             }
             updateInternalCacheFileStatus();
+            updateStatsFileStatus();
         }
         document.addEventListener('DOMContentLoaded', refreshFileStatusWhenReady);
     </script>

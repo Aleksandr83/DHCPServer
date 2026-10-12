@@ -1026,6 +1026,25 @@ function formatBytes(bytes) {
     return (mb / kBytesPerKib).toFixed(2) + ' GB';
 }
 
+/* A countdown as "Nd HH:MM" — the same fixed shape the uptime row uses, so a
+   running timer does not change width as it walks. Seconds are left out on
+   purpose: the value is re-read every few seconds and the local tick only moves
+   the minute, so a seconds field would be mostly invention. */
+function formatCountdown(totalSec) {
+    // Rule 39: the scale a countdown is broken down into, and the width of the
+    // two fields of the clock (hh and mm).
+    const SEC_PER_DAY = 86400;
+    const SEC_PER_HOUR = 3600;
+    const SEC_PER_MIN = 60;
+    const CLOCK_FIELD_DIGITS = 2;
+    const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
+    const days = Math.floor(sec / SEC_PER_DAY);
+    const hours = Math.floor((sec % SEC_PER_DAY) / SEC_PER_HOUR);
+    const mins = Math.floor((sec % SEC_PER_HOUR) / SEC_PER_MIN);
+    const pad = n => String(n).padStart(CLOCK_FIELD_DIGITS, '0');
+    return days + 'd ' + pad(hours) + ':' + pad(mins);
+}
+
 /* Device time for DISPLAY: the API/browser fields use the ISO-ish wire format
    "YYYY-MM-DD HH:MM:SS", but the clock readouts are shown day-first and without
    seconds — "DD-MM-YYYY HH:MM" (the pages poll every 5 s, so seconds would only

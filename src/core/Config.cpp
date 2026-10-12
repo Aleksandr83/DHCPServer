@@ -72,6 +72,11 @@ static const char* KEY_DNS_IC_SAVE_CACHE = "dns_ic_sv_cache";   // 15 (was 17)
 static const char* KEY_DNS_IC_AUTOSAVE        = "dns_ic_autosave";      // 15
 static const char* KEY_DNS_IC_AUTOSAVE_PERIOD = "dns_ic_as_per";        // 13
 static const char* KEY_DNS_IC_AUTOSAVE_INTERVAL = "dns_ic_as_int";      // 13
+// Stage 189: the statistics have their own autosave, so they get their own keys
+// (same 15-char rule as the family above).
+static const char* KEY_DNS_ST_AUTOSAVE          = "dns_st_autosave";   // 14
+static const char* KEY_DNS_ST_AUTOSAVE_PERIOD   = "dns_st_as_per";     // 12
+static const char* KEY_DNS_ST_AUTOSAVE_INTERVAL = "dns_st_as_int";     // 12
 static const char* KEY_DNS_IC_AUTOUPDATE      = "dns_ic_au_on";         // 13
 static const char* KEY_DNS_IC_AUTOUPDATE_PERIOD = "dns_ic_au_per";      // 14
 static const char* KEY_DNS_IC_AUTOUPDATE_INTERVAL = "dns_ic_au_int";    // 14
@@ -94,6 +99,9 @@ static const char* KEY_SEC_CERT_NAME  = "sec_cert_name";
 static const char* KEY_TIME_ENABLED   = "time_enabled";
 static const char* KEY_TIME_SYNC_EN   = "time_sync_en";
 static const char* KEY_TIME_ALLOW_LAN = "time_allow_lan";
+// 15 characters is the longest an NVS key may be, and "time_allow_only" is
+// exactly that - the name it would deserve ("time_only_allowed") does not fit.
+static const char* KEY_TIME_ALLOW_ONLY = "time_allow_only";
 static const char* KEY_TIME_RATE      = "time_rate";
 static const char* KEY_TIME_NTP       = "time_ntp";
 static const char* KEY_TIME_TZ_NAME   = "time_tz_name";
@@ -101,6 +109,7 @@ static const char* KEY_TIME_TZ_H      = "time_tz_h";
 static const char* KEY_TIME_SYNC_S    = "time_sync_s";
 static const char* KEY_TIME_LOG_TERM  = "time_log_term";
 static const char* KEY_TIME_LOG_REST  = "time_log_rest";
+static const char* KEY_TIME_LOG_FILE  = "time_log_file";
 static const char* KEY_TIME_LOG_URL   = "time_log_url";
 static const char* KEY_TIME_LOG_AUTH  = "time_log_auth";
 static const char* KEY_TIME_LOG_AUTH_U = "time_log_auth_u";
@@ -457,15 +466,26 @@ DnsConfig Config::getDns() const
     cfg.cacheInternalSaveStats = readI32(KEY_DNS_IC_STATS, 1) != 0;  // default ON
     cfg.cacheInternalSaveCache = readI32(KEY_DNS_IC_SAVE_CACHE, 1) != 0;  // default ON
     // Rule 39/153: autosave of the cache is off unless the operator turns
-    // it on; the period is an index (0 = hour, 1 = day, 2 = 30 days).
+    // it on; the period is an index (0 = hour, 1 = day, 2 = minutes), and a
+    // device that never saved one starts at a day (stage 189).
     cfg.cacheInternalAutosave = readI32(KEY_DNS_IC_AUTOSAVE, 0) != 0;
     cfg.cacheInternalAutosavePeriod = autosavePeriodFromIndex(
-        static_cast<uint8_t>(readI32(KEY_DNS_IC_AUTOSAVE_PERIOD, 0)));
+        static_cast<uint8_t>(readI32(KEY_DNS_IC_AUTOSAVE_PERIOD, 1)));
     // The month is unknown here (that needs the clock), so the clamp uses the
     // longest one; the task clamps again with the month that is running.
     cfg.cacheInternalAutosaveInterval = autosaveClampInterval(
         cfg.cacheInternalAutosavePeriod,
         static_cast<uint16_t>(readI32(KEY_DNS_IC_AUTOSAVE_INTERVAL, 1)), 0);
+    // Stage 189: the statistics autosave — off by default, same period rules as
+    // the cache's (the month is unknown here, so the clamp uses the longest one).
+    cfg.statsAutosave = readI32(KEY_DNS_ST_AUTOSAVE, 0) != 0;
+    // Default period: one day (index 1) — the operator asked for "Save every: 1
+    // day" for this file, where the cache's autosave defaults to an hour.
+    cfg.statsAutosavePeriod = autosavePeriodFromIndex(
+        static_cast<uint8_t>(readI32(KEY_DNS_ST_AUTOSAVE_PERIOD, 1)));
+    cfg.statsAutosaveInterval = autosaveClampInterval(
+        cfg.statsAutosavePeriod,
+        static_cast<uint16_t>(readI32(KEY_DNS_ST_AUTOSAVE_INTERVAL, 1)), 0);
     cfg.cacheInternalAutoUpdate = readI32(KEY_DNS_IC_AUTOUPDATE, 0) != 0;
     cfg.cacheInternalAutoUpdatePeriod = autosavePeriodFromIndex(
         static_cast<uint8_t>(readI32(KEY_DNS_IC_AUTOUPDATE_PERIOD, 0)));
@@ -513,6 +533,11 @@ void Config::setDns(const DnsConfig& cfg)
              static_cast<int32_t>(cfg.cacheInternalAutosavePeriod));
     writeI32(KEY_DNS_IC_AUTOSAVE_INTERVAL,
              static_cast<int32_t>(cfg.cacheInternalAutosaveInterval));
+    writeI32(KEY_DNS_ST_AUTOSAVE, cfg.statsAutosave ? 1 : 0);
+    writeI32(KEY_DNS_ST_AUTOSAVE_PERIOD,
+             static_cast<int32_t>(cfg.statsAutosavePeriod));
+    writeI32(KEY_DNS_ST_AUTOSAVE_INTERVAL,
+             static_cast<int32_t>(cfg.statsAutosaveInterval));
     writeI32(KEY_DNS_IC_AUTOUPDATE, cfg.cacheInternalAutoUpdate ? 1 : 0);
     writeI32(KEY_DNS_IC_AUTOUPDATE_PERIOD,
              static_cast<int32_t>(cfg.cacheInternalAutoUpdatePeriod));
@@ -666,12 +691,13 @@ TimeConfig Config::getTime() const
     TimeConfig cfg;
     cfg.enabled = readI32(KEY_TIME_ENABLED, 0) != 0;
     cfg.syncEnabled = readI32(KEY_TIME_SYNC_EN, 1) != 0;
-    cfg.externalNtp = readStr(KEY_TIME_NTP, "pool.ntp.org");
+    cfg.externalNtp = readStr(KEY_TIME_NTP, kNtpDefaultServers);
     cfg.timezone = readStr(KEY_TIME_TZ_NAME, "Europe/Moscow");
     cfg.utcOffsetHours = readI32(KEY_TIME_TZ_H, 3);
     cfg.syncIntervalSec =
         static_cast<uint32_t>(readI32(KEY_TIME_SYNC_S, 86400));
     cfg.allowOwnSubnet = readI32(KEY_TIME_ALLOW_LAN, 1) != 0;   // default ON
+    cfg.onlyAllowedComputers = readI32(KEY_TIME_ALLOW_ONLY, 0) != 0;  // default OFF
     {
         // Rule 39: the NTP rate limit is a count per second, so its scale is
         // the same 1..100 the percentage uses.
@@ -684,6 +710,7 @@ TimeConfig Config::getTime() const
     }
     cfg.logTerminal = readI32(KEY_TIME_LOG_TERM, 0) != 0;
     cfg.logRest = readI32(KEY_TIME_LOG_REST, 0) != 0;
+    cfg.logFile = readI32(KEY_TIME_LOG_FILE, 0) != 0;
     cfg.logUrl = readStr(KEY_TIME_LOG_URL, "");
     cfg.logAuthEnabled = readI32(KEY_TIME_LOG_AUTH, 0) != 0;
     cfg.logAuthUser = readStr(KEY_TIME_LOG_AUTH_U, "");
@@ -700,9 +727,11 @@ void Config::setTime(const TimeConfig& cfg)
     writeI32(KEY_TIME_TZ_H, cfg.utcOffsetHours);
     writeI32(KEY_TIME_SYNC_S, static_cast<int32_t>(cfg.syncIntervalSec));
     writeI32(KEY_TIME_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
+    writeI32(KEY_TIME_ALLOW_ONLY, cfg.onlyAllowedComputers ? 1 : 0);
     writeI32(KEY_TIME_RATE, static_cast<int32_t>(cfg.rateLimitPerSec));
     writeI32(KEY_TIME_LOG_TERM, cfg.logTerminal ? 1 : 0);
     writeI32(KEY_TIME_LOG_REST, cfg.logRest ? 1 : 0);
+    writeI32(KEY_TIME_LOG_FILE, cfg.logFile ? 1 : 0);
     writeStr(KEY_TIME_LOG_URL, cfg.logUrl);
     writeI32(KEY_TIME_LOG_AUTH, cfg.logAuthEnabled ? 1 : 0);
     writeStr(KEY_TIME_LOG_AUTH_U, cfg.logAuthUser);

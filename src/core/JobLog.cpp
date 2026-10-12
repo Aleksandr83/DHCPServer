@@ -3,10 +3,12 @@
 #include <ctime>
 
 #include "JobLogFormat.h"
+#include "SweepLogFormat.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "storage/IFileSystem.h"
 
 using namespace std;
 
@@ -24,6 +26,10 @@ constexpr uint32_t kTaskStack = 4096;
 constexpr uint32_t kWaitMs = 1000;
 /** The word between the stamp and the operation ("job: …"). */
 constexpr const char* kLineTag = "job";
+/** Tag of the lines this log writes about the sweep log itself. */
+constexpr const char* kDetailTag = "cache_autoupdate";
+/** How long the sweep's own log gets to flush what the queue still holds. */
+constexpr uint32_t kDetailDrainMs = 5000;
 
 uint32_t uptimeSec()
 {
@@ -63,7 +69,7 @@ JobLog::~JobLog()
     detailTarget_.reset();
 }
 
-bool JobLog::start(const string& mountPoint)
+bool JobLog::start(const string& mountPoint, storage::IFileSystem* sweepVolume)
 {
     if (task_ != nullptr) return true;   // already started
 
@@ -73,9 +79,14 @@ bool JobLog::start(const string& mountPoint)
     target_ = make_unique<FileErrorLogTarget>(dir + "/logs/Jobs.log");
     core_ = make_unique<ErrorLogCore>(queue_, *target_, &uptimeSec, jobLine);
 
-    // The auto-update's per-record detail (stage 179): a file of its own, the
-    // same line shape, drained by this same task.
-    detailTarget_ = make_unique<FileErrorLogTarget>(dir + "/logs/AutoUpdate.log");
+    // The auto-update's per-record log (stage 179): a target of its own, drained
+    // by this same task. It never changes once it exists — the file behind it is
+    // opened and closed by begin/endAutoUpdateFile, one sweep at a time (stage
+    // 186) — because the writing task reads it from another thread.
+    sweepVolume_ = sweepVolume;
+    detailTarget_ = make_unique<SweepDetailTarget>(
+        sweepVolume != nullptr ? sweepVolume->mountPoint() + "/" + kSweepLogFolder
+                               : string("(no volume)"));
     detailCore_ = make_unique<ErrorLogCore>(detailQueue_, *detailTarget_, &uptimeSec,
                                             jobLine);
 
@@ -93,8 +104,7 @@ bool JobLog::start(const string& mountPoint)
     }
     ESP_LOGI(kTag, "job log started at %s (details: %s)",
              target_->description().c_str(), detailTarget_->description().c_str());
-    return true;
-}
+    return true;}
 
 void JobLog::taskEntry(void* arg)
 {
@@ -141,16 +151,82 @@ uint32_t JobLog::dropped() const
            (detailCore_ ? detailCore_->dropped() : 0);
 }
 
-const string& JobLog::autoUpdateTarget() const
+string JobLog::autoUpdateTarget() const
 {
-    static const string empty;
-    return detailTarget_ ? detailTarget_->description() : empty;
+    // The file of the sweep being logged rather than the folder: a page asking
+    // "where is the detail log" wants the file to open (stage 186); between
+    // sweeps there is none, and that is an empty answer, not the folder.
+    return detailTarget_ ? detailTarget_->currentFile() : string();
 }
 
 bool JobLog::autoUpdate(const char* tag, const string& text)
 {
     if (!detailCore_) { ++preStartDropped_; return false; }
+    // Outside a sweep there is no file to write into, and that is not a lost
+    // line: answering false here keeps the drop counter honest (a sweep that
+    // cannot log — no card, no clock — would otherwise report tens of thousands
+    // of "lost messages" at the end of the journal).
+    if (detailTarget_ == nullptr || !detailTarget_->active()) return false;
     return detailCore_->submit(LogLevel::Info, tag, text);
+}
+
+void JobLog::noteDetailSkipped(const string& reason)
+{
+    if (!core_) return;
+    core_->submit(LogLevel::Info, kDetailTag,
+                  "detailed log skipped: " + reason);
+}
+
+bool JobLog::beginAutoUpdateFile()
+{
+    if (detailTarget_ == nullptr || detailCore_ == nullptr) return false;
+
+    if (sweepVolume_ == nullptr || !sweepVolume_->isMounted()) {
+        noteDetailSkipped("no card");
+        return false;
+    }
+
+    const time_t now = time(nullptr);
+    if (!ErrorLogCore::clockIsSet(static_cast<uint64_t>(now))) {
+        // A file named 1970.01.01_00.00.log would be a lie, and "Update now" is
+        // allowed without a synced clock — the sweep goes on, the file does not.
+        noteDetailSkipped("clock is not set");
+        return false;
+    }
+
+    tm local{};
+    if (!ErrorLogCore::localTime(now, local)) {
+        noteDetailSkipped("no local time");
+        return false;
+    }
+
+    const string name = sweepLogName(local);
+    if (!detailTarget_->begin(sweepVolume_->mountPoint(), name, kSweepLogKeep)) {
+        noteDetailSkipped("cannot create " + name);
+        return false;
+    }
+
+    ESP_LOGI(kTag, "sweep log: %s", detailTarget_->currentFile().c_str());
+    return true;
+}
+
+void JobLog::endAutoUpdateFile()
+{
+    if (detailTarget_ == nullptr || !detailTarget_->active()) return;
+
+    const string file = detailTarget_->currentFile();
+    // The lines of the sweep are still in the queue: the file is closed only
+    // after the writer has put them in it, or the end of a sweep — the part that
+    // says how it went — would be the part that is missing.
+    if (detailCore_) detailCore_->drain(kDetailDrainMs);
+    const uint64_t lines = detailTarget_->lines();
+    detailTarget_->end();
+
+    if (core_) {
+        core_->submit(LogLevel::Info, kDetailTag,
+                      "detailed log closed: " + file + " (" + to_string(lines) +
+                          " lines)");
+    }
 }
 
 } // namespace core

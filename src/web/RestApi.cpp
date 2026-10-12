@@ -9,6 +9,8 @@
 #include "../core/ErrorLog.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
+#include "../core/TimeDefaults.h"
+#include "../core/NtpServers.h"
 #include "../core/AutoUpdatePlan.h"
 #include "../core/CpuMonitor.h"
 #include "../core/JobRegistry.h"
@@ -22,6 +24,7 @@
 #include "../security/CertStore.h"
 #include "../time/TimeServer.h"
 #include "../time/TimeMath.h"
+#include "../time/NtpProbe.h"
 
 #include <cstdio>
 #include <cerrno>
@@ -465,6 +468,8 @@ static void applyDnsSettingsLive(::dhcp::dns::DnsServer* dns,
     dns->applyCacheAutosave(cfg.cacheInternalAutosave,
                             cfg.cacheInternalAutosavePeriod,
                             cfg.cacheInternalAutosaveInterval);
+    dns->applyStatsAutosave(cfg.statsAutosave, cfg.statsAutosavePeriod,
+                            cfg.statsAutosaveInterval);
     dns->applyCacheAutoUpdate(cfg.cacheInternalAutoUpdate,
                               cfg.cacheInternalAutoUpdatePeriod,
                               cfg.cacheInternalAutoUpdateInterval,
@@ -481,15 +486,61 @@ static void applyTimeSettingsLive(::dhcp::time::TimeServer* time,
                                   const ::dhcp::core::TimeConfig& cfg)
 {
     if (!time) return;
-    time->setServerName(cfg.externalNtp);
+    // The setting is one text and the client wants an ordered list (stage 195);
+    // the split is bounded, so a settings file with more servers than the client
+    // can be given does not end up in lwIP's table half-used.
+    time->setServers(::dhcp::core::ntpServersSplit(cfg.externalNtp));
     time->setSyncIntervalSec(cfg.syncIntervalSec);
     time->setUtcOffsetHours(cfg.utcOffsetHours);
     time->setTimezoneName(cfg.timezone);
+    // A new offset has to reach the C library as well, not only the strings the
+    // pages show: the log stamps and the name of a sweep's log file are built
+    // from localtime() (stage 186).
+    time->applyTimezone();
     time->applyAccessFilter();
     time->logger().setLogTerminal(cfg.logTerminal);
     time->logger().setLogRest(cfg.logRest);
+    // The file log writes on the internal volume and archives to the card; the
+    // volumes themselves are wired at boot, where they are known (stage 191).
+    time->logger().setLogFile(cfg.logFile);
     time->logger().setLogUrl(cfg.logUrl);
     time->logger().setLogAuth(cfg.logAuthEnabled, cfg.logAuthUser, cfg.logAuthPassword);
+}
+
+/// @brief Start, stop or restart the running halves after a settings change.
+///
+/// Split from the stored half above because two callers need the same three
+/// decisions in the same order: the settings save and the "Reset to default"
+/// button (stage 194). A default page means "clock sync on, NTP server off", so
+/// the reset is a switch of both halves, not only of the strings.
+static void applyTimeRunning(::dhcp::time::TimeServer* time,
+                             const ::dhcp::core::TimeConfig& cfg)
+{
+    if (!time) return;
+
+    // Clock sync (SNTP client) — independent of serving time.
+    if (cfg.syncEnabled) {
+        if (!time->isSyncRunning()) {
+            time->startSync();
+        } else {
+            // Re-apply external server / interval changes.
+            time->restartSync();
+        }
+    } else if (time->isSyncRunning()) {
+        time->stopSync();
+    }
+
+    // NTP server (serving LAN clients).
+    if (cfg.enabled && !time->isRunning()) {
+        if (time->start()) {
+            ESP_LOGI(TAG, "NTP server started via API");
+        } else {
+            ESP_LOGE(TAG, "NTP server failed to start via API");
+        }
+    } else if (!cfg.enabled && time->isRunning()) {
+        time->stop();
+        ESP_LOGI(TAG, "NTP server stopped via API");
+    }
 }
 
 esp_err_t RestApi::handleGetStatus(httpd_req* req)
@@ -1137,6 +1188,11 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
                static_cast<int>(cfg.cacheInternalAutosavePeriod), true);
     addJsonInt(json, "cache_internal_autosave_interval",
                static_cast<int>(cfg.cacheInternalAutosaveInterval), true);
+    addJsonBool(json, "stats_autosave", cfg.statsAutosave, true);
+    addJsonInt(json, "stats_autosave_period",
+               static_cast<int>(cfg.statsAutosavePeriod), true);
+    addJsonInt(json, "stats_autosave_interval",
+               static_cast<int>(cfg.statsAutosaveInterval), true);
     addJsonBool(json, "cache_internal_autoupdate", cfg.cacheInternalAutoUpdate, true);
     addJsonInt(json, "cache_internal_autoupdate_period",
                static_cast<int>(cfg.cacheInternalAutoUpdatePeriod), true);
@@ -1218,6 +1274,17 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
         static_cast<uint16_t>(jsonGetInt(
             body, "cache_internal_autosave_interval",
             static_cast<int>(cfg.cacheInternalAutosaveInterval))), 0);
+    // Stage 189: the statistics autosave, same shape and same clamps.
+    cfg.statsAutosave = jsonGetBool(body, "stats_autosave", cfg.statsAutosave);
+    cfg.statsAutosavePeriod = core::autosavePeriodFromIndex(
+        static_cast<uint8_t>(jsonGetInt(
+            body, "stats_autosave_period",
+            static_cast<int>(cfg.statsAutosavePeriod))));
+    cfg.statsAutosaveInterval = core::autosaveClampInterval(
+        cfg.statsAutosavePeriod,
+        static_cast<uint16_t>(jsonGetInt(
+            body, "stats_autosave_interval",
+            static_cast<int>(cfg.statsAutosaveInterval))), 0);
     cfg.cacheInternalAutoUpdate =
         jsonGetBool(body, "cache_internal_autoupdate", cfg.cacheInternalAutoUpdate);
     cfg.cacheInternalAutoUpdatePeriod = core::autosavePeriodFromIndex(
@@ -1973,6 +2040,13 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
                static_cast<int>(dns.cacheInternalAutosavePeriod), true);
     addJsonInt(json, "cache_internal_autosave_interval",
                static_cast<int>(dns.cacheInternalAutosaveInterval), true);
+    // The autosave of the statistics file (stage 189): its own switch and period,
+    // so the backup carries it like every other setting.
+    addJsonBool(json, "stats_autosave", dns.statsAutosave, true);
+    addJsonInt(json, "stats_autosave_period",
+               static_cast<int>(dns.statsAutosavePeriod), true);
+    addJsonInt(json, "stats_autosave_interval",
+               static_cast<int>(dns.statsAutosaveInterval), true);
     addJsonBool(json, "cache_internal_autoupdate", dns.cacheInternalAutoUpdate, true);
     addJsonInt(json, "cache_internal_autoupdate_period",
                static_cast<int>(dns.cacheInternalAutoUpdatePeriod), true);
@@ -1998,10 +2072,12 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         addJsonInt(json, "sync_interval_sec",
                    static_cast<int64_t>(tcfg.syncIntervalSec), true);
         addJsonBool(json, "allow_own_subnet", tcfg.allowOwnSubnet, true);
+        addJsonBool(json, "only_allowed_computers", tcfg.onlyAllowedComputers, true);
         addJsonInt(json, "rate_limit_per_sec",
                    static_cast<int64_t>(tcfg.rateLimitPerSec), true);
         addJsonBool(json, "log_terminal", tcfg.logTerminal, true);
         addJsonBool(json, "log_rest", tcfg.logRest, true);
+        addJsonBool(json, "log_file", tcfg.logFile, true);
         addJsonString(json, "log_url", tcfg.logUrl, true);
         addJsonBool(json, "log_auth", tcfg.logAuthEnabled, true);
         addJsonString(json, "log_auth_user", tcfg.logAuthUser, true);
@@ -2068,7 +2144,7 @@ static const char* const kKnownSettingsKeys[] = {
     // ── dhcp ──
     "enabled", "server_ip", "start_ip", "end_ip", "subnet", "gateway",
     "lease_time", "max_lease_entries", "log_terminal", "log_rest", "log_url",
-    "log_auth", "log_auth_user", "dns_mode", "dns_address", "allow_only",
+    "log_file", "log_auth", "log_auth_user", "dns_mode", "dns_address", "allow_only",
     // ── entries of the two lists and of the allow-list ──
     "mac", "ip", "name", "use_gateway", "use_dns", "ip4", "ip6",
     // ── dns ──
@@ -2078,13 +2154,14 @@ static const char* const kKnownSettingsKeys[] = {
     "cache_internal_ignore_ttl", "cache_internal_save_stats",
     "cache_internal_save_cache", "cache_internal_autosave",
     "cache_internal_autosave_period", "cache_internal_autosave_interval",
+    "stats_autosave", "stats_autosave_period", "stats_autosave_interval",
     "cache_internal_autoupdate", "cache_internal_autoupdate_period",
     "cache_internal_autoupdate_interval", "cache_internal_autoupdate_batch",
     "cache_internal_autoupdate_pause", "block_forward_non_aa",
     "allow_own_subnet",
     // ── time ──
     "sync_enabled", "external_ntp", "timezone", "utc_offset_hours",
-    "sync_interval_sec", "rate_limit_per_sec",
+    "sync_interval_sec", "rate_limit_per_sec", "only_allowed_computers",
     // ── security ──
     "username", "max_attempts", "lockout_period", "https_enabled",
     "cert_storage", "cert_name",
@@ -2396,6 +2473,10 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
                 cur.syncEnabled = jsonGetBool(seg, "sync_enabled", cur.syncEnabled);
                 string v = jsonGetStr(seg, "external_ntp");
+                // Through the same normaliser as the settings POST (stage 195): a
+                // settings file must not be able to import more servers than the
+                // client can be given, or a form the page would never store.
+                v = ::dhcp::core::ntpServersText(::dhcp::core::ntpServersSplit(v));
                 if (!v.empty()) cur.externalNtp = v;
                 v = jsonGetStr(seg, "timezone");
                 if (v.size() > 40) v.resize(40);
@@ -2411,6 +2492,9 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.syncIntervalSec = static_cast<uint32_t>(syncSec);
                 cur.allowOwnSubnet =
                     jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
+                cur.onlyAllowedComputers =
+                    jsonGetBool(seg, "only_allowed_computers",
+                                cur.onlyAllowedComputers);
                 {
                     int64_t rate = jsonGetInt(seg, "rate_limit_per_sec",
                                               static_cast<int64_t>(cur.rateLimitPerSec));
@@ -2420,6 +2504,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 }
                 cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
+                cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
                 v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
@@ -3590,6 +3675,178 @@ esp_err_t RestApi::handleGetStatsProgress(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// GET /api/dns/autosave
+// ─────────────────────────────────────────────────────
+// The two countdowns of the two autosaves, for the "Next update in" rows of the
+// Internal Cache page (stage 189): the cache's timer (stage 153) and the
+// statistics' (stage 189). One route rather than two because the page shows both
+// cards at once, and `counting` is what tells a running countdown from a timer
+// that is switched on but parked — without a clock there is no countdown, and a
+// number that never moves would be worse than none.
+//
+// Response: {"cache":{enabled,counting,remaining_sec,period_sec},
+//            "stats":{enabled,counting,remaining_sec,period_sec}}
+
+esp_err_t RestApi::handleGetAutosave(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::CacheAutosave::Status c;
+    ::dhcp::dns::StatsAutosave::Status s;
+    if (s_dns) {
+        c = s_dns->cacheAutosaveStatus();
+        s = s_dns->statsAutosaveStatus();
+    }
+
+    string cache = "{";
+    addJsonBool(cache, "enabled", c.enabled, false);
+    addJsonBool(cache, "counting", c.counting, true);
+    addJsonInt(cache, "remaining_sec", static_cast<int64_t>(c.remainingSec), true);
+    addJsonInt(cache, "period_sec", static_cast<int64_t>(c.periodSec), true);
+    cache += "}";
+
+    string stats = "{";
+    addJsonBool(stats, "enabled", s.enabled, false);
+    addJsonBool(stats, "counting", s.counting, true);
+    addJsonInt(stats, "remaining_sec", static_cast<int64_t>(s.remainingSec), true);
+    addJsonInt(stats, "period_sec", static_cast<int64_t>(s.periodSec), true);
+    stats += "}";
+
+    const string json = "{\"cache\":" + cache + ",\"stats\":" + stats + "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/dns/stats/file
+// ─────────────────────────────────────────────────────
+// State of the statistics file, for the line next to the buttons of the
+// Statistics block: {exists, path, size_bytes}. The record is 92 bytes in the
+// current format, so the page prints bytes rather than kilobytes — the smallest
+// number the cache page would round up is the whole file here.
+
+esp_err_t RestApi::handleGetStatsFile(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::DnsServer::StatsFileInfo info;
+    if (s_dns) info = s_dns->statsFileInfo();
+
+    string json = "{";
+    addJsonBool(json, "exists", info.exists, false);
+    addJsonString(json, "path", s_dns ? s_dns->kStatsPath : "/fat/Statistica.dat", true);
+    addJsonInt(json, "size_bytes", static_cast<int64_t>(info.size), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/stats/save
+// ─────────────────────────────────────────────────────
+// Write Statistica.dat now, because the operator pressed "Save to file". It is
+// the same background job the restart path uses, so the reply is
+// {status:started} and the page polls GET /api/dns/stats/progress for the
+// verdict. The switch on the page means "keep the statistics across a restart"
+// and governs the automatic writes; a button the operator pressed himself is an
+// order (stage 188), so this path writes it either way.
+
+esp_err_t RestApi::handlePostStatsSave(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    if (!s_dns) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"DNS server unavailable\"}");
+        return ESP_OK;
+    }
+
+    using ::dhcp::dns::DnsServer;
+    const DnsServer::RestartSave started =
+        s_dns->startStatsSaveJob(DnsServer::StatsSaveOrigin::AskedFor);
+    if (started == DnsServer::RestartSave::Busy) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"A save is already running\"}");
+        return ESP_OK;
+    }
+    if (started != DnsServer::RestartSave::Ok) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Could not start the save\"}");
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"started\",\"op\":\"save\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/stats/load
+// ─────────────────────────────────────────────────────
+// Read Statistica.dat back into the counters, on command. Synchronous: the file
+// is one record, so there is nothing for a page to poll — it either came back or
+// it did not. 404 means "there is no file"; 409 means "there is one and it was
+// refused" (damaged, half-written, or a foreign file), and the device's own
+// reason travels in `detail` because the operator has no terminal.
+
+esp_err_t RestApi::handlePostStatsLoad(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    if (!s_dns) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"DNS server unavailable\"}");
+        return ESP_OK;
+    }
+    if (!s_dns->statsFileInfo().exists) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"No statistics file\"}");
+        return ESP_OK;
+    }
+
+    string detail;
+    if (!s_dns->loadStatsFileNow(detail)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        string json = "{\"status\":\"error\",\"message\":\"The statistics file was refused\"";
+        addJsonString(json, "detail", detail, true);
+        json += "}";
+        httpd_resp_sendstr(req, json.c_str());
+        return ESP_OK;
+    }
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/stats/reset
+// ─────────────────────────────────────────────────────
+// Zero the counters and delete the file, after the page has asked the operator
+// (the same dialog the cache's Reset shows). The answer is a plain "ok": there is
+// nothing left for the caller to inspect, and the page refreshes the file line
+// itself.
+
+esp_err_t RestApi::handlePostStatsReset(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    if (!s_dns) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "dns server is not available");
+        return ESP_OK;
+    }
+
+    s_dns->resetStats();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/dns/internal-cache/progress
 // ─────────────────────────────────────────────────────
 // Progress of the background save/load job. Response: {busy, save, done,
@@ -3904,15 +4161,33 @@ esp_err_t RestApi::handleGetTimeSettings(httpd_req* req)
     addJsonInt(json, "utc_offset_hours", cfg.utcOffsetHours, true);
     addJsonInt(json, "sync_interval_sec",
                static_cast<int64_t>(cfg.syncIntervalSec), true);
+    // The "Next sync in" row (stage 190): the countdown the SNTP client's
+    // schedule implies, counted in uptime seconds so a clock correction cannot
+    // move it. `next_sync_counting` is false while the client is stopped or has
+    // no moment to count from yet, and the page then hides the row rather than
+    // drawing a number that means nothing.
+    const auto sync = s_time ? s_time->syncStatus()
+                             : ::dhcp::time::TimeServer::SyncStatus{};
+    addJsonBool(json, "next_sync_counting", sync.counting, true);
+    addJsonInt(json, "next_sync_sec", static_cast<int64_t>(sync.remainingSec), true);
+    addJsonInt(json, "next_sync_period_sec", static_cast<int64_t>(sync.periodSec), true);
     addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
+    addJsonBool(json, "only_allowed_computers", cfg.onlyAllowedComputers, true);
     addJsonInt(json, "rate_limit_per_sec",
                static_cast<int64_t>(cfg.rateLimitPerSec), true);
+    // Is every setting this page owns still at its factory value? The page keeps
+    // its "Reset to default" offer out of sight while that is true (stage 194),
+    // and the answer comes from here rather than from a copy of the defaults in
+    // the page's own JavaScript: the values the button restores are the ones the
+    // device boots with, so there is one place they can be wrong.
+    addJsonBool(json, "is_default", ::dhcp::core::timePageIsDefault(cfg), true);
     // Build constant: the lowest date/time the web page accepts for a manual
     // clock setting (kept at the build date by the version scripts).
     addJsonString(json, "min_datetime",
                   ::dhcp::core::Version::instance().minDateTime(), true);
     addJsonBool(json, "log_terminal", cfg.logTerminal, true);
     addJsonBool(json, "log_rest", cfg.logRest, true);
+    addJsonBool(json, "log_file", cfg.logFile, true);
     addJsonString(json, "log_url", cfg.logUrl, true);
     addJsonBool(json, "log_auth", cfg.logAuthEnabled, true);
     addJsonString(json, "log_auth_user", cfg.logAuthUser, true);
@@ -3942,7 +4217,14 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     cfg.enabled = jsonGetBool(body, "enabled", false);
     cfg.syncEnabled = jsonGetBool(body, "sync_enabled", true);
     cfg.externalNtp = jsonGetStr(body, "external_ntp");
-    if (cfg.externalNtp.empty()) cfg.externalNtp = "pool.ntp.org";
+    // The setting is an ordered list inside one text (stage 195), and the device
+    // stores its canonical form, so the page shows back exactly the servers it is
+    // asking - not a padded or doubled-separator copy of what was typed.
+    cfg.externalNtp =
+        ::dhcp::core::ntpServersText(::dhcp::core::ntpServersSplit(cfg.externalNtp));
+    // Nobody in the list means the factory server, which is what this endpoint
+    // has always done with an empty setting.
+    if (cfg.externalNtp.empty()) cfg.externalNtp = ::dhcp::core::TimeConfig{}.externalNtp;
     // Timezone id (display only). Keep a safe charset and a bounded length;
     // an empty value means "custom offset".
     cfg.timezone = jsonGetStr(body, "timezone");
@@ -3966,6 +4248,7 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     if (syncSec > kMaxSyncIntervalSec) syncSec = kMaxSyncIntervalSec;
     cfg.syncIntervalSec = static_cast<uint32_t>(syncSec);
     cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", true);
+    cfg.onlyAllowedComputers = jsonGetBool(body, "only_allowed_computers", false);
     {
         int64_t rate = jsonGetInt(body, "rate_limit_per_sec", 5);
         if (rate < 1) rate = 1;
@@ -3974,6 +4257,7 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     }
     cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
     cfg.logRest = jsonGetBool(body, "log_rest", false);
+    cfg.logFile = jsonGetBool(body, "log_file", false);
     cfg.logUrl = jsonGetStr(body, "log_url");
     cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
     cfg.logAuthUser = jsonGetStr(body, "log_auth_user");
@@ -3984,36 +4268,109 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     // Apply to the running server (start/stop on enable change, update the
     // SNTP server/interval and the logger settings live).
     if (s_time) {
-        // The live half is shared with the settings import (stage 183b).
+        // The live half is shared with the settings import (stage 183b) and the
+        // "Reset to default" button (stage 194).
         applyTimeSettingsLive(s_time, cfg);
-
-        // Clock sync (SNTP client) — independent of serving time.
-        if (cfg.syncEnabled) {
-            if (!s_time->isSyncRunning()) {
-                s_time->startSync();
-            } else {
-                // Re-apply external server / interval changes.
-                s_time->restartSync();
-            }
-        } else if (s_time->isSyncRunning()) {
-            s_time->stopSync();
-        }
-
-        // NTP server (serving LAN clients).
-        if (cfg.enabled && !s_time->isRunning()) {
-            if (s_time->start()) {
-                ESP_LOGI(TAG, "NTP server started via API");
-            } else {
-                ESP_LOGE(TAG, "NTP server failed to start via API");
-            }
-        } else if (!cfg.enabled && s_time->isRunning()) {
-            s_time->stop();
-            ESP_LOGI(TAG, "NTP server stopped via API");
-        }
+        applyTimeRunning(s_time, cfg);
     }
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/time/settings/reset — the Time Server page's factory values
+// ─────────────────────────────────────────────────────
+
+/**
+ * Put back the settings the Time Server page owns and leave the rest alone.
+ *
+ * The operator asked for a "Reset to default" button on that page; the page
+ * itself sends no values, because the factory ones live in the firmware (see
+ * `core/TimeDefaults.h`). The Logging sub-page's settings are kept deliberately:
+ * they are not on this page, so a reset here must not silently switch the file
+ * log off. The defaults are not neutral — clock sync on, NTP server off — so the
+ * running halves are started, stopped or restarted exactly as a settings save
+ * does it, and a client of the page sees the result on the next poll.
+ */
+esp_err_t RestApi::handlePostTimeSettingsReset(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    ::dhcp::core::TimeConfig cfg = cfgMgr.getTime();
+    ::dhcp::core::resetTimePageToDefaults(cfg);
+    cfgMgr.setTime(cfg);
+
+    if (s_time) {
+        applyTimeSettingsLive(s_time, cfg);
+        applyTimeRunning(s_time, cfg);
+    }
+    ESP_LOGI(TAG, "Time settings reset to default via API (sync=%d, server=%d)",
+             static_cast<int>(cfg.syncEnabled), static_cast<int>(cfg.enabled));
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/time/test — ask the NTP servers who answers, right now
+// ─────────────────────────────────────────────────────
+
+/**
+ * The same probe the journal writes while the device cannot synchronise, but on
+ * demand and for the servers in the field (unsaved edits included, because that
+ * is what the operator is checking before he saves them).
+ *
+ * It blocks for up to one resolution plus kNtpProbeTimeoutMs per server, in the
+ * order they are listed, and stops at the first answer - the same shape the
+ * "Test connection" buttons of the DNS pages have, and the page shows a waiting
+ * message for the duration. A run against healthy servers returns in about a
+ * second; the worst case is a list of names that all resolve but never answer.
+ *
+ * Nothing is stored: this endpoint answers a question, it does not save it.
+ */
+esp_err_t RestApi::handlePostTimeTest(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const string body = readBody(req);
+    vector<string> servers = ::dhcp::core::ntpServersSplit(jsonGetStr(body, "servers"));
+    if (servers.empty()) {
+        // An empty field is not an error to shout about: the page refuses it
+        // itself, and a client that sends nothing is answered about the servers
+        // the device is really using.
+        servers = ::dhcp::core::ntpServersSplit(
+            ::dhcp::core::Config::instance().getTime().externalNtp);
+    }
+
+    const int64_t startedUs = esp_timer_get_time();
+    const ::dhcp::time::NtpProbe probe;
+    const vector<::dhcp::time::NtpProbeEntry> entries = probe.run(servers);
+    const int64_t elapsedMs = (esp_timer_get_time() - startedUs) / 1000;
+
+    string json = "{\"status\":\"ok\",\"timeout_ms\":" +
+                  to_string(::dhcp::time::kNtpProbeTimeoutMs) +
+                  ",\"elapsed_ms\":" + to_string(static_cast<long long>(elapsedMs)) +
+                  ",\"servers\":[";
+    for (size_t i = 0; i < entries.size(); i++) {
+        if (i > 0) json += ",";
+        json += "{";
+        addJsonString(json, "name", entries[i].name, false);
+        addJsonString(json, "ip", entries[i].ip, true);
+        addJsonString(json, "verdict",
+                      ::dhcp::time::ntpProbeVerdictName(entries[i].verdict), true);
+        addJsonInt(json, "stratum", static_cast<int64_t>(entries[i].stratum), true);
+        json += "}";
+    }
+    json += "]}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "NTP probe via API: %u server(s), %lld ms",
+             static_cast<unsigned>(entries.size()), static_cast<long long>(elapsedMs));
     return ESP_OK;
 }
 

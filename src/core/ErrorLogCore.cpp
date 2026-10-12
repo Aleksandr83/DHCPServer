@@ -15,14 +15,9 @@ constexpr uint64_t kSaneClockSec = 1577836800ULL;
 /** What a truncated message ends with, so a cut is never mistaken for an end. */
 constexpr const char* kTruncatedMark = " ...(truncated)";
 
-/**
- * @brief Local time, thread-safe — and spelled differently on the two platforms.
- *
- * The device (newlib) has `localtime_r`; MinGW has `localtime_s` with its own
- * argument order. Keeping the difference here means the rest of the file — the
- * part the host test covers — is one implementation, not two.
- */
-bool localTime(time_t t, tm& out)
+} // namespace
+
+bool ErrorLogCore::localTime(time_t t, tm& out)
 {
 #if defined(_WIN32)
     return ::localtime_s(&out, &t) == 0;
@@ -30,8 +25,6 @@ bool localTime(time_t t, tm& out)
     return ::localtime_r(&t, &out) != nullptr;
 #endif
 }
-
-} // namespace
 
 ErrorLogCore::ErrorLogCore(IErrorQueue& queue, IErrorLogTarget& target,
                            function<uint32_t()> uptimeSec,

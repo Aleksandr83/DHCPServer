@@ -551,6 +551,15 @@ const WebRoute WebServer::kRoutes[] = {
     // Statistics a planned restart asks for (Statistica.dat on FAT): the write
     // runs as a background job, this reports whether it finished or failed.
     { "/api/dns/stats/progress",          RouteMethod::Get,   &WebServer::getStatsProgressHandler },
+    // The countdowns of the two autosaves — the cache's and the statistics'
+    // (stage 189), for the "Next update in" rows of the Internal Cache page.
+    { "/api/dns/autosave",                RouteMethod::Get,   &WebServer::getAutosaveHandler },
+    // The statistics file itself (Statistica.dat): state, a write now, a read
+    // back into the counters, and a reset (stage 188).
+    { "/api/dns/stats/file",              RouteMethod::Get,   &WebServer::getStatsFileHandler },
+    { "/api/dns/stats/save",              RouteMethod::Post,  &WebServer::postStatsSaveHandler },
+    { "/api/dns/stats/load",              RouteMethod::Post,  &WebServer::postStatsLoadHandler },
+    { "/api/dns/stats/reset",             RouteMethod::Post,  &WebServer::postStatsResetHandler },
     // Built-in (PSRAM) DNS cache persistence file (cache.dat on FAT)
     { "/api/dns/internal-cache/file",     RouteMethod::Get,   &WebServer::getInternalCacheFileHandler },
     { "/api/dns/internal-cache/progress", RouteMethod::Get,   &WebServer::getInternalCacheProgressHandler },
@@ -563,6 +572,10 @@ const WebRoute WebServer::kRoutes[] = {
     // Time (NTP) server
     { "/api/time/settings",               RouteMethod::Get,   &WebServer::getTimeSettingsHandler },
     { "/api/time/settings",               RouteMethod::Post,  &WebServer::postTimeSettingsHandler },
+    // The "Reset to default" button of that page (stage 194).
+    { "/api/time/settings/reset",         RouteMethod::Post,  &WebServer::postTimeSettingsResetHandler },
+    // The "Check" button of that page (stage 195): probe the servers in the field.
+    { "/api/time/test",                   RouteMethod::Post,  &WebServer::postTimeTestHandler },
     { "/api/time/now",                    RouteMethod::Get,   &WebServer::getTimeNowHandler },
     { "/api/time/set",                    RouteMethod::Post,  &WebServer::postTimeSetHandler },
     // File explorer (FAT volumes)

@@ -7,8 +7,10 @@
 #include "InternalDnsCache.h"
 #include "CacheAutosave.h"
 #include "CacheAutoUpdate.h"
+#include "StatsAutosave.h"
 #include "RestartSaveJobState.h"
 #include "RestartSaveVerify.h"
+#include "DnsStatStore.h"
 #include "../dhcp/IDhcpServer.h"
 
 #include <string>
@@ -122,6 +124,17 @@ public:
                              uint16_t interval);
 
     /**
+     * @brief Apply the automatic-save settings of the statistics file.
+     *
+     * Stage 189: the second autosave of the device, with its own switch and its
+     * own period. The rules are the cache's, because they were decided once:
+     * turning it on starts (or re-arms) the timer, turning it off stops it, and a
+     * stop pressed on the scheduler page switches the setting off for good.
+     */
+    void applyStatsAutosave(bool enabled, core::AutosavePeriod unit,
+                            uint16_t interval);
+
+    /**
      * @brief Apply the auto-update settings of the built-in cache.
      *
      * Stage 172: the records of the cache are refreshed from the upstream DNS so
@@ -203,6 +216,51 @@ public:
     /** @brief Drop the file — a factory reset must not keep statistics. */
     bool deleteStatsFile();
 
+    /// @brief State of the statistics file, for `GET /api/dns/stats/file`.
+    struct StatsFileInfo {
+        bool exists = false;
+        uint64_t size = 0;   ///< Bytes; 0 when there is no file.
+    };
+    StatsFileInfo statsFileInfo() const;
+
+    /// @brief Where the statistics file lives, for the routes that name it.
+    /// Taken from the store itself, so the path is written down in one place.
+    static constexpr const char* kStatsPath = DnsStatStore::kPath;
+
+    /**
+     * @brief Read Statistica.dat into the counters, on the operator's command.
+     *
+     * The numbers the file holds replace the counters as a whole — the file is
+     * "the state that was saved", not a set of increments. The same totals the
+     * boot restore seeds, through the same helper, so a manual load and a restart
+     * cannot end up meaning different things.
+     *
+     * This runs on the httpd task while the DNS task counts queries. A query that
+     * lands in the same microsecond can lose its increment, which is the price the
+     * counters already pay for being read without a lock (see writeStatsNow) and
+     * is not worth a lock in the query path for a statistic.
+     *
+     * @param[out] detail The device's reason when the answer is false.
+     * @return false when there is no readable file (or it is damaged).
+     */
+    bool loadStatsFileNow(std::string& detail);
+
+    /**
+     * @brief Zero the counters and delete the file — the page's Reset button.
+     *
+     * Both halves are the point: a device with zeroed counters and the old record
+     * still on the volume would read the same numbers back at the next boot.
+     * Nothing here can fail in a way the page would act on: the counters are in
+     * memory, and a file that is not there is already what this asks for.
+     */
+    void resetStats();
+
+    /// @brief What asked for a statistics write.
+    enum class StatsSaveOrigin {
+        RebootPath,   ///< a planned restart asks; the "before reboot" switch decides
+        AskedFor,     ///< the page's button or its autosave: the write is wanted
+    };
+
     /**
      * @brief State of the statistics job, for GET /api/dns/stats/progress.
      *
@@ -249,7 +307,7 @@ public:
      * when one is already running (the caller waits for that one instead),
      * Failed when the task could not be created.
      */
-    RestartSave startStatsSaveJob();
+    RestartSave startStatsSaveJob(StatsSaveOrigin origin = StatsSaveOrigin::RebootPath);
 
     /**
      * @brief Write Statistica.dat before a planned restart and wait for it.
@@ -271,6 +329,11 @@ public:
      * @brief Current statistics job state (busy + verdict of the last one).
      */
     StatsProgress statsProgress() const;
+
+    /// @brief Countdown of the cache autosave, for `GET /api/dns/autosave`.
+    CacheAutosave::Status cacheAutosaveStatus() const { return cacheAutosave_.status(); }
+    /// @brief Countdown of the statistics autosave, for the same route.
+    StatsAutosave::Status statsAutosaveStatus() const { return statsAutosave_.status(); }
 
     // ─── Keeping the cache itself across a planned restart ───
     /**
@@ -444,6 +507,13 @@ private:
     // The actual write, called by the job task. @p detail receives the device's
     // own reason when the write failed (empty otherwise).
     RestartSaveJobState::Verdict writeStatsNow(std::string& detail);
+    // Seed the counters from @p totals — the shared half of the boot restore and
+    // of `loadStatsFileNow()`, so both mean exactly the same thing.
+    void applyStatsTotals(const DnsStatTotals& totals);
+    // Write the statistics file and wait for the verdict — what the statistics
+    // autosave hands itself as a `WriteHandler` (stage 189). @p detail receives
+    // the device's own reason when it returns false.
+    bool writeStatsFileNow(std::string& detail);
     // Background manual save/load job (startPersistJob). Single-flight. Also
     // used for the boot-time auto-restore from /fat/cache.dat.
     static void persistJobTask(void* arg);
@@ -565,6 +635,11 @@ private:
     void*  statsJobMutex_ = nullptr;     // SemaphoreHandle_t
     RestartSaveJobState statsJob_;
     TaskHandle_t statsTaskHandle_ = nullptr;
+    // True while the running job was asked for by the page's button rather than
+    // by the switch (stage 188). Written by startStatsSaveJob() on the caller's
+    // task *before* the job task exists and read only from inside that task, so
+    // no lock is needed — the task's creation is what publishes it.
+    bool statsJobManual_ = false;
 
     // ─── The read-back check a planned restart asks for (stage 169) ───
     /// @brief Take (and clear) the restart's request for a verified cache save.
@@ -622,6 +697,12 @@ private:
     CacheAutosave cacheAutosave_{internalCache_, kCacheDatPath};
     /// Stage 172: refreshes the cache from upstream on a timer.
     CacheAutoUpdate cacheAutoUpdate_{internalCache_};
+    /// Stage 189: writes Statistica.dat on a timer of its own. The write is the
+    /// job the reboot path and the page's button use — this class only owns the
+    /// clock, so the knowledge of what a statistics file is stays in one place.
+    StatsAutosave statsAutosave_{[this](std::string& detail) {
+        return writeStatsFileNow(detail);
+    }};
 };
 
 } // namespace dns

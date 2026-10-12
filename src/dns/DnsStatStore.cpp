@@ -295,5 +295,13 @@ bool DnsStatStore::exists(const string& path)
     return stat(path.c_str(), &st) == 0;
 }
 
+bool DnsStatStore::fileSize(const string& path, uint64_t& bytes)
+{
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) return false;
+    bytes = static_cast<uint64_t>(st.st_size);
+    return true;
+}
+
 } // namespace dns
 } // namespace dhcp

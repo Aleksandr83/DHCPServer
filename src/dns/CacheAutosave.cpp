@@ -123,6 +123,19 @@ void CacheAutosave::notifyManualSave()
     remainingSec_ = periodSec_;
 }
 
+CacheAutosave::Status CacheAutosave::status() const
+{
+    Status st;
+    st.enabled = enabled_;
+    // `counting` tells a running countdown from a timer that is switched on but
+    // parked: without a clock there is no countdown, and a number that never
+    // moves would be worse than none (stage 189).
+    st.counting = enabled_ && clockIsSet();
+    st.remainingSec = remainingSec_;
+    st.periodSec = periodSec_;
+    return st;
+}
+
 void CacheAutosave::taskEntry(void* arg)
 {
     static_cast<CacheAutosave*>(arg)->run();

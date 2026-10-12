@@ -237,6 +237,19 @@ public:
      * DnsServer::restoreStatsFromFile).
      */
     static bool exists(const std::string& path);
+
+    /**
+     * @brief Size of the file at @p path, in bytes.
+     *
+     * The page prints the state of the statistics next to their buttons, and for
+     * this file the number is always a small one (92 bytes in the current format),
+     * so it is reported in bytes rather than rounded to kilobytes.
+     *
+     * @return false when the file cannot be examined — a device that never saved
+     *         answers false here as well, and the caller asks `exists()` when it
+     *         needs to tell the two apart.
+     */
+    static bool fileSize(const std::string& path, uint64_t& bytes);
 };
 
 } // namespace dns

@@ -25,6 +25,7 @@
 
 #include "core/Version.h"
 #include "core/Config.h"
+#include "core/NtpServers.h"
 #include "core/CpuMonitor.h"
 #include "core/ErrorLog.h"
 #include "core/JobLog.h"
@@ -135,7 +136,11 @@ extern "C" void app_main(void)
     // nothing about files — this is the subscriber that writes them. It was
     // switched off for one build while the slow web interface was being
     // diagnosed; the cause turned out to be elsewhere, so it is back on.
-    dhcp::core::JobLog::instance().start("/fat");
+    // The per-record log of a cache sweep goes to the card, one file per sweep
+    // (stage 186) — which is why the volume is handed over here: it is the only
+    // place that knows the volumes exist (the classic ESP32 has no slot, and then
+    // a sweep writes no per-record file at all).
+    dhcp::core::JobLog::instance().start("/fat", s_fileManager.find("sd"));
     dhcp::core::JobRegistry::instance().setObserver(
         &dhcp::core::JobLog::instance());
     // LAN-only access policy (device address + netmask from the DHCP settings).
@@ -188,6 +193,8 @@ extern "C" void app_main(void)
 
     // ─── Wire DHCP → DNS (client IP → MAC fallback for DNS REST logs) ──
     s_dnsServer.setDhcpServer(&s_dhcpServer);
+    // ─── Wire DHCP → NTP (who owns the address of a time client, stage 196) ──
+    s_timeServer.setDhcpServer(&s_dhcpServer);
 
     // ─── Initialize LED (start: off) ────────────────
     s_ledController.turnOff();
@@ -283,15 +290,32 @@ static void onNetworkConnected()
     // Keep DHCP in sync with the built-in DNS server running state
     s_dhcpServer.setDnsServerRunning(s_dnsServer.isRunning());
 
-    // Time (NTP): the clock-sync client and the NTP server are independent.
+    // ─── Time (NTP): the clock-sync client and the NTP server are independent.
     {
         auto timeCfg = ::dhcp::core::Config::instance().getTime();
-        s_timeServer.setServerName(timeCfg.externalNtp);
+        s_timeServer.setServers(::dhcp::core::ntpServersSplit(timeCfg.externalNtp));
         s_timeServer.setSyncIntervalSec(timeCfg.syncIntervalSec);
         s_timeServer.setUtcOffsetHours(timeCfg.utcOffsetHours);
         s_timeServer.setTimezoneName(timeCfg.timezone);
+        // The zone reaches the C library here, so that localtime() — and with it
+        // every log stamp and the name of a sweep's log file — is the operator's
+        // clock rather than UTC (stage 186).
+        s_timeServer.applyTimezone();
+        // The file log's volumes (stage 191) are known here and nowhere else: the
+        // card is mounted lazily, so the answer is asked for at every rotation
+        // rather than remembered once.
+        {
+            auto* cardVolume = s_fileManager.find("sd");
+            s_timeServer.setFileLogVolumes(
+                "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+                [] {
+                    auto* card = s_fileManager.find("sd");
+                    return card != nullptr && card->isMounted();
+                });
+        }
         s_timeServer.logger().setLogTerminal(timeCfg.logTerminal);
         s_timeServer.logger().setLogRest(timeCfg.logRest);
+        s_timeServer.logger().setLogFile(timeCfg.logFile);
         s_timeServer.logger().setLogUrl(timeCfg.logUrl);
         s_timeServer.logger().setLogAuth(timeCfg.logAuthEnabled,
                                          timeCfg.logAuthUser,
@@ -302,6 +326,10 @@ static void onNetworkConnected()
             s_timeServer.startSync();
         } else {
             ESP_LOGI(TAG, "NTP clock sync is disabled in config, skipping");
+            // The log has to say this too (stage 192): "nothing ever synchronises"
+            // has two very different causes, and one of them is this switch.
+            s_timeServer.logger().logEvent(
+                "SNTP client not started: clock sync is disabled in the settings");
         }
 
         // NTP server (serving LAN clients).

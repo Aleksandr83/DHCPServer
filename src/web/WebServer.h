@@ -201,11 +201,18 @@ private:
     static esp_err_t postInternalCacheAutoUpdateHandler(httpd_req* req) { return RestApi::handlePostInternalCacheAutoUpdate(req); }
     // Progress/verdict of the statistics write a planned restart asks for.
     static esp_err_t getStatsProgressHandler(httpd_req* req) { return RestApi::handleGetStatsProgress(req); }
+    static esp_err_t getAutosaveHandler(httpd_req* req) { return RestApi::handleGetAutosave(req); }
+    static esp_err_t getStatsFileHandler(httpd_req* req) { return RestApi::handleGetStatsFile(req); }
+    static esp_err_t postStatsSaveHandler(httpd_req* req) { return RestApi::handlePostStatsSave(req); }
+    static esp_err_t postStatsLoadHandler(httpd_req* req) { return RestApi::handlePostStatsLoad(req); }
+    static esp_err_t postStatsResetHandler(httpd_req* req) { return RestApi::handlePostStatsReset(req); }
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }
     static esp_err_t postInternalCacheLoadHandler(httpd_req* req) { return RestApi::handlePostInternalCacheLoad(req); }
 static esp_err_t postInternalCacheResetHandler(httpd_req* req) { return RestApi::handlePostInternalCacheReset(req); }
     static esp_err_t getTimeSettingsHandler(httpd_req* req) { return RestApi::handleGetTimeSettings(req); }
     static esp_err_t postTimeSettingsHandler(httpd_req* req) { return RestApi::handlePostTimeSettings(req); }
+    static esp_err_t postTimeSettingsResetHandler(httpd_req* req) { return RestApi::handlePostTimeSettingsReset(req); }
+    static esp_err_t postTimeTestHandler(httpd_req* req) { return RestApi::handlePostTimeTest(req); }
     static esp_err_t getTimeNowHandler(httpd_req* req) { return RestApi::handleGetTimeNow(req); }
     static esp_err_t postTimeSetHandler(httpd_req* req) { return RestApi::handlePostTimeSet(req); }
     // File explorer (FAT volumes)

@@ -256,5 +256,14 @@ bool DhcpAllowedList::isClientAllowed(const uint8_t mac[6], bool allowOnly,
     return false;
 }
 
+bool DhcpAllowedList::isAddressAllowed(bool allowOnly, bool haveOwner, const uint8_t mac[6],
+                                      const DhcpAllowedList& list,
+                                      const vector<StaticRef>& bindings)
+{
+    if (!allowOnly) return true;      // the switch is off: the address is not looked at
+    if (!haveOwner) return false;     // nobody owns it: not an allowed computer
+    return isClientAllowed(mac, true, list, bindings);
+}
+
 } // namespace dhcp
 } // namespace dhcp

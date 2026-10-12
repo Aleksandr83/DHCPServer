@@ -75,6 +75,7 @@ public:
      * changes without a reboot).
      */
     void reloadStaticBindings() override;
+    bool isClientAddressAllowed(uint32_t ip, bool allowOnly) const override;
 
     /**
      * @brief Reload the allowed-computers allow-list (NVS text blob + the
@@ -226,6 +227,14 @@ private:
 
     /** @brief Mirror staticBindings_ into allowedStaticRefs_ (MAC + enabled). */
     void refreshAllowedStaticRefs();
+
+    /**
+     * @brief Ask the ARP cache who owns an address (stage 196).
+     * @param ip  IPv4 address in network byte order.
+     * @return true when an entry for that address is in the cache; `mac` then
+     *         holds the owner's hardware address.
+     */
+    bool macByIpArp(uint32_t ip, uint8_t mac[6]) const;
 
     /**
      * @brief Name the client reported about itself (lease/offer entry).
