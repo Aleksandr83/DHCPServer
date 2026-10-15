@@ -46,6 +46,12 @@ static const char* KEY_DNS_LOG_CACHE  = "dns_log_cache";
 static const char* KEY_DNS_LOG_RST_S  = "dns_rest_sent";
 static const char* KEY_DNS_LOG_REST   = "dns_log_rest";
 static const char* KEY_DNS_LOG_URL    = "dns_log_url";
+// The file log of forwarded answers (stage 204). NVS keys are limited to 15
+// characters, which is why the pair is `dns_logfile`/`dns_logfile_fwd` rather
+// than the longer names the pages use.
+static const char* KEY_DNS_LOG_FILE   = "dns_logfile";
+static const char* KEY_DNS_LOG_FILE_F = "dns_logfile_fwd";
+static const char* KEY_DNS_LOG_SIZE   = "dns_log_size";
 static const char* KEY_DNS_LOG_AUTH   = "dns_log_auth";
 static const char* KEY_DNS_LOG_AUTH_U = "dns_log_auth_u";
 static const char* KEY_DNS_LOG_AUTH_P = "dns_log_auth_p";
@@ -91,6 +97,9 @@ static const char* KEY_SEC_USER       = "sec_user";
 static const char* KEY_SEC_PASS       = "sec_pass";
 static const char* KEY_SEC_MAX_ATT    = "sec_max_att";
 static const char* KEY_SEC_LOCKOUT    = "sec_lockout";
+// The authorisation log (stage 205): the switch and the cap of `Auth.log`.
+static const char* KEY_SEC_LOG_AUTH   = "sec_log_auth";
+static const char* KEY_SEC_LOG_SIZE   = "sec_log_size";
 // HTTPS of the web interface and the volume that holds the certificate pair.
 static const char* KEY_SEC_HTTPS      = "sec_https";
 static const char* KEY_SEC_CERT_VOL   = "sec_cert_vol";
@@ -110,6 +119,7 @@ static const char* KEY_TIME_SYNC_S    = "time_sync_s";
 static const char* KEY_TIME_LOG_TERM  = "time_log_term";
 static const char* KEY_TIME_LOG_REST  = "time_log_rest";
 static const char* KEY_TIME_LOG_FILE  = "time_log_file";
+static const char* KEY_TIME_LOG_SIZE  = "time_log_size";
 static const char* KEY_TIME_LOG_URL   = "time_log_url";
 static const char* KEY_TIME_LOG_AUTH  = "time_log_auth";
 static const char* KEY_TIME_LOG_AUTH_U = "time_log_auth_u";
@@ -445,6 +455,14 @@ DnsConfig Config::getDns() const
     cfg.logRestSent = readI32(KEY_DNS_LOG_RST_S, 0) != 0;
     cfg.logRest = readI32(KEY_DNS_LOG_REST, 0) != 0;
     cfg.logUrl = readStr(KEY_DNS_LOG_URL, "");
+    // The file log of forwarded answers (stage 204): the switch, the file's own
+    // Forwarded filter, and the cap - which is one of the three sizes the page
+    // offers, so a value written by another firmware or a damaged entry becomes
+    // the default rather than a cap of nothing or of a gigabyte.
+    cfg.logFile = readI32(KEY_DNS_LOG_FILE, 0) != 0;
+    cfg.logFileForwarded = readI32(KEY_DNS_LOG_FILE_F, 1) != 0;
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_DNS_LOG_SIZE, 0)));
     cfg.logAuthEnabled = readI32(KEY_DNS_LOG_AUTH, 0) != 0;
     cfg.logAuthUser = readStr(KEY_DNS_LOG_AUTH_U, "");
     cfg.logAuthPassword = readStr(KEY_DNS_LOG_AUTH_P, "");
@@ -513,6 +531,9 @@ void Config::setDns(const DnsConfig& cfg)
     writeI32(KEY_DNS_LOG_RST_S, cfg.logRestSent ? 1 : 0);
     writeI32(KEY_DNS_LOG_REST, cfg.logRest ? 1 : 0);
     writeStr(KEY_DNS_LOG_URL, cfg.logUrl);
+    writeI32(KEY_DNS_LOG_FILE, cfg.logFile ? 1 : 0);
+    writeI32(KEY_DNS_LOG_FILE_F, cfg.logFileForwarded ? 1 : 0);
+    writeI32(KEY_DNS_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
     writeI32(KEY_DNS_LOG_AUTH, cfg.logAuthEnabled ? 1 : 0);
     writeStr(KEY_DNS_LOG_AUTH_U, cfg.logAuthUser);
     writeStr(KEY_DNS_LOG_AUTH_P, cfg.logAuthPassword);
@@ -656,6 +677,12 @@ SecurityConfig Config::getSecurity() const
     cfg.password = readStr(KEY_SEC_PASS, "admin");
     cfg.maxAttempts = static_cast<uint32_t>(readI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(SecurityConfig::kDefaultMaxAttempts)));
     cfg.lockoutPeriodSec = static_cast<uint32_t>(readI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(SecurityConfig::kDefaultLockoutSec)));
+    // The authorisation log (stage 205): the switch, and the cap - which is one of
+    // the three sizes the page offers, so a damaged entry or one written by another
+    // build becomes the default rather than a cap of nothing or of a gigabyte.
+    cfg.logAuth = readI32(KEY_SEC_LOG_AUTH, 0) != 0;
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_SEC_LOG_SIZE, 0)));
     cfg.httpsEnabled = readI32(KEY_SEC_HTTPS, 0) != 0;
     // An index this build does not know means the internal volume (see
     // security::certStorageFromIndex): a device that once stored something else
@@ -679,6 +706,8 @@ void Config::setSecurity(const SecurityConfig& cfg)
     writeStr(KEY_SEC_PASS, cfg.password);
     writeI32(KEY_SEC_MAX_ATT, static_cast<int32_t>(cfg.maxAttempts));
     writeI32(KEY_SEC_LOCKOUT, static_cast<int32_t>(cfg.lockoutPeriodSec));
+    writeI32(KEY_SEC_LOG_AUTH, cfg.logAuth ? 1 : 0);
+    writeI32(KEY_SEC_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
     writeI32(KEY_SEC_HTTPS, cfg.httpsEnabled ? 1 : 0);
     writeI32(KEY_SEC_CERT_VOL, static_cast<int32_t>(::dhcp::security::certStorageIndex(cfg.certStorage)));
     writeStr(KEY_SEC_CERT_NAME, cfg.certName);
@@ -711,6 +740,8 @@ TimeConfig Config::getTime() const
     cfg.logTerminal = readI32(KEY_TIME_LOG_TERM, 0) != 0;
     cfg.logRest = readI32(KEY_TIME_LOG_REST, 0) != 0;
     cfg.logFile = readI32(KEY_TIME_LOG_FILE, 0) != 0;
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_TIME_LOG_SIZE, 0)));
     cfg.logUrl = readStr(KEY_TIME_LOG_URL, "");
     cfg.logAuthEnabled = readI32(KEY_TIME_LOG_AUTH, 0) != 0;
     cfg.logAuthUser = readStr(KEY_TIME_LOG_AUTH_U, "");
@@ -732,6 +763,7 @@ void Config::setTime(const TimeConfig& cfg)
     writeI32(KEY_TIME_LOG_TERM, cfg.logTerminal ? 1 : 0);
     writeI32(KEY_TIME_LOG_REST, cfg.logRest ? 1 : 0);
     writeI32(KEY_TIME_LOG_FILE, cfg.logFile ? 1 : 0);
+    writeI32(KEY_TIME_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
     writeStr(KEY_TIME_LOG_URL, cfg.logUrl);
     writeI32(KEY_TIME_LOG_AUTH, cfg.logAuthEnabled ? 1 : 0);
     writeStr(KEY_TIME_LOG_AUTH_U, cfg.logAuthUser);

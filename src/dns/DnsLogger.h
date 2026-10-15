@@ -3,8 +3,11 @@
 
 #include <string>
 #include <map>
+#include <memory>
 #include <vector>
 #include <cstdint>
+
+#include "DnsForwardedLogWriter.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -28,6 +31,12 @@ enum class DnsLogSource {
  * Logs DNS queries to:
  *   1. Terminal (ESP_LOGI) if enabled (and the source filter is on)
  *   2. External REST service (HTTP POST) if configured and enabled
+ *   3. A file on the internal volume (stage 204): `<fat>/logs/Forwarded.log`,
+ *      holding the answers that came from outside, archived to the card as
+ *      `log/Archive/Dns/<first>-<last>/Forwarded.log` when it is full. Its own
+ *      switch, its own `Forwarded` filter and its own size, because a file that
+ *      is kept for a fortnight and a terminal that is watched for a minute are
+ *      not the same reader.
  */
 class DnsLogger {
 public:
@@ -120,6 +129,59 @@ public:
                   DnsLogSource source,
                   bool resolved, const std::string& answer);
 
+    /**
+     * @brief Enable/disable the file log of forwarded answers (stage 204).
+     *
+     * Starts or stops the writing task; the file itself appears on the first line
+     * that is written, so switching this on with nothing to log leaves no empty
+     * file behind.
+     */
+    void setLogFile(bool enabled);
+    bool logFile() const { return logFile_; }
+
+    /**
+     * @brief Which answers the **file** keeps: the forwarded ones, or none.
+     *
+     * Deliberately its own switch and not the terminal's `Forwarded` filter: the
+     * operator may want the terminal quiet during an investigation while the file
+     * keeps the record, and one switch for two destinations would make turning one
+     * off silently stop the other. Today the file holds forwarded answers only,
+     * which is what he asked for: a name this device resolved itself is in the
+     * local-hosts list, not in a file meant to show what came back from outside.
+     */
+    void setLogFileForwarded(bool enabled);
+    bool logFileForwarded() const { return logFileForwarded_; }
+
+    /**
+     * @brief The cap the file rotates at, in bytes (stage 204).
+     *
+     * The three sizes the page offers, no free number (see
+     * `core/LogFileSizes.h`); applied to a writer that is already running.
+     */
+    void setFileLogSize(size_t bytes);
+    size_t fileLogSize() const { return fileLogSize_; }
+
+    /** @brief Is the card mounted right now? Asked at every rotation. */
+    using CardMountedCheck = core::LogFileWriter::CardCheck;
+
+    /**
+     * @brief Tell the logger where the file log lives (stage 204).
+     *
+     * The paths are known where the volumes are — `main.cpp` — and not here: this
+     * class writes where it is told to. Called once at boot, before the settings
+     * are applied, so the order of the two does not matter.
+     *
+     * @param fatMountPoint  e.g. `/fat` → the live file is
+     *                       `<it>/logs/Forwarded.log`.
+     * @param cardMountPoint e.g. `/sdcard` → where a full file is archived; ""
+     *                       when the board has no card slot at all.
+     * @param cardMounted    Asked at every rotation, not remembered: a card can
+     *                       be inserted and removed while the device runs.
+     */
+    void setFileLogVolumes(const std::string& fatMountPoint,
+                           const std::string& cardMountPoint,
+                           CardMountedCheck cardMounted);
+
 private:
     void logToTerminal(const std::string& domain, uint16_t type,
                        const std::string& clientAddr,
@@ -127,6 +189,11 @@ private:
                        DnsLogSource source,
                        bool resolved, const std::string& answer);
     void logToRest(const std::string& domain, uint16_t type,
+                   const std::string& clientAddr,
+                   const std::string& clientMac,
+                   DnsLogSource source,
+                   bool resolved, const std::string& answer);
+    void logToFile(const std::string& domain, uint16_t type,
                    const std::string& clientAddr,
                    const std::string& clientMac,
                    DnsLogSource source,
@@ -165,6 +232,21 @@ private:
     void sendRestLog(const RestLogRecord& rec);
     std::string buildRestJson(const RestLogRecord& rec) const;
 
+    // ─── Async file logging (fire-and-forget, stage 204) ───────
+    // The same arrangement as the REST half: one record goes into a bounded queue
+    // from the DNS task and one task writes it, so a FAT write - or the archive
+    // that copies a full file to the card - never blocks a DNS answer.
+    //
+    // Rule 39/DRY: the **same** record type serves both destinations, because both
+    // need the same fields and a second struct with the same seven members is a
+    // copy that can drift. `RestLogRecord` is a fixed-size record, which is what
+    // makes it safe to hand through a queue.
+    void updateFileLogState();
+    void ensureFileWriter();
+    void stopFileWriter();
+    static void fileLogTask(void* arg);
+    void writeFileLog(const RestLogRecord& rec);
+
     bool logTerminal_ = false;
     bool logForwarded_ = true;
     bool logLocal_ = true;
@@ -176,11 +258,28 @@ private:
     std::string logAuthUser_;
     std::string logAuthPassword_;
 
+    // File logging: off until the setting says otherwise, and mute until the
+    // volumes are known (see setFileLogVolumes).
+    bool logFile_ = false;
+    bool logFileForwarded_ = true;
+    bool fileVolumesReady_ = false;
+    std::string fatMountPoint_;
+    std::string cardMountPoint_;
+    CardMountedCheck cardMounted_;
+    size_t fileLogSize_ = core::kLogFileDefaultMaxBytes;
+    std::unique_ptr<DnsForwardedLogWriter> fileWriter_;
+    uint32_t writeFailures_ = 0;
+    uint32_t fileDropped_ = 0;
+
     QueueHandle_t restQueue_ = nullptr;
     TaskHandle_t restTask_ = nullptr;
     volatile bool restStopRequested_ = false;
     uint32_t restDropped_ = 0;   // count of records dropped on overflow
     const std::map<std::string, std::vector<std::string>>* localHosts_ = nullptr;
+
+    QueueHandle_t fileQueue_ = nullptr;
+    TaskHandle_t fileTask_ = nullptr;
+    volatile bool fileStopRequested_ = false;
 };
 
 } // namespace dns

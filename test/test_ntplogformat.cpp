@@ -1,19 +1,21 @@
 /**
  * @file test_ntplogformat.cpp
- * @brief Unit tests for the paths, the range folder name and the carried tail of
- *        the NTP request log (stage 191).
+ * @brief Unit tests for what the NTP log says and for the names of its files
+ *        (stages 191–193).
  *
- * The operator asked for one growing file on the internal volume
- * (`/fat/logs/Ntp.log`) that is, when it is full, sent to the microSD card into
- * `log/Archive/Ntp/<first date>-<last date>/Ntp.log`, and is then recreated -
- * empty when the archive went through, with the last ten lines when it did not.
+ * The log is `/fat/logs/Ntp.log` on the internal volume, archived to the card as
+ * `log/Archive/Ntp/<first date>-<last date>/Ntp.log`. What the file *does* when it
+ * is full — the cap, the rotation, the carried tail — is shared with the DNS
+ * forwarded log and is checked in `test_logfileformat.cpp` and
+ * `test_logfilewriter.cpp`; this file checks what is about NTP itself: the names
+ * the log uses, and the sentences a reader finds in it.
  *
- * Every rule in `NtpLogFormat.h` is a promise about files that one run on the
- * device cannot check, and two of them are the ones that quietly destroy data if
- * they are wrong: the range name decides which folder on the operator's card the
- * log lands in, and the carried tail is all that is left of a full file when no
- * card is there. So both are checked against the near-misses (a one-digit month, a
- * tail that is not newline-terminated, a text shorter than the tail).
+ * Those sentences are the whole point of the file. A device that will not
+ * synchronise has no console and often nobody standing next to it, so the lines
+ * have to say which server it is waiting for, whether that server's name resolves
+ * at all, and — when a client asks and the clock cannot be trusted — that it was
+ * asked. Each of those is a promise about text the operator reads at a distance,
+ * which is exactly what a host test can hold still.
  *
  * Build (MinGW):
  *   g++ -std=c++17 -Wall -Wextra -Werror -DDHCP_TEST_HOST -I. \
@@ -23,31 +25,19 @@
 
 #include <cstdio>
 #include <string>
-#include <vector>
 
 using namespace std;
 
 using dhcp::core::kNtpLogArchiveFolder;
 using dhcp::core::kNtpLogFileName;
-using dhcp::core::kNtpLogKeepLines;
-using dhcp::core::kNtpLogMaxArchiveAttempts;
-using dhcp::core::kNtpLogMaxBytes;
 using dhcp::core::kNtpLogNoClockMark;
-using dhcp::core::kNtpLogNoClockPrefix;
-using dhcp::core::kTmMonthBase;
-using dhcp::core::kTmYearBase;
+using dhcp::core::LogStamp;
+using dhcp::core::logStampPrefix;
 using dhcp::core::NtpDnsVerdict;
-using dhcp::core::NtpLogDate;
-using dhcp::core::NtpLogStamp;
 using dhcp::core::ntpDnsVerdictText;
 using dhcp::core::ntpLogClockShiftText;
 using dhcp::core::ntpLogEventLine;
-using dhcp::core::ntpLogFolderChain;
 using dhcp::core::ntpLogLine;
-using dhcp::core::ntpLogRangeName;
-using dhcp::core::ntpLogStampFromLocal;
-using dhcp::core::ntpLogStampPrefix;
-using dhcp::core::ntpLogTail;
 using dhcp::core::ntpResolverChainText;
 using dhcp::core::ntpSyncStateDelaySec;
 using dhcp::core::ntpSyncStateText;
@@ -66,88 +56,17 @@ static void check(bool ok, const string& what)
     }
 }
 
-static string join(const vector<string>& parts)
+static void test_names()
 {
-    string out;
-    for (const auto& part : parts) {
-        if (!out.empty()) out += " | ";
-        out += part;
-    }
-    return out;
-}
-
-static void test_limits()
-{
-    // The cap is the one Errors.log lives with, so "full" means one thing in the
-    // whole project; the tail is the operator's ten lines, and ten archive
-    // attempts is the point where the writer stops waiting for the card.
-    check(kNtpLogMaxBytes == 64u * 1024u, "the cap is the 64 KB the other logs use");
-    check(kNtpLogKeepLines == 10, "ten lines are carried over");
-    check(kNtpLogMaxArchiveAttempts == 10, "ten archive attempts before giving up");
     check(string(kNtpLogFileName) == "Ntp.log", "the live file is Ntp.log");
-    check(string(kNtpLogArchiveFolder) == "log/Archive/Ntp", "archives live in log/Archive/Ntp");
-}
-
-static void test_range_name()
-{
-    const NtpLogDate a{2026, 10, 12};
-    const NtpLogDate b{2026, 10, 12};
-    check(ntpLogRangeName(a, b) == "2026.10.12-2026.10.12", "one day: the range is the same date twice");
-    check(ntpLogRangeName(NtpLogDate{2026, 10, 11}, b) == "2026.10.11-2026.10.12",
-          "two days: first-last");
-    check(ntpLogRangeName(NtpLogDate{2025, 12, 31}, NtpLogDate{2026, 1, 1}) ==
-              "2025.12.31-2026.01.01",
-          "across the year: both years are written in full");
-    check(ntpLogRangeName(NtpLogDate{2026, 1, 5}, NtpLogDate{2026, 1, 5}) ==
-              "2026.01.05-2026.01.05",
-          "single-digit fields are zero-padded, so the names sort as they happened");
-}
-
-static void test_folder_chain()
-{
-    const auto chain = ntpLogFolderChain("/sdcard", "2026.10.11-2026.10.12");
-    const vector<string> wanted{
-        "/sdcard/log",
-        "/sdcard/log/Archive",
-        "/sdcard/log/Archive/Ntp",
-        "/sdcard/log/Archive/Ntp/2026.10.11-2026.10.12",
-    };
-    check(chain == wanted, "the whole chain is built one level at a time: " + join(chain));
-
-    check(ntpLogFolderChain("/sdcard/", "2026.10.11-2026.10.12") == wanted,
-          "a trailing slash on the mount point changes nothing");
-    check(ntpLogFolderChain("", "2026.10.11-2026.10.12").empty(),
-          "no volume means no chain at all, not a chain starting at '/'");
-    check(ntpLogFolderChain("/sdcard", "").empty(),
-          "no range name means nowhere to put the file");
-}
-
-static void test_tail()
-{
-    check(ntpLogTail("", 10).empty(), "an empty file carries nothing");
-    check(ntpLogTail("one\n", 10) == "one\n", "a short file is carried whole");
-    check(ntpLogTail("a\nb\nc\n", 2) == "b\nc\n", "the last two of three lines");
-    check(ntpLogTail("a\nb\nc\n", 3) == "a\nb\nc\n", "asking for exactly what is there");
-    check(ntpLogTail("a\nb\nc", 2) == "b\nc\n",
-          "a file whose last line has no newline still yields whole lines");
-    check(ntpLogTail("a\n\nb\n", 2) == "\nb\n", "an empty line is a line");
-    check(ntpLogTail("a\nb\n", 0).empty(), "zero means nothing is carried");
+    check(string(kNtpLogArchiveFolder) == "log/Archive/Ntp",
+          "archives live in log/Archive/Ntp");
 }
 
 static void test_line_shape()
 {
-    const NtpLogStamp real{2026, 10, 12, 19, 22, 14, true};
-    const NtpLogStamp noClock{1970, 1, 1, 0, 0, 5, false};
-
-    check(ntpLogStampPrefix(real) == "[2026.10.12 19:22:14]",
-          "a stamp is dotted, day-first and carries the seconds");
-    check(ntpLogStampPrefix(noClock) == std::string(kNtpLogNoClockPrefix),
-          "no clock means the placeholder, not a 1970 date that never happened");
-    check(ntpLogStampPrefix(noClock) == "[----.--.-- --:--:--]",
-          "the placeholder is the shape the operator asked for");
-    check(ntpLogStampPrefix(real).size() == ntpLogStampPrefix(noClock).size(),
-          "both are the same width, so a file lines up before and after the first sync");
-    check(ntpLogStampPrefix(real).size() == 21, "and that width is 21 characters");
+    const LogStamp real{2026, 10, 12, 19, 22, 14, true};
+    const LogStamp noClock{1970, 1, 1, 0, 0, 5, false};
 
     check(ntpLogLine(real, "192.168.1.5", 3) ==
               "[2026.10.12 19:22:14] NTP request from 192.168.1.5 -> stratum 3",
@@ -167,26 +86,19 @@ static void test_line_shape()
     check(ntpLogLine(real, "10.0.0.7", 3).find(kNtpLogNoClockMark) == string::npos,
           "and a verified reply is not marked");
 
-    // The stamp is built from the local time the writer read, so the test checks
-    // the conversion the device does and not only the printing.
-    std::tm local{};
-    local.tm_year = 2026 - kTmYearBase;
-    local.tm_mon = 10 - kTmMonthBase;
-    local.tm_mday = 12;
-    local.tm_hour = 19;
-    local.tm_min = 22;
-    local.tm_sec = 14;
-    check(ntpLogStampPrefix(ntpLogStampFromLocal(local, true)) == "[2026.10.12 19:22:14]",
-          "a local time becomes the stamp of a line");
-    check(ntpLogStampPrefix(ntpLogStampFromLocal(local, false)) ==
-              std::string(kNtpLogNoClockPrefix),
-          "and without a clock the same call yields the placeholder, whatever tm holds");
+    // An event line is the same shape as a request line: the stamp comes from the
+    // one shared rule, so the file has one format for its reader.
+    check(ntpLogEventLine(real, "SNTP synchronised: pool.ntp.org (the clock was 3 s behind)") ==
+              "[2026.10.12 19:22:14] SNTP synchronised: pool.ntp.org (the clock was 3 s behind)",
+          "an event line is stamped exactly like a request, with the same prefix");
+    check(ntpLogEventLine(real, "SNTP client started").find(logStampPrefix(real)) == 0,
+          "and the prefix it uses is the shared one, not a copy of it");
 }
 
 static void test_sync_events()
 {
-    const NtpLogStamp real{2026, 10, 12, 20, 14, 3, true};
-    const NtpLogStamp noClock{1970, 1, 1, 0, 0, 5, false};
+    const LogStamp real{2026, 10, 12, 20, 14, 3, true};
+    const LogStamp noClock{1970, 1, 1, 0, 0, 5, false};
 
     // The schedule the operator chose for "still not synchronised": at most three
     // lines a minute apart, then 2, 5 and 10 minutes, and then every 10 minutes —
@@ -216,10 +128,6 @@ static void test_sync_events()
     check(ntpLogClockShiftText(1000, 10, 1008, 15, true).find("behind") != string::npos,
           "the wording the log uses is the one the operator reads");
 
-    // An event line is the same shape as a request line, minus the request.
-    check(ntpLogEventLine(real, "SNTP synchronised: pool.ntp.org (the clock was 3 s behind)") ==
-              "[2026.10.12 20:14:03] SNTP synchronised: pool.ntp.org (the clock was 3 s behind)",
-          "an event is stamped exactly like a request");
     check(ntpLogEventLine(noClock, "SNTP client started: pool.ntp.org, interval 86400 s") ==
               "[----.--.-- --:--:--] SNTP client started: pool.ntp.org, interval 86400 s",
           "and an event before the first synchronisation carries the placeholder");
@@ -258,10 +166,7 @@ static void test_resolver_diagnostics()
 int main()
 {
     printf("Running NtpLogFormat tests...\n");
-    test_limits();
-    test_range_name();
-    test_folder_chain();
-    test_tail();
+    test_names();
     test_line_shape();
     test_sync_events();
     test_resolver_diagnostics();

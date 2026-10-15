@@ -40,6 +40,28 @@
             </div>
         </div>
 
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="dns.log_file">Log to File</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dns-log-file" onchange="toggleDnsLogFile()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div style="margin-top:0.6rem;display:flex;flex-direction:column;gap:0.4rem;">
+                <label class="dns-filter-row">
+                    <input type="checkbox" id="dns-log-file-forwarded" onchange="toggleDnsLogFileForwarded()">
+                    <span data-i18n="dns.log_file_forwarded">Forwarded</span>
+                </label>
+            </div>
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="dns.log_file_size">Log file size</span>
+                <select id="dns-log-file-size" style="width:6.5rem;"
+                        onchange="saveDnsLogFileSize()"></select>
+            </div>
+            <p class="hint" data-i18n="dns.log_file_hint">The file is /fat/logs/Forwarded.log: the answers that came from outside, with the local time of each one. When it is full it is copied to the card as log/Archive/Dns/&lt;first&gt;-&lt;last&gt;/Forwarded.log and starts again.</p>
+        </div>
+
         <div class="card toggle-row">
             <span data-i18n="dns.log_rest">Log to External REST</span>
             <label class="toggle-switch">
@@ -98,6 +120,9 @@
                 log_cache: document.getElementById('dns-log-cache').checked,
                 log_rest_sent: document.getElementById('dns-log-rest-sent').checked,
                 log_rest: document.getElementById('dns-log-rest').checked,
+                log_file: document.getElementById('dns-log-file').checked,
+                log_file_forwarded: document.getElementById('dns-log-file-forwarded').checked,
+                log_file_size: Number(document.getElementById('dns-log-file-size').value),
                 log_url: document.getElementById('dns-log-url').value,
                 log_auth: document.getElementById('dns-log-auth').checked,
                 log_auth_user: document.getElementById('dns-log-auth-user').value,
@@ -113,6 +138,10 @@
             document.getElementById('dns-log-cache').checked = data.log_cache !== false;
             document.getElementById('dns-log-rest-sent').checked = data.log_rest_sent || false;
             document.getElementById('dns-log-rest').checked = data.log_rest || false;
+            document.getElementById('dns-log-file').checked = data.log_file || false;
+            document.getElementById('dns-log-file-forwarded').checked =
+                data.log_file_forwarded !== false;
+            fillLogFileSizes('dns-log-file-size', data.log_file_size);
             document.getElementById('dns-log-url').value = data.log_url || '';
             document.getElementById('dns-log-auth').checked = data.log_auth || false;
             document.getElementById('dns-log-auth-user').value = data.log_auth_user || '';
@@ -163,6 +192,22 @@
         async function toggleDnsLogLocal() { await toggleField('log_local', 'dns-log-local'); }
         async function toggleDnsLogCache() { await toggleField('log_cache', 'dns-log-cache'); }
         async function toggleDnsLogRestSent() { await toggleField('log_rest_sent', 'dns-log-rest-sent'); }
+        async function toggleDnsLogFile() { await toggleField('log_file', 'dns-log-file'); }
+        async function toggleDnsLogFileForwarded() { await toggleField('log_file_forwarded', 'dns-log-file-forwarded'); }
+
+        // The size saves itself, like the switches: the device applies it to the
+        // writer that is already running, and a smaller cap archives a file that
+        // is over it at once. On error the page re-reads what the device has.
+        async function saveDnsLogFileSize() {
+            const value = Number(document.getElementById('dns-log-file-size').value);
+            const result = await saveDnsPartial({ log_file_size: value });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                await loadDnsSettings();
+            }
+        }
 
         async function toggleDnsLogRest() {
             const checked = document.getElementById('dns-log-rest').checked;

@@ -12,6 +12,7 @@
 #include "RestartSaveVerify.h"
 #include "DnsStatStore.h"
 #include "../dhcp/IDhcpServer.h"
+#include "../core/SubnetFilter.h"
 
 #include <string>
 #include <map>
@@ -675,11 +676,10 @@ private:
     // NODATA instead of being forwarded to the external cache / upstream DNS.
     bool blockForwardNonAA_ = false;
 
-    // Own-subnet client filter (allowOwnSubnet config). subnetNet_/subnetMask_
-    // are host byte order (0 mask = no usable subnet → filter skipped).
-    bool allowOwnSubnet_ = false;
-    uint32_t subnetNet_ = 0;
-    uint32_t subnetMask_ = 0;
+    // Own-subnet client filter (the `allowOwnSubnet` config of the DNS page).
+    // The decision itself lives in `core::SubnetFilter`, shared with the NTP
+    // server and the file manager (stage 200); this object is the DNS half of it.
+    core::SubnetFilter subnetFilter_;
     uint32_t foreignDropped_ = 0;      // queries dropped by the filter
     uint64_t lastForeignLogMs_ = 0;    // throttles the drop log line
 

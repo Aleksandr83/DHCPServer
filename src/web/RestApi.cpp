@@ -6,7 +6,9 @@
 #include "MultipartExtractor.h"
 #include "SettingsImportScan.h"
 #include "WebPrune.h"
+#include "PeerAddress.h"
 #include "../core/ErrorLog.h"
+#include "../core/AuthLog.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
 #include "../core/TimeDefaults.h"
@@ -166,6 +168,48 @@ void RestApi::setCertificateStore(::dhcp::security::CertStore* store)
 // Auth helper
 // ─────────────────────────────────────────────────────
 
+/**
+ * @brief The peer of the request's TCP connection, in both forms the device needs.
+ *
+ * Read once, so the address a LAN filter judges and the address the login counter
+ * keys on can never disagree.
+ *
+ * The buffer is a `sockaddr_storage`, not a `sockaddr_in`, and that is the whole
+ * of stage 207: with `CONFIG_LWIP_IPV6` the HTTP server listens on a **dual-stack**
+ * socket (`esp_http_server` creates a `PF_INET6` listener), so an IPv4 client is
+ * reported as an IPv4-mapped IPv6 address — which does not fit in a 16-byte
+ * `sockaddr_in` and is not `AF_INET`. Reading it as one left every client at
+ * `0.0.0.0`: the login counter was one key for the whole LAN (five wrong
+ * passwords from one browser locked the interface out for everybody, the
+ * 04.10.2026 complaint in another guise) and the file filter, which grants access
+ * on an address it could not read, silently allowed everyone.
+ */
+static PeerAddress peerAddressOf(httpd_req* req)
+{
+    const int sock = httpd_req_to_sockfd(req);
+    if (sock < 0) return {};
+
+    struct sockaddr_storage addr = {};
+    socklen_t len = sizeof(addr);
+    if (getpeername(sock, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
+        ESP_LOGW(TAG, "getpeername failed (%s)", strerror(errno));
+        return {};
+    }
+
+    if (addr.ss_family == AF_INET) {
+        const auto* in4 = reinterpret_cast<const struct sockaddr_in*>(&addr);
+        return web::peerAddressFromBytes(
+            reinterpret_cast<const uint8_t*>(&in4->sin_addr.s_addr), 4);
+    }
+    if (addr.ss_family == AF_INET6) {
+        const auto* in6 = reinterpret_cast<const struct sockaddr_in6*>(&addr);
+        return web::peerAddressFromBytes(in6->sin6_addr.s6_addr, 16);
+    }
+
+    ESP_LOGW(TAG, "peer address of an unknown family (%d)", static_cast<int>(addr.ss_family));
+    return {};
+}
+
 bool RestApi::checkAuth(httpd_req* req)
 {
     if (!s_auth) return false;
@@ -200,19 +244,11 @@ uint32_t RestApi::getClientIp4(httpd_req* req)
 {
     // The peer of the TCP connection — deliberately NOT the X-Forwarded-For
     // header: the file endpoints decide access on this address, and a client
-    // must not be able to claim an address inside the allowed subnet.
-    const int sock = httpd_req_to_sockfd(req);
-    if (sock < 0) return 0;
-
-    struct sockaddr_in addr = {};
-    socklen_t len = sizeof(addr);
-    if (getpeername(sock, reinterpret_cast<struct sockaddr*>(&addr), &len) != 0) {
-        ESP_LOGW(TAG, "getpeername failed (%s)", strerror(errno));
-        return 0;
-    }
-    if (addr.sin_family != AF_INET) return 0;
-
-    return ntohl(addr.sin_addr.s_addr);
+    // must not be able to claim an address inside the allowed subnet. Zero means
+    // "there was nothing to read" (an unknown or a real IPv6 peer), which the
+    // file filter answers by granting access instead of locking the LAN out.
+    const PeerAddress peer = peerAddressOf(req);
+    return peer.ipv4 ? peer.ipv4HostOrder : 0;
 }
 
 bool RestApi::checkFileAccess(httpd_req* req)
@@ -239,15 +275,11 @@ string RestApi::getClientIp(httpd_req* req)
     // single hard-coded fallback address and locked each other out (04.10.2026).
     // There is no reverse proxy in front of this server, and `getClientIp4()` —
     // the same address as a number, used by the file endpoints — made the same
-    // choice for the same reason.
-    const uint32_t ip = getClientIp4(req);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-             static_cast<unsigned>((ip >> 24) & 0xFFu),
-             static_cast<unsigned>((ip >> 16) & 0xFFu),
-             static_cast<unsigned>((ip >> 8) & 0xFFu),
-             static_cast<unsigned>(ip & 0xFFu));
-    return buf;
+    // choice for the same reason. What the address means, and why an IPv4 client
+    // of this board arrives as an IPv4-mapped IPv6 one, is `peerAddressOf()`;
+    // `unknown` here means exactly that no address could be read, and then every
+    // such client shares one key like the old fallback did.
+    return peerAddressOf(req).text;
 }
 
 // ─────────────────────────────────────────────────────
@@ -458,6 +490,12 @@ static void applyDnsSettingsLive(::dhcp::dns::DnsServer* dns,
     dns->logger().setLogRest(cfg.logRest);
     dns->logger().setLogUrl(cfg.logUrl);
     dns->logger().setLogAuth(cfg.logAuthEnabled, cfg.logAuthUser, cfg.logAuthPassword);
+    // The file log of forwarded answers (stage 204): its own switch, its own
+    // Forwarded filter and its own cap. The volumes themselves are wired at boot,
+    // where they are known - the same arrangement as the NTP log.
+    dns->logger().setLogFileForwarded(cfg.logFileForwarded);
+    dns->logger().setFileLogSize(cfg.logFileSize);
+    dns->logger().setLogFile(cfg.logFile);
     dns->cache().setEnabled(cfg.cacheRest);
     dns->cache().setReadEnabled(cfg.cacheRestRead);
     dns->cache().setWriteEnabled(cfg.cacheRestWrite);
@@ -503,8 +541,91 @@ static void applyTimeSettingsLive(::dhcp::time::TimeServer* time,
     // The file log writes on the internal volume and archives to the card; the
     // volumes themselves are wired at boot, where they are known (stage 191).
     time->logger().setLogFile(cfg.logFile);
+    time->logger().setFileLogSize(cfg.logFileSize);
     time->logger().setLogUrl(cfg.logUrl);
     time->logger().setLogAuth(cfg.logAuthEnabled, cfg.logAuthUser, cfg.logAuthPassword);
+}
+
+/// @brief What a start/stop attempt came to, so the caller can put it in words.
+///
+/// The settings pages and the settings import both flip these switches, and only
+/// the pages have an operator to answer: an import that cannot start a server
+/// still restores everything else, so it looks at the outcome and goes on.
+enum class SwitchOutcome {
+    Unchanged,      // the server already was where the settings want it
+    Started,
+    Stopped,
+    NeedsNetwork,   // asked to start, but there is nothing to serve on
+    StartFailed,
+};
+
+/// @brief Make the running DHCP server match @p cfg.enabled (stage 202).
+///
+/// The decision lives here and not in the callers because two of them need it: the
+/// DHCP settings page and the settings import. They differed in ways worth naming:
+/// the page refuses to start without a network and says so to the operator, while
+/// the import never asked (and `DhcpServer::start()` fails on its own without an
+/// address); and only the import has to push restored lists into a server that was
+/// **already running**. A server that has just been started reads those lists
+/// itself, so @p reloadLists is about the running case.
+///
+/// @param networkReady  Whether there is a network to serve on. With @c false and a
+///                      start needed, no start is attempted (the server would fail
+///                      the same way) and the caller may name that reason.
+/// @param reloadLists   Re-read the bindings and the allow-list (the import).
+static SwitchOutcome applyDhcpRunning(::dhcp::dhcp::IDhcpServer* dhcp,
+                                     const ::dhcp::core::DhcpConfig& cfg,
+                                     bool networkReady, bool reloadLists)
+{
+    if (!dhcp) return SwitchOutcome::Unchanged;
+
+    if (cfg.enabled && !dhcp->isRunning()) {
+        if (!networkReady) {
+            ESP_LOGW(TAG, "Cannot start DHCP server: WiFi not connected");
+            return SwitchOutcome::NeedsNetwork;
+        }
+        if (!dhcp->start()) {
+            ESP_LOGE(TAG, "DHCP server failed to start via API");
+            return SwitchOutcome::StartFailed;
+        }
+        ESP_LOGI(TAG, "DHCP server started via API");
+        return SwitchOutcome::Started;
+    }
+
+    if (!cfg.enabled && dhcp->isRunning()) {
+        dhcp->stop();
+        ESP_LOGI(TAG, "DHCP server stopped via API");
+        return SwitchOutcome::Stopped;
+    }
+
+    if (reloadLists) {
+        // The server was already running when a settings file replaced the lists.
+        dhcp->reloadStaticBindings();
+        dhcp->reloadAllowedComputers();
+    }
+    return SwitchOutcome::Unchanged;
+}
+
+/// @brief Make the running DNS server match @p cfg.enabled (stage 202).
+///
+/// No network question and no answer to the operator: the DNS server serves from a
+/// socket that exists as soon as the device is up, and both callers only need the
+/// switch to happen. The live settings are applied by @ref applyDnsSettingsLive
+/// afterwards, because `DnsServer::start()` configures its cache.
+static void applyDnsRunning(::dhcp::dns::DnsServer* dns,
+                            const ::dhcp::core::DnsConfig& cfg)
+{
+    if (!dns) return;
+    if (cfg.enabled && !dns->isRunning()) {
+        if (dns->start()) {
+            ESP_LOGI(TAG, "DNS server started via API");
+        } else {
+            ESP_LOGE(TAG, "DNS server failed to start via API");
+        }
+    } else if (!cfg.enabled && dns->isRunning()) {
+        dns->stop();
+        ESP_LOGI(TAG, "DNS server stopped via API");
+    }
 }
 
 /// @brief Start, stop or restart the running halves after a settings change.
@@ -805,30 +926,20 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
 
     ::dhcp::core::Config::instance().setDhcp(cfg);
 
-    // Apply enable/disable to running server: the live half sits in one function
-    // that the settings import calls too (stage 183b).
+    // Apply enable/disable to running server: the live half and the switch both
+    // sit in helpers the settings import calls too (stages 183b, 202).
     applyDhcpSettingsLive(s_dhcp, cfg);
-    if (s_dhcp) {
-        if (cfg.enabled && !s_dhcp->isRunning()) {
-            // Check WiFi before starting
-            bool wifiOk = s_wifi && s_wifi->isConnected();
-            if (!wifiOk) {
-                ESP_LOGW(TAG, "Cannot start DHCP server: WiFi not connected");
-                httpd_resp_set_type(req, "application/json");
-                httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"WiFi not connected\"}");
-                return ESP_OK;
-            }
-            if (s_dhcp->start()) {
-                ESP_LOGI(TAG, "DHCP server started via API");
-            } else {
-                ESP_LOGE(TAG, "DHCP server failed to start via API");
-                httpd_resp_set_type(req, "application/json");
-                httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Failed to start DHCP server\"}");
-                return ESP_OK;
-            }
-        } else if (!cfg.enabled && s_dhcp->isRunning()) {
-            s_dhcp->stop();
-            ESP_LOGI(TAG, "DHCP server stopped via API");
+    {
+        const bool networkReady = s_wifi && s_wifi->isConnected();
+        const auto outcome = applyDhcpRunning(s_dhcp, cfg, networkReady,
+                                              /*reloadLists=*/false);
+        if (outcome == SwitchOutcome::NeedsNetwork ||
+            outcome == SwitchOutcome::StartFailed) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, outcome == SwitchOutcome::NeedsNetwork
+                                       ? "{\"status\":\"error\",\"message\":\"WiFi not connected\"}"
+                                       : "{\"status\":\"error\",\"message\":\"Failed to start DHCP server\"}");
+            return ESP_OK;
         }
     }
 
@@ -1171,6 +1282,9 @@ esp_err_t RestApi::handleGetDnsSettings(httpd_req* req)
     addJsonBool(json, "log_auth", cfg.logAuthEnabled, true);
     addJsonString(json, "log_auth_user", cfg.logAuthUser, true);
     addJsonString(json, "log_auth_password", cfg.logAuthPassword, true);
+    addJsonBool(json, "log_file", cfg.logFile, true);
+    addJsonBool(json, "log_file_forwarded", cfg.logFileForwarded, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
     addJsonString(json, "cache_url", cfg.cacheUrl, true);
     addJsonBool(json, "cache_rest", cfg.cacheRest, true);
     addJsonBool(json, "cache_rest_read", cfg.cacheRestRead, true);
@@ -1241,6 +1355,15 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
     cfg.logAuthUser = jsonGetStr(body, "log_auth_user");
     cfg.logAuthPassword = jsonGetStr(body, "log_auth_password");
+    // The file log of forwarded answers (stage 204). Absent means off for the
+    // switch - a partial client cannot start a log - and on for the file's own
+    // Forwarded filter, which is what it is the moment the file exists. The cap
+    // is not taken as sent: only the three sizes the page offers are sizes, and
+    // anything else becomes the default (see core/LogFileSizes.h).
+    cfg.logFile = jsonGetBool(body, "log_file", false);
+    cfg.logFileForwarded = jsonGetBool(body, "log_file_forwarded", true);
+    cfg.logFileSize = static_cast<uint32_t>(::dhcp::core::logFileSizeOrDefault(
+        jsonGetInt(body, "log_file_size", 0)));
     cfg.cacheRest = jsonGetBool(body, "cache_rest", false);
     cfg.cacheRestRead = jsonGetBool(body, "cache_rest_read", true);
     cfg.cacheRestWrite = jsonGetBool(body, "cache_rest_write", true);
@@ -1317,20 +1440,9 @@ esp_err_t RestApi::handlePostDnsSettings(httpd_req* req)
     ::dhcp::core::Config::instance().setDns(cfg);
 
     // Apply enable/disable to the running DNS server and keep DHCP in sync
-    if (s_dns) {
-        if (cfg.enabled && !s_dns->isRunning()) {
-            if (s_dns->start()) {
-                ESP_LOGI(TAG, "DNS server started via API");
-            } else {
-                ESP_LOGE(TAG, "DNS server failed to start via API");
-            }
-        } else if (!cfg.enabled && s_dns->isRunning()) {
-            s_dns->stop();
-            ESP_LOGI(TAG, "DNS server stopped via API");
-        }
-    }
+    applyDnsRunning(s_dns, cfg);
     // Every live DNS setting in one call, shared with the settings import so the
-    // two cannot drift apart (stage 183b).
+    // two cannot drift apart (stages 183b, 202).
     applyDnsSettingsLive(s_dns, s_dhcp, cfg);
     // Diagnostic: shows what the client actually sent for the external cache
     // (auth user only — the password is never logged). Helps confirm the
@@ -1454,6 +1566,10 @@ esp_err_t RestApi::handleGetSecuritySettings(httpd_req* req)
     addJsonString(json, "username", cfg.username, false);
     addJsonInt(json, "max_attempts", cfg.maxAttempts, true);
     addJsonInt(json, "lockout_period", cfg.lockoutPeriodSec, true);
+    // The authorisation log (stage 205): the switch that keeps the attempts in
+    // `/fat/logs/Auth.log` and the cap that file rotates at.
+    addJsonBool(json, "log_file", cfg.logAuth, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
     addJsonBool(json, "https_enabled", httpsServing, true);
     addJsonBool(json, "https_available", httpsAvailable, true);
     addJsonString(json, "https_status", httpsStatus, true);
@@ -1488,6 +1604,12 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
     }
     cfg.maxAttempts = jsonGetInt(body, "max_attempts", 5);
     cfg.lockoutPeriodSec = jsonGetInt(body, "lockout_period", 300);
+    // The authorisation log (stage 205). Absent means off for the switch - a
+    // partial client must not start a log - and the cap is not taken as sent: only
+    // the three sizes the page offers are sizes (see core/LogFileSizes.h).
+    cfg.logAuth = jsonGetBool(body, "log_file", false);
+    cfg.logFileSize = static_cast<uint32_t>(::dhcp::core::logFileSizeOrDefault(
+        jsonGetInt(body, "log_file_size", 0)));
 
     const auto current = ::dhcp::core::Config::instance().getSecurity();
     cfg.httpsEnabled = current.httpsEnabled;
@@ -1517,8 +1639,12 @@ esp_err_t RestApi::handlePostSecuritySettings(httpd_req* req)
     }
 
     ::dhcp::core::Config::instance().setSecurity(cfg);
-    // Reload auth config
+    // Reload auth config — and take the authorisation log's two settings live
+    // (stage 205): the switch decides whether sentences are submitted from now on,
+    // and a smaller cap archives a file that is already over it.
     if (s_auth) s_auth->reloadConfig();
+    ::dhcp::core::AuthLog::instance().setFileLogSize(cfg.logFileSize);
+    ::dhcp::core::AuthLog::instance().setLogFile(cfg.logAuth);
     ESP_LOGI(TAG, "Security settings updated");
 
     httpd_resp_set_type(req, "application/json");
@@ -2022,6 +2148,9 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "log_url", dns.logUrl, true);
     addJsonBool(json, "log_auth", dns.logAuthEnabled, true);
     addJsonString(json, "log_auth_user", dns.logAuthUser, true);
+    addJsonBool(json, "log_file", dns.logFile, true);
+    addJsonBool(json, "log_file_forwarded", dns.logFileForwarded, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(dns.logFileSize), true);
     addJsonBool(json, "cache_rest", dns.cacheRest, true);
     addJsonBool(json, "cache_rest_read", dns.cacheRestRead, true);
     addJsonBool(json, "cache_rest_write", dns.cacheRestWrite, true);
@@ -2078,6 +2207,7 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         addJsonBool(json, "log_terminal", tcfg.logTerminal, true);
         addJsonBool(json, "log_rest", tcfg.logRest, true);
         addJsonBool(json, "log_file", tcfg.logFile, true);
+        addJsonInt(json, "log_file_size", static_cast<int64_t>(tcfg.logFileSize), true);
         addJsonString(json, "log_url", tcfg.logUrl, true);
         addJsonBool(json, "log_auth", tcfg.logAuthEnabled, true);
         addJsonString(json, "log_auth_user", tcfg.logAuthUser, true);
@@ -2101,6 +2231,8 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonString(json, "username", sec.username, false);
     addJsonInt(json, "max_attempts", sec.maxAttempts, true);
     addJsonInt(json, "lockout_period", sec.lockoutPeriodSec, true);
+    addJsonBool(json, "log_file", sec.logAuth, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(sec.logFileSize), true);
     // The stored wish for HTTPS and the pair the interface would use (stage 183b).
     // The certificate and its key are NOT exported: a private key is a secret,
     // like a password, so a restored device has to be given its own pair.
@@ -2149,6 +2281,7 @@ static const char* const kKnownSettingsKeys[] = {
     "mac", "ip", "name", "use_gateway", "use_dns", "ip4", "ip6",
     // ── dns ──
     "external_dns", "log_forwarded", "log_local", "log_cache", "log_rest_sent",
+    "log_file", "log_file_forwarded", "log_file_size",
     "cache_rest", "cache_rest_read", "cache_rest_write", "cache_url",
     "cache_auth", "cache_auth_user", "cache_internal", "cache_internal_size_mb",
     "cache_internal_ignore_ttl", "cache_internal_save_stats",
@@ -2163,7 +2296,7 @@ static const char* const kKnownSettingsKeys[] = {
     "sync_enabled", "external_ntp", "timezone", "utc_offset_hours",
     "sync_interval_sec", "rate_limit_per_sec", "only_allowed_computers",
     // ── security ──
-    "username", "max_attempts", "lockout_period", "https_enabled",
+    "username", "max_attempts", "lockout_period", "log_file_size", "https_enabled",
     "cert_storage", "cert_name",
 };
 
@@ -2397,6 +2530,19 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.logRestSent = jsonGetBool(seg, "log_rest_sent", cur.logRestSent);
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
+                cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
+                cur.logFileForwarded = jsonGetBool(seg, "log_file_forwarded",
+                                                   cur.logFileForwarded);
+                {
+                    // A size this firmware does not offer is not a size: the document
+                    // may have been written by another build, so the device keeps the
+                    // one it has rather than taking a number nobody can choose here.
+                    const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                    if (size > 0 &&
+                        ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                        cur.logFileSize = static_cast<uint32_t>(size);
+                    }
+                }
                 cur.cacheRest = jsonGetBool(seg, "cache_rest", cur.cacheRest);
                 cur.cacheRestRead = jsonGetBool(seg, "cache_rest_read", cur.cacheRestRead);
                 cur.cacheRestWrite = jsonGetBool(seg, "cache_rest_write", cur.cacheRestWrite);
@@ -2505,6 +2651,15 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
                 cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
+                {
+                    // Same rule as the DNS half of the import: a size this firmware
+                    // does not offer leaves the device with the one it has.
+                    const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                    if (size > 0 &&
+                        ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                        cur.logFileSize = static_cast<uint32_t>(size);
+                    }
+                }
                 v = jsonGetStr(seg, "log_url"); cur.logUrl = v;
                 v = jsonGetStr(seg, "log_auth_user"); cur.logAuthUser = v;
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
@@ -2572,6 +2727,17 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 string v = jsonGetStr(seg, "username"); if (!v.empty()) cur.username = v;
                 cur.maxAttempts = jsonGetInt(seg, "max_attempts", cur.maxAttempts);
                 cur.lockoutPeriodSec = jsonGetInt(seg, "lockout_period", cur.lockoutPeriodSec);
+                cur.logAuth = jsonGetBool(seg, "log_file", cur.logAuth);
+                {
+                    // A size this firmware does not offer is not a size: the document
+                    // may have been written by another build, so the device keeps the
+                    // one it has rather than taking a number nobody can choose here.
+                    const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                    if (size > 0 &&
+                        ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                        cur.logFileSize = static_cast<uint32_t>(size);
+                    }
+                }
                 v = jsonGetStr(seg, "cert_name");
                 if (!v.empty()) {
                     // The NVS reader drops a name that is not a host name and
@@ -2623,6 +2789,10 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
                 cfgMgr.setSecurity(cur);
                 if (s_auth) s_auth->reloadConfig();
+                // The authorisation log's two settings take effect at once too
+                // (stage 205), like every other "live" half of the import.
+                ::dhcp::core::AuthLog::instance().setFileLogSize(cur.logFileSize);
+                ::dhcp::core::AuthLog::instance().setLogFile(cur.logAuth);
                 importedSec = true;
             }
         }
@@ -2658,42 +2828,17 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                           cur.gateway   != oldDhcp.gateway);
     }
 
-    // Restart DHCP if it should run; stop if disabled
-    if (s_dhcp) {
-        auto c = cfgMgr.getDhcp();
-        if (c.enabled) {
-            if (!s_dhcp->isRunning()) s_dhcp->start();
-            // A server that has just been started has read its lists from NVS;
-            // it has to be told the imported ones.
-            s_dhcp->reloadStaticBindings();
-            s_dhcp->reloadAllowedComputers();
-        } else if (s_dhcp->isRunning()) {
-            s_dhcp->stop();
-        }
-    }
+    // Restart DHCP if it should run; stop if disabled. The decision itself lives in
+    // the helper the settings page uses (stage 202) — the import had its own copy of
+    // it, which is exactly how the two drifted apart in the past.
+    applyDhcpRunning(s_dhcp, cfgMgr.getDhcp(), s_wifi && s_wifi->isConnected(),
+                     /*reloadLists=*/true);
     if (s_dns) {
-        auto c = cfgMgr.getDns();
-        if (c.enabled) {
-            if (!s_dns->isRunning()) s_dns->start();
-        } else if (s_dns->isRunning()) {
-            s_dns->stop();
-        }
+        const auto c = cfgMgr.getDns();
+        applyDnsRunning(s_dns, c);
         applyDnsSettingsLive(s_dns, s_dhcp, c);
     }
-    if (s_time) {
-        auto c = cfgMgr.getTime();
-        if (c.syncEnabled) {
-            if (!s_time->isSyncRunning()) s_time->startSync();
-            else s_time->restartSync();
-        } else if (s_time->isSyncRunning()) {
-            s_time->stopSync();
-        }
-        if (c.enabled) {
-            if (!s_time->isRunning()) s_time->start();
-        } else if (s_time->isRunning()) {
-            s_time->stop();
-        }
-    }
+    applyTimeRunning(s_time, cfgMgr.getTime());
 
     // ─── 6. Build response ───
     string json = "{";
@@ -4188,6 +4333,7 @@ esp_err_t RestApi::handleGetTimeSettings(httpd_req* req)
     addJsonBool(json, "log_terminal", cfg.logTerminal, true);
     addJsonBool(json, "log_rest", cfg.logRest, true);
     addJsonBool(json, "log_file", cfg.logFile, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
     addJsonString(json, "log_url", cfg.logUrl, true);
     addJsonBool(json, "log_auth", cfg.logAuthEnabled, true);
     addJsonString(json, "log_auth_user", cfg.logAuthUser, true);
@@ -4258,6 +4404,10 @@ esp_err_t RestApi::handlePostTimeSettings(httpd_req* req)
     cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
     cfg.logRest = jsonGetBool(body, "log_rest", false);
     cfg.logFile = jsonGetBool(body, "log_file", false);
+    // The cap the file log rotates at (stage 204): only the three sizes the page
+    // offers are sizes, and a value that is not one of them becomes the default.
+    cfg.logFileSize = static_cast<uint32_t>(::dhcp::core::logFileSizeOrDefault(
+        jsonGetInt(body, "log_file_size", 0)));
     cfg.logUrl = jsonGetStr(body, "log_url");
     cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
     cfg.logAuthUser = jsonGetStr(body, "log_auth_user");

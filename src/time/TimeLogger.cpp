@@ -261,6 +261,15 @@ void TimeLogger::setFileLogVolumes(const string& fatMountPoint,
     updateFileLogState();
 }
 
+void TimeLogger::setFileLogSize(size_t bytes)
+{
+    fileLogSize_ = bytes;
+    // A writer that is already running takes the new cap at once (stage 204):
+    // a smaller one archives a file that is over it, a larger one raises the
+    // limit where it stands. Either way the log that is there is not thrown away.
+    if (fileWriter_) fileWriter_->setMaxBytes(bytes);
+}
+
 void TimeLogger::updateFileLogState()
 {
     const bool want = logFile_ && fileVolumesReady_;
@@ -278,22 +287,23 @@ void TimeLogger::ensureFileWriter()
     // written into Errors.log — which is the file he reads when something is
     // wrong — and not only into the terminal.
     fileWriter_ = make_unique<core::NtpLogWriter>(
-        fatMountPoint_ + "/" + core::kNtpLogFolder + "/" + core::kNtpLogFileName,
+        fatMountPoint_ + "/" + core::kLogFileLiveFolder + "/" + core::kNtpLogFileName,
         cardMountPoint_,
         [this] { return cardMounted_ && cardMounted_(); },
         [](const string& message) {
             core::ErrorLog::instance().errorf("TimeLogger", "%s", message.c_str());
-        });
+        },
+        fileLogSize_);
     if (fileQueue_ == nullptr) {
-        fileQueue_ = xQueueCreate(kFileQueueDepth, sizeof(FileLogRecord));
+        fileQueue_ = xQueueCreate(core::kFileLogQueueDepth, sizeof(FileLogRecord));
     }
     if (!fileQueue_) {
         ESP_LOGE(TAG, "Failed to create file log queue");
         return;
     }
     fileStopRequested_ = false;
-    if (xTaskCreate(&TimeLogger::fileLogTask, "ntp_file", kFileTaskStack, this,
-                    kFileTaskPriority, &fileTask_) != pdPASS) {
+    if (xTaskCreate(&TimeLogger::fileLogTask, "ntp_file", core::kFileLogTaskStack, this,
+                    core::kFileLogTaskPriority, &fileTask_) != pdPASS) {
         fileTask_ = nullptr;
         ESP_LOGE(TAG, "Failed to create file log task");
     }
@@ -347,7 +357,7 @@ void TimeLogger::writeFileLog(const FileLogRecord& rec)
     std::tm local{};
     const bool clockSet = core::ErrorLogCore::clockIsSet(static_cast<uint64_t>(now)) &&
                           core::ErrorLogCore::localTime(now, local);
-    const core::NtpLogStamp stamp = core::ntpLogStampFromLocal(local, clockSet);
+    const core::LogStamp stamp = core::logStampFromLocal(local, clockSet);
 
     const std::string line = rec.isEvent
         ? core::ntpLogEventLine(stamp, rec.text)
@@ -363,7 +373,7 @@ void TimeLogger::writeFileLog(const FileLogRecord& rec)
     // than a noisy one, so the failure is named on the terminal at a rate that
     // cannot bury anything else.
     ++writeFailures_;
-    if (writeFailures_ == 1 || (writeFailures_ % kWriteFailureWarnEvery) == 0) {
+    if (writeFailures_ == 1 || (writeFailures_ % core::kFileLogWriteWarnEvery) == 0) {
         ESP_LOGW(TAG, "NTP file log write failed (%u in a row): %s",
                  static_cast<unsigned>(writeFailures_), fatMountPoint_.c_str());
     }

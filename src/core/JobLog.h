@@ -6,7 +6,7 @@
 #include <string>
 
 #include "ErrorLogCore.h"
-#include "FileErrorLogTarget.h"
+#include "ArchiveFileLogTarget.h"
 #include "FreeRtosErrorQueue.h"
 #include "JobRegistry.h"
 #include "SweepDetailTarget.h"
@@ -41,7 +41,9 @@ namespace core {
  *     caller;
  *   * a line whose queue is full is lost **and counted**, and the count is
  *     written into the file with the next line;
- *   * the file is capped and rotated by `FileErrorLogTarget` (64 KB → `.1`).
+ *   * the file is capped and, when full, archived to the card by a
+ *     `LogFileWriter` (`log/Archive/Jobs/...`, the newest lines kept when there is
+ *     no card) — the same policy every other file log in the project uses.
  *
  * The line shape is the operator's: the stamp comes **first, in brackets**
  * (`[2026-10-04 02:06:43] job: file_check (/sdcard): finished (done, 12.3 s)`),
@@ -140,7 +142,7 @@ private:
     void noteDetailSkipped(const std::string& reason);
 
     FreeRtosErrorQueue queue_;
-    std::unique_ptr<FileErrorLogTarget> target_;
+    std::unique_ptr<ArchiveFileLogTarget> target_;
     std::unique_ptr<ErrorLogCore> core_;
     /// The per-record detail log of the cache auto-update (stage 179/186): its
     /// own queue, a target that outlives the sweeps, drained by the same task.

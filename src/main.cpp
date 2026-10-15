@@ -28,6 +28,7 @@
 #include "core/NtpServers.h"
 #include "core/CpuMonitor.h"
 #include "core/ErrorLog.h"
+#include "core/AuthLog.h"
 #include "core/JobLog.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
@@ -129,8 +130,19 @@ extern "C" void app_main(void)
     // Critical errors go to /fat/logs/Errors.log: the terminal is not always
     // there (that is how a failed Statistica.dat write stayed unexplained), and
     // the web file explorer can read the file. One low-priority task writes it
-    // through a queue in PSRAM, so no caller ever waits for the FAT.
-    dhcp::core::ErrorLog::instance().start("/fat");
+    // through a queue in PSRAM, so no caller ever waits for the FAT — and a full
+    // file is archived to the card (stage 206), which is why the card is handed
+    // over here: this is the only place that knows whether the board has a slot
+    // and whether a card is in it right now.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        dhcp::core::ErrorLog::instance().start(
+            "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+            [] {
+                auto* card = s_fileManager.find("sd");
+                return card != nullptr && card->isMounted();
+            });
+    }
     // Long-running operations get their own file, next to it: one line when an
     // operation starts and one when it ends (stage 173). The registry knows
     // nothing about files — this is the subscriber that writes them. It was
@@ -143,6 +155,22 @@ extern "C" void app_main(void)
     dhcp::core::JobLog::instance().start("/fat", s_fileManager.find("sd"));
     dhcp::core::JobRegistry::instance().setObserver(
         &dhcp::core::JobLog::instance());
+    // The authorisation log (stage 205): the attempts, kept where the operator can
+    // read them without a console. The writing task runs from boot — the switch on
+    // the Security page decides whether sentences are submitted at all, so a
+    // settings change cannot fail halfway — and the volumes are known here.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        auto secCfg = dhcp::core::Config::instance().getSecurity();
+        dhcp::core::AuthLog::instance().start(
+            "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+            [] {
+                auto* card = s_fileManager.find("sd");
+                return card != nullptr && card->isMounted();
+            });
+        dhcp::core::AuthLog::instance().setFileLogSize(secCfg.logFileSize);
+        dhcp::core::AuthLog::instance().setLogFile(secCfg.logAuth);
+    }
     // LAN-only access policy (device address + netmask from the DHCP settings).
     s_fileManager.applyAccessFilter();
 
@@ -274,6 +302,19 @@ static void onNetworkConnected()
     }
 
     // Start DNS server (check config enabled flag)
+    // The DNS logger's file log (stage 204) lives on the internal volume and is
+    // archived to the card; the volumes are known here and nowhere else, exactly
+    // as they are for the NTP log (stage 191). Told before the server starts, so
+    // the order of the two does not matter.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        s_dnsServer.logger().setFileLogVolumes(
+            "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+            [] {
+                auto* card = s_fileManager.find("sd");
+                return card != nullptr && card->isMounted();
+            });
+    }
     if (!s_dnsServer.isRunning()) {
         auto dnsCfg = ::dhcp::core::Config::instance().getDns();
         if (dnsCfg.enabled) {

@@ -7,7 +7,7 @@
 #include <string>
 
 #include "ErrorLogCore.h"
-#include "FileErrorLogTarget.h"
+#include "ArchiveFileLogTarget.h"
 #include "FreeRtosErrorQueue.h"
 
 namespace dhcp {
@@ -34,19 +34,32 @@ namespace core {
  *
  * The volume is a parameter of @ref start, not a constant: today the internal
  * FAT, tomorrow whatever the operator picks in the settings (the microSD is the
- * obvious candidate). No setting exists yet — only the seam.
+ * obvious candidate). Since stage 206 the card is a parameter too, and it is what
+ * a full log is archived to: the file is written by a `LogFileWriter` (through
+ * `ArchiveFileLogTarget`), so it has the cap, the rotation and the carried tail
+ * every other file log in the project has.
  */
 class ErrorLog {
 public:
+    /** @brief Is the card there right now? Asked at every rotation. */
+    using CardMountedCheck = LogFileWriter::CardCheck;
+
     static ErrorLog& instance();
 
     /**
      * @brief Point the log at a volume and start the writing task.
-     * @param mountPoint e.g. "/fat" → the file is `<mountPoint>/logs/Errors.log`
+     * @param mountPoint     e.g. "/fat" → the file is
+     *                       `<mountPoint>/logs/Errors.log`
+     * @param cardMountPoint e.g. "/sdcard" → where a full log is archived; "" when
+     *                       the board has no card slot.
+     * @param cardMounted    Asked at every rotation, not remembered: a card can be
+     *                       inserted and removed while the device runs.
      * @return false when the task could not be created (messages keep queueing
      *         until the queue fills, then they are counted as drops).
      */
-    bool start(const std::string& mountPoint = "/fat");
+    bool start(const std::string& mountPoint = "/fat",
+               const std::string& cardMountPoint = std::string(),
+               CardMountedCheck cardMounted = CardMountedCheck());
 
     /** @brief Producer API. Returns false when the message was dropped. */
     bool error(const char* tag, const std::string& message);
@@ -77,7 +90,7 @@ private:
     void run();
 
     FreeRtosErrorQueue queue_;
-    std::unique_ptr<FileErrorLogTarget> target_;
+    std::unique_ptr<ArchiveFileLogTarget> target_;
     std::unique_ptr<ErrorLogCore> core_;
     TaskHandle_t task_ = nullptr;
     /** Kept separately: before start() there is no core to count into. */

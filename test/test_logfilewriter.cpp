@@ -1,12 +1,13 @@
 /**
- * @file test_ntplogwriter.cpp
- * @brief Unit tests for the NTP request log's rotation (stage 191).
+ * @file test_logfilewriter.cpp
+ * @brief Unit tests for the rotation every file log in this project uses, and for
+ *        the two hooks that tell one log from another (stages 191 and 203).
  *
- * The live file is `/fat/logs/Ntp.log` on the internal volume, capped at 64 KB.
- * When it is full, the operator's rule is:
+ * A live file on the internal volume, capped; when it is full, the operator's
+ * rule is:
  *
- *   1. the file goes to the card as `log/Archive/Ntp/<first>-<last>/Ntp.log`,
- *      and the live file starts again **empty**;
+ *   1. the file goes to the card as `<archive folder>/<first>-<last>/<file>`, and
+ *      the live file starts again **empty**;
  *   2. with no card at all, the live file starts again with the **last ten
  *      lines** of the previous one;
  *   3. when the card is there but the write fails, the file is **kept** and the
@@ -14,13 +15,21 @@
  *      `Errors.log` for each failure — after the tenth the writer gives up and
  *      carries the tail as if there were no card.
  *
+ * Stage 203 moved that policy into the abstract `LogFileWriter`, with the NTP
+ * request log and the DNS forwarded log as its two implementations. The first six
+ * tests below are the ones this policy was accepted with and still drive it
+ * through `NtpLogWriter` — unchanged expectations, which is what makes the
+ * refactor provable. The last one drives it through a *second* subclass with
+ * another archive folder and another name, so the two hooks are checked as hooks
+ * and not merely as constants somebody reads in a header.
+ *
  * All of that is file behaviour, so it is exercised here on real files in a
  * throwaway folder: the card is a second folder, its absence and its failure are
  * the two answers of the `cardMounted`/write callbacks the writer is built with.
  *
  * Build (MinGW):
  *   g++ -std=c++17 -Wall -Wextra -Werror -DDHCP_TEST_HOST -I. \
- *       test/test_ntplogwriter.cpp -o test_ntplogwriter
+ *       test/test_logfilewriter.cpp -o test_logfilewriter
  */
 #include "src/core/NtpLogWriter.h"
 
@@ -36,7 +45,7 @@
 
 using namespace std;
 
-using dhcp::core::NtpLogStamp;
+using dhcp::core::LogStamp;
 using dhcp::core::NtpLogWriter;
 
 static int g_checks = 0;
@@ -55,12 +64,27 @@ static void check(bool ok, const string& what)
 
 namespace {
 
-const string kRoot = ".ntplogtest";
+const string kRoot = ".logfiletest";
 const string kLive = kRoot + "/fat/logs/Ntp.log";
 const string kArchive = kRoot + "/sdcard/log/Archive/Ntp/2026.10.12-2026.10.12/Ntp.log";
 
-const NtpLogStamp kRealStamp{2026, 10, 12, 19, 30, 0, true};
-const NtpLogStamp kNoClockStamp{1970, 1, 1, 0, 0, 5, false};
+const LogStamp kRealStamp{2026, 10, 12, 19, 30, 0, true};
+const LogStamp kNoClockStamp{1970, 1, 1, 0, 0, 5, false};
+
+/**
+ * @brief A second log of the same kind, as stage 205's DNS log will be one.
+ *
+ * It answers the two hooks differently and nothing else, which is the whole point
+ * of the split: the rules about losing lines are not written twice.
+ */
+class OtherLogWriter : public dhcp::core::LogFileWriter {
+public:
+    using LogFileWriter::LogFileWriter;
+
+protected:
+    const char* archiveFolder() const override { return "log/Archive/Other"; }
+    string logTitle() const override { return "Other log"; }
+};
 
 int makeDir(const string& path)
 {
@@ -104,13 +128,6 @@ string readFile(const string& path)
     while ((got = fread(buf, 1, sizeof(buf), file)) > 0) out.append(buf, got);
     fclose(file);
     return out;
-}
-
-size_t fileSize(const string& path)
-{
-    struct stat st {};
-    if (stat(path.c_str(), &st) != 0) return 0;
-    return static_cast<size_t>(st.st_size);
 }
 
 /** The text of one record: a fixed 50 bytes, no newline (the writer adds it). */
@@ -323,21 +340,127 @@ static void test_wait_for_a_real_clock()
           "the range folder is named after the first REAL date, and nothing earlier was dropped");
 }
 
+static void test_a_smaller_cap_rotates_there_and_then()
+{
+    volume();
+    const string card = cardFolder();
+    makeDir(card);
+
+    auto writer = makeWriter(64u * 1024u, true, nullptr);
+    for (int i = 1; i <= 5; ++i) writer.append(longLine(i), kRealStamp);
+    const string before = readFile(kLive);
+    check(writer.archives() == 0, "a file far below its cap has no archive yet");
+
+    // The operator chooses a smaller size in the web interface (stage 204): the
+    // file that is already there is over the new cap at that very moment.
+    writer.setMaxBytes(100);
+    check(writer.maxBytes() == 100, "the writer takes the chosen cap");
+    check(writer.archives() == 1, "and the file that is already over it is archived right away");
+    check(readFile(kArchive) == before, "the archive holds exactly what the file held");
+    check(readFile(kLive).empty(), "and the live file starts again, empty");
+}
+
+static void test_a_larger_cap_keeps_the_file()
+{
+    volume();
+    makeDir(cardFolder());
+
+    // The operator asking for a bigger file is not asking to lose the one he has.
+    auto writer = makeWriter(200, true, nullptr);
+    for (int i = 1; i <= 3; ++i) writer.append(longLine(i), kRealStamp);
+    const string kept = readFile(kLive);
+    check(writer.archives() == 0, "a file below its cap has no archive yet");
+
+    writer.setMaxBytes(64u * 1024u);
+    check(writer.maxBytes() == 64u * 1024u, "the larger cap is taken");
+    check(writer.archives() == 0 && writer.carryOvers() == 0,
+          "and a larger cap rotates nothing");
+    check(readFile(kLive) == kept, "the lines that were there are still there");
+
+    // Saving the size that is already set is not a rotation either.
+    writer.setMaxBytes(64u * 1024u);
+    check(writer.maxBytes() == 64u * 1024u, "writing the same cap again keeps it");
+    check(writer.archives() == 0 && writer.carryOvers() == 0,
+          "and changes nothing about the file");
+    check(readFile(kLive) == kept, "which still holds exactly its lines");
+}
+
+static void test_a_smaller_cap_with_no_card_keeps_the_newest_lines()
+{
+    volume();
+
+    // No card: the operator's rule for a rotation that cannot be archived is the
+    // newest ten lines, and it applies to a size change like to any other
+    // rotation - the alternative would be a file that stays over its cap for
+    // ever on a device with nothing to log.
+    auto writer = makeWriter(64u * 1024u, false, nullptr);
+    for (int i = 1; i <= 20; ++i) writer.append(shortLine(i), kRealStamp);
+    writer.setMaxBytes(6);
+
+    check(writer.carryOvers() == 1, "a size change with no card counts as a rotation");
+    check(readFile(kLive) ==
+              shortRecord(11) + shortRecord(12) + shortRecord(13) + shortRecord(14) +
+                  shortRecord(15) + shortRecord(16) + shortRecord(17) + shortRecord(18) +
+                  shortRecord(19) + shortRecord(20),
+          "and the ten newest lines are what is left of the file");
+}
+
+static void test_the_subclass_names_its_own_log()
+{
+    volume();
+    const string card = cardFolder();
+    makeDir(card);
+
+    const string live = kRoot + "/fat/logs/Other.log";
+    const string archive = card + "/log/Archive/Other/2026.10.12-2026.10.12/Other.log";
+
+    vector<string> notices;
+    OtherLogWriter writer(live, card, [] { return true; },
+                          [&notices](const string& text) { notices.push_back(text); },
+                          200);
+    for (int i = 1; i <= 4; ++i) writer.append(longLine(i), kRealStamp);
+
+    check(readFile(archive) == longRecord(1) + longRecord(2) + longRecord(3),
+          "a second subclass archives under its own folder on the card");
+    check(readFile(live) == longRecord(4),
+          "and its live file is the one it was built with, not the NTP one's");
+
+    // The same file, now on a card that refuses writes: the failure line has to
+    // name the log it belongs to, or the operator reads "NTP log archive failed"
+    // about a file that is not Ntp.log.
+    removeTree(card);
+    FILE* stub = fopen(card.c_str(), "wb");
+    if (stub) fclose(stub);
+
+    for (int i = 5; i <= 8; ++i) writer.append(longLine(i), kRealStamp);
+    check(!notices.empty(), "a full file on a broken card is reported");
+    if (!notices.empty()) {
+        check(notices[0].find("Other log archive failed") == 0,
+              "the failure line names the log that failed: " + notices[0]);
+        check(notices[0].find("log/Archive/Other/") != string::npos,
+              "and says where it tried to put it");
+    }
+}
+
 int main()
 {
-    printf("Running NtpLogWriter tests...\n");
+    printf("Running LogFileWriter tests...\n");
     test_writes_and_counts();
     test_archives_to_the_card();
     test_no_card_carries_the_tail();
     test_broken_card_keeps_the_file_then_gives_up();
     test_a_working_card_later_is_used_again();
     test_wait_for_a_real_clock();
+    test_a_smaller_cap_rotates_there_and_then();
+    test_a_larger_cap_keeps_the_file();
+    test_a_smaller_cap_with_no_card_keeps_the_newest_lines();
+    test_the_subclass_names_its_own_log();
     removeTree(kRoot);
 
     if (g_failed == 0) {
-        printf("All %d NtpLogWriter checks PASSED!\n", g_checks);
+        printf("All %d LogFileWriter checks PASSED!\n", g_checks);
         return 0;
     }
-    printf("%d of %d NtpLogWriter checks FAILED!\n", g_failed, g_checks);
+    printf("%d of %d LogFileWriter checks FAILED!\n", g_failed, g_checks);
     return 1;
 }

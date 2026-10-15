@@ -1,5 +1,6 @@
 #include "AuthManager.h"
 #include "../core/AuthAttemptPolicy.h"
+#include "../core/AuthLog.h"
 #include "../core/Config.h"
 
 #include <cstring>
@@ -99,8 +100,16 @@ bool AuthManager::authenticate(const string& authHeader,
     string pass = credentials.substr(colonPos + 1);
 
     if (user == username_ && pass == password_) {
-        // Success — clear failed attempts for this IP
+        // Success — clear failed attempts for this IP. The count is read before it
+        // is cleared, because "got in after three failures" is the one line that
+        // tells a guest who mistyped from somebody who guessed (stage 205).
+        const auto it = failedAttempts_.find(clientIp);
+        const uint32_t failedBefore =
+            (it != failedAttempts_.end()) ? it->second.count : 0;
         failedAttempts_.erase(clientIp);
+        if (failedBefore > 0) {
+            core::AuthLog::instance().noteLogin(clientIp, failedBefore);
+        }
         return true;
     }
 
@@ -142,10 +151,17 @@ void AuthManager::recordFailure(const string& clientIp)
              static_cast<unsigned long>(entry.count),
              static_cast<unsigned long>(maxAttempts_));
 
+    // The same two events go into the authorisation log when the operator asked for
+    // it (stage 205). Written here rather than at each call site so that the attempt
+    // number in the file is the number the device counted - there is one counter,
+    // and one place that reports it.
+    core::AuthLog::instance().noteFailedAttempt(clientIp, entry.count, maxAttempts_);
+
     if (entry.count >= maxAttempts_) {
         ESP_LOGW(TAG, "Client %s locked out for %lus",
                  clientIp.c_str(),
                  static_cast<unsigned long>(lockoutPeriodSec_));
+        core::AuthLog::instance().noteLockout(clientIp, lockoutPeriodSec_);
     }
 }
 

@@ -5,7 +5,7 @@
 #include "TimeMath.h"
 #include "core/ErrorLogCore.h"
 #include "../core/Config.h"
-#include "../core/Subnet.h"
+#include "../core/SubnetFilter.h"
 #include "../dhcp/IDhcpServer.h"
 #include <cstdio>
 #include <cstdlib>
@@ -417,45 +417,38 @@ void TimeServer::applyTimezone()
 void TimeServer::applyAccessFilter()
 {
     const auto timeCfg = core::Config::instance().getTime();
-    allowOwnSubnet_ = timeCfg.allowOwnSubnet;
     // The allowed-computers filter is the DHCP side's list and policy (stage
     // 196); it needs the DHCP server to resolve an address to its owner.
     onlyAllowedComputers_ = timeCfg.onlyAllowedComputers;
     rateLimitPerSec_ = timeCfg.rateLimitPerSec;
-    ESP_LOGI(TAG, "Client filters: own subnet %s, allowed computers %s",
-             allowOwnSubnet_ ? "on" : "off", onlyAllowedComputers_ ? "on" : "off");
 
-    if (!allowOwnSubnet_) {
-        subnetNet_ = 0;
-        subnetMask_ = 0;
+    // One copy of the "own subnet only" decisions for the whole device (stage 200),
+    // shared with the DNS server and the file manager.
+    core::SubnetFilter::Settings filterCfg;
+    filterCfg.enabled = timeCfg.allowOwnSubnet;
+    const auto dhcpCfg = core::Config::instance().getDhcp();
+    filterCfg.deviceIp = dhcpCfg.serverIp;
+    filterCfg.netmask = dhcpCfg.subnet;
+    subnetFilter_.apply(filterCfg);
+
+    // Both filters are reported together, because on this page they answer the same
+    // question ("who gets no reply") and a reader of the journal wants the pair.
+    ESP_LOGI(TAG, "Client filters: own subnet %s, allowed computers %s",
+             subnetFilter_.active() ? "on" : "off",
+             onlyAllowedComputers_ ? "on" : "off");
+
+    if (!filterCfg.enabled) {
         ESP_LOGI(TAG, "Own-subnet filter disabled (rate limit %u/s per IP)",
                  (unsigned)rateLimitPerSec_);
         return;
     }
-
-    // The subnet is owned by the DHCP page (device address + netmask).
-    const auto dhcpCfg = core::Config::instance().getDhcp();
-    uint32_t ip = 0, mask = 0;
-    const bool ipOk = core::Subnet::parseIp4(dhcpCfg.serverIp, ip);
-    const bool maskOk = core::Subnet::parseIp4(dhcpCfg.subnet, mask) &&
-                        core::Subnet::isValidMask(mask);
-    if (!ipOk || !maskOk) {
+    if (!subnetFilter_.active()) {
         // Fail-open with a loud warning: a broken subnet must not stop the
         // LAN from getting time.
-        allowOwnSubnet_ = false;
-        subnetNet_ = 0;
-        subnetMask_ = 0;
-        ESP_LOGW(TAG, "Own-subnet filter requested but the DHCP subnet is "
-                      "invalid (server_ip='%s', subnet='%s') — filter SKIPPED",
-                 dhcpCfg.serverIp.c_str(), dhcpCfg.subnet.c_str());
+        ESP_LOGW(TAG, "%s", subnetFilter_.skippedText().c_str());
         return;
     }
-
-    subnetNet_ = core::Subnet::network(ip, mask);
-    subnetMask_ = mask;
-    ESP_LOGI(TAG, "Own-subnet filter enabled: %s/%d, rate limit %u/s per IP",
-             core::Subnet::toString(subnetNet_).c_str(),
-             core::Subnet::prefixLength(subnetMask_),
+    ESP_LOGI(TAG, "%s, rate limit %u/s per IP", subnetFilter_.enabledText().c_str(),
              (unsigned)rateLimitPerSec_);
 }
 
@@ -685,8 +678,7 @@ void TimeServer::serverLoop()
         const uint32_t clientAddr = ntohl(from.sin_addr.s_addr);
         const uint64_t nowMs = static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
         const char* dropReason = nullptr;
-        if (allowOwnSubnet_ &&
-            !core::Subnet::contains(subnetNet_, subnetMask_, clientAddr)) {
+        if (subnetFilter_.active() && !subnetFilter_.contains(clientAddr)) {
             ++foreignDropped_;
             dropReason = "outside the local subnet";
         } else if (dhcpServer_ != nullptr &&

@@ -1,4 +1,7 @@
 #include "JobLog.h"
+#include "ErrorLog.h"
+#include "ArchiveFileLogTarget.h"
+#include "JobsLogWriter.h"
 
 #include <ctime>
 
@@ -76,7 +79,23 @@ bool JobLog::start(const string& mountPoint, storage::IFileSystem* sweepVolume)
     string dir = mountPoint;
     if (!dir.empty() && dir.back() == '/') dir.pop_back();
 
-    target_ = make_unique<FileErrorLogTarget>(dir + "/logs/Jobs.log");
+    // The journal's file is a `LogFileWriter` too (stage 206), so a full one is
+    // copied to the card as `log/Archive/Jobs/...`; the card is the same volume the
+    // per-sweep files live on, and it is asked at every rotation whether it is
+    // still there. A failed archive is reported into `Errors.log`, like every
+    // other log's.
+    {
+        auto writer = make_unique<JobsLogWriter>(
+            dir + "/logs/Jobs.log",
+            sweepVolume != nullptr ? sweepVolume->mountPoint() : string(),
+            [sweepVolume] {
+                return sweepVolume != nullptr && sweepVolume->isMounted();
+            },
+            [](const string& message) {
+                ErrorLog::instance().errorf(kTag, "%s", message.c_str());
+            });
+        target_ = make_unique<ArchiveFileLogTarget>(move(writer));
+    }
     core_ = make_unique<ErrorLogCore>(queue_, *target_, &uptimeSec, jobLine);
 
     // The auto-update's per-record log (stage 179): a target of its own, drained

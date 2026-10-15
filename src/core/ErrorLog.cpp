@@ -4,6 +4,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "ErrorsLogWriter.h"
+#include "ArchiveFileLogTarget.h"
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -45,7 +48,8 @@ ErrorLog::~ErrorLog()
     target_.reset();
 }
 
-bool ErrorLog::start(const string& mountPoint)
+bool ErrorLog::start(const string& mountPoint, const string& cardMountPoint,
+                     CardMountedCheck cardMounted)
 {
     if (task_ != nullptr) return true;   // already started
 
@@ -54,7 +58,7 @@ bool ErrorLog::start(const string& mountPoint)
 
     // Look before setting anything up: a volume that is not there is worth
     // saying out loud (the terminal is the only place left for that), and the
-    // target refuses to create it — see FileErrorLogTarget.
+    // writer refuses to create it — see LogFileWriter.
     struct stat st {};
     if (dir.empty() || stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
         ESP_LOGW(kTag, "volume %s is not mounted — the error log will stay empty "
@@ -62,7 +66,17 @@ bool ErrorLog::start(const string& mountPoint)
                  dir.empty() ? "?" : dir.c_str());
     }
 
-    target_ = make_unique<FileErrorLogTarget>(dir + "/logs/Errors.log");
+    // The file is written by a `LogFileWriter` (through the adapter, stage 206),
+    // so a full error log is copied to the card like the other file logs. A failed
+    // archive is reported **here**, into this very file: it is the one the operator
+    // reads when something is wrong, and an error log that could not say anything
+    // about itself would be the worst of the two.
+    auto writer = make_unique<ErrorsLogWriter>(
+        dir + "/logs/Errors.log", cardMountPoint, cardMounted,
+        [](const string& message) {
+            ErrorLog::instance().errorf(kTag, "%s", message.c_str());
+        });
+    target_ = make_unique<ArchiveFileLogTarget>(move(writer));
     core_ = make_unique<ErrorLogCore>(queue_, *target_, &uptimeSec);
 
     if (!queue_.ready()) {

@@ -128,35 +128,66 @@ def write_log(path, text):
         fh.write(text)
 
 
-def resolve_header(inc):
-    for base in (REPO, os.path.join(REPO, "test")):
+def resolve_header(inc, from_dir=None):
+    """The header an `#include "…"` names, relative to its includer first.
+
+    The two styles in this repository meet here: a test names its unit from the
+    repository root (`"src/core/NtpLogWriter.h"`), while a header names the
+    neighbour it includes by name alone (`"LogFileWriter.h"`) - which only
+    resolves against the folder the header itself is in. `src/` is an include root
+    of the real build (`idf.py` is given `INCLUDE_DIRS "."` from inside it), so
+    `"core/LogFileWriter.h"` from a header in `src/dns/` resolves there too.
+    """
+    bases = [from_dir] if from_dir else []
+    bases.extend((REPO, os.path.join(REPO, "src"), os.path.join(REPO, "test")))
+    for base in bases:
         cand = os.path.normpath(os.path.join(base, inc))
         if os.path.isfile(cand):
             return cand
     return None
 
 
-def discovered_sources(text):
-    """src/*.cpp the test needs, following its quoted includes."""
+def discovered_sources(test_path, text):
+    """src/*.cpp the test needs, following its quoted includes.
+
+    Two kinds of include are followed, and the difference is what keeps a host
+    test buildable. An include written where a **unit** is written - the test
+    itself, or a `.cpp` - names what that unit needs at link time, so a header it
+    names brings its own `.cpp` with it. An include written in a header **without**
+    a source of its own (`TimeDefaults.h` naming `core/Config.h` for a struct it
+    declares) is a declaration's business: it is followed for what it in turn
+    names, never to add a unit, because `Config.cpp` needs NVS and a test that only
+    reads a struct must not be dragged into linking it.
+
+    A header that *has* a source is treated as that source's own header - which is
+    where a class writes its includes - so `LogFileWriter.h` is found through
+    `NtpLogWriter.h` and its unit comes along.
+    """
     sources = []
     seen = set()
-    queue = [text]
+    queue = [(test_path, text, True)]
     while queue:
-        body = queue.pop()
+        path, body, unit_like = queue.pop()
+        folder = os.path.dirname(path)
         for inc in re.findall(r'#include\s+"([^"]+)"', body):
-            header = resolve_header(inc)
-            if header is None or header in seen:
+            header = resolve_header(inc, folder)
+            if header is None:
                 continue
-            seen.add(header)
+
             stem, ext = os.path.splitext(header)
             cpp = stem + ".cpp"
-            if os.path.isfile(cpp):
+            has_source = os.path.isfile(cpp)
+            if (header, unit_like) in seen:
+                continue
+            seen.add((header, unit_like))
+
+            if unit_like and has_source:
                 name = rel(cpp)
                 if name not in sources:
                     sources.append(name)
-                queue.append(read(cpp))
-            elif ext in (".h", ".hpp"):
-                queue.append(read(header))
+                queue.append((cpp, read(cpp), True))
+            if ext in (".h", ".hpp"):
+                queue.append((header, read(header), unit_like and has_source))
     return sources
 
 
@@ -276,7 +307,7 @@ def main(argv):
         # the recipe names the test file itself; it is added once, below
         sources = [s for s in sources
                    if os.path.basename(s.replace("\\", "/")) != name]
-        for extra in discovered_sources(text) + EXTRA_UNITS.get(stem, []):
+        for extra in discovered_sources(test_path, text) + EXTRA_UNITS.get(stem, []):
             if extra not in sources:
                 sources.append(extra)
         test_rel = rel(test_path)

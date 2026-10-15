@@ -3,6 +3,7 @@
 
 #include "core/NetworkDefaults.h"
 #include "core/AutosavePeriod.h"
+#include "core/LogFileSizes.h"
 #include "core/NtpServers.h"
 #include "security/CertStore.h"
 
@@ -84,6 +85,18 @@ struct DnsConfig {
     bool logRestSent = false;       // terminal filter: only queries sent to REST
     bool logRest = false;
     std::string logUrl;
+    // The file log of forwarded answers (stage 204): `/fat/logs/Forwarded.log`,
+    // archived to the card when full. `logFile` starts and stops it, and
+    // `logFileForwarded` says whether the **file** keeps the forwarded answers -
+    // its own switch and not the terminal's filter above, because the operator may
+    // want the terminal quiet while the file keeps the record (two readers, two
+    // switches). `logFileSize` is one of the sizes the settings page offers, in
+    // bytes (see core/LogFileSizes.h); it is stored in its own NVS key because
+    // `dns_logfile_fwd` is 15 characters - the length NVS allows - and a longer
+    // name would be rejected at runtime rather than at compile time.
+    bool logFile = false;
+    bool logFileForwarded = true;
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
     // HTTP Basic auth for the REST logging URL (empty user/pass = no auth)
     bool logAuthEnabled = false;
     std::string logAuthUser;
@@ -181,6 +194,25 @@ struct SecurityConfig {
     uint32_t maxAttempts = kDefaultMaxAttempts;
     uint32_t lockoutPeriodSec = kDefaultLockoutSec; // 5 min
     /**
+     * @brief Keep the login attempts in `/fat/logs/Auth.log` (stage 205).
+     *
+     * Off by default: a device that started writing a new file after an update is
+     * a device that changed behaviour without being asked. What is written when it
+     * is on: a refused password with the attempt and the budget, a lockout with its
+     * period, and a login that came after failures — a successful request with
+     * nothing before it is deliberately not recorded, because the interface asks
+     * for credentials on every request and a polling page would fill the file.
+     */
+    bool logAuth = false;
+    /**
+     * @brief The cap `Auth.log` rotates at (stage 205), in bytes.
+     *
+     * One of the three sizes the settings pages offer (see core/LogFileSizes.h),
+     * stored in its own NVS key: `sec_log_size` is 12 characters, inside the 15
+     * NVS allows.
+     */
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
+    /**
      * @brief Serve the web interface over HTTPS as well as HTTP.
      *
      * Off by default, and it cannot be turned on while no certificate is stored:
@@ -242,6 +274,10 @@ struct TimeConfig {
     // Log NTP requests to `/fat/logs/Ntp.log`, archived to the card when full
     // (stage 191). `time_log_file` is 13 characters, inside the 15 NVS allows.
     bool logFile = false;
+    // The cap the file rotates at, in bytes (stage 204): one of the sizes the
+    // settings page offers (see core/LogFileSizes.h). `time_log_size` is 13
+    // characters, inside the 15 NVS allows.
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
     std::string logUrl;               // REST logging URL
     bool logAuthEnabled = false;      // HTTP Basic auth for REST logging
     std::string logAuthUser;

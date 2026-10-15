@@ -11,6 +11,7 @@
 #include "IFileManager.h"
 #include "IFileOps.h"
 #include "TransferEngine.h"
+#include "../core/SubnetFilter.h"
 
 namespace dhcp {
 namespace files {
@@ -112,7 +113,7 @@ public:
     void applyAccessFilter() override;
     bool allowClient(uint32_t clientIp4Host) override;
     uint32_t foreignBlocked() const override { return foreignBlocked_; }
-    bool filterActive() const override { return allowOwnSubnet_ && subnetValid_; }
+    bool filterActive() const override { return subnetFilter_.active(); }
 
 private:
     /** @brief Milliseconds since boot (monotonic). */
@@ -196,11 +197,9 @@ private:
     /** @brief True when the operator asked the transfer to stop. */
     bool transferStopRequested();
 
-    // LAN-only access (see IFileManager::applyAccessFilter)
-    bool allowOwnSubnet_ = true;
-    bool subnetValid_ = false;
-    uint32_t subnetNet_ = 0;
-    uint32_t subnetMask_ = 0;
+    // LAN-only access (see IFileManager::applyAccessFilter). The decision itself
+    // lives in `core::SubnetFilter`, shared with the DNS and NTP servers (stage 200).
+    core::SubnetFilter subnetFilter_;
     uint32_t foreignBlocked_ = 0;
     uint32_t lastForeignLogMs_ = 0;
 };

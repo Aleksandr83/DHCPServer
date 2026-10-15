@@ -1225,45 +1225,36 @@ void FileManager::transferTask(void* arg)
 
 void FileManager::applyAccessFilter()
 {
-    const auto fileCfg = ::dhcp::core::Config::instance().getFiles();
+    // One copy of the "own subnet only" decisions for the whole device (stage 200),
+    // shared with the DNS and NTP servers. It reads the two DHCP settings itself
+    // and keeps its own fail-open rule.
+    ::dhcp::core::SubnetFilter::Settings filterCfg;
+    filterCfg.enabled = ::dhcp::core::Config::instance().getFiles().allowOwnSubnet;
     const auto net = ::dhcp::core::Config::instance().getDhcp();
+    filterCfg.deviceIp = net.serverIp;
+    filterCfg.netmask = net.subnet;
+    subnetFilter_.apply(filterCfg);
 
-    allowOwnSubnet_ = fileCfg.allowOwnSubnet;
-
-    uint32_t addr = 0;
-    uint32_t mask = 0;
-    const bool haveAddr = ::dhcp::core::Subnet::parseIp4(net.serverIp, addr);
-    const bool haveMask = ::dhcp::core::Subnet::parseIp4(net.subnet, mask);
-
-    subnetValid_ = haveAddr && haveMask && ::dhcp::core::Subnet::isValidMask(mask);
-    if (subnetValid_) {
-        subnetNet_ = ::dhcp::core::Subnet::network(addr, mask);
-        subnetMask_ = mask;
-    }
-
-    if (allowOwnSubnet_ && !subnetValid_) {
-        ESP_LOGW(TAG, "LAN-only filter enabled but the subnet (%s / %s) is "
-                      "unusable — filtering skipped",
-                 net.serverIp.c_str(), net.subnet.c_str());
-    } else if (allowOwnSubnet_) {
-        ESP_LOGI(TAG, "LAN-only filter on: %s/%d",
-                 ::dhcp::core::Subnet::toString(subnetNet_).c_str(),
-                 ::dhcp::core::Subnet::prefixLength(subnetMask_));
-    } else {
+    if (!filterCfg.enabled) {
         ESP_LOGI(TAG, "LAN-only filter off: file access from any address");
+        return;
     }
+    if (!subnetFilter_.active()) {
+        ESP_LOGW(TAG, "%s", subnetFilter_.skippedText().c_str());
+        return;
+    }
+    ESP_LOGI(TAG, "LAN-only filter on: %s", subnetFilter_.enabledText().c_str());
 }
 
 bool FileManager::allowClient(uint32_t clientIp4Host)
 {
-    if (!allowOwnSubnet_) return true;      // filter disabled by the operator
+    if (!subnetFilter_.active()) return true;   // off, or the subnet is unusable
     if (clientIp4Host == 0) {
         ESP_LOGW(TAG, "client address unknown — access granted");
         return true;                        // fail-open: never lock the LAN out
     }
-    if (!subnetValid_) return true;         // unusable subnet → filtering skipped
 
-    if (::dhcp::core::Subnet::contains(subnetNet_, subnetMask_, clientIp4Host)) {
+    if (subnetFilter_.contains(clientIp4Host)) {
         return true;
     }
 
@@ -1273,8 +1264,8 @@ bool FileManager::allowClient(uint32_t clientIp4Host)
         lastForeignLogMs_ = now;
         ESP_LOGW(TAG, "file request from %s dropped (not in %s/%d; total %u)",
                  ::dhcp::core::Subnet::toString(clientIp4Host).c_str(),
-                 ::dhcp::core::Subnet::toString(subnetNet_).c_str(),
-                 ::dhcp::core::Subnet::prefixLength(subnetMask_),
+                 ::dhcp::core::Subnet::toString(subnetFilter_.network()).c_str(),
+                 ::dhcp::core::Subnet::prefixLength(subnetFilter_.mask()),
                  (unsigned)foreignBlocked_);
     }
     return false;

@@ -7,6 +7,8 @@
 #include <string>
 
 #include "core/NtpLogWriter.h"
+#include "core/LogFileSizes.h"
+#include "core/LogFileTaskLimits.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -94,6 +96,17 @@ public:
     bool logFile() const { return logFile_; }
 
     /**
+     * @brief The cap the file rotates at, in bytes (stage 204).
+     *
+     * Taken from the settings page, which offers three sizes and no free number
+     * (see `core/LogFileSizes.h`). Applied to a writer that is already running: a
+     * smaller cap archives a file that is over it at once, and a larger one
+     * simply raises the limit - neither of them throws the log away.
+     */
+    void setFileLogSize(size_t bytes);
+    size_t fileLogSize() const { return fileLogSize_; }
+
+    /**
      * @brief Log one answered NTP request.
      *
      * @param clientAddr    Source IP of the NTP client.
@@ -134,12 +147,10 @@ private:
     // Rule 39: the fields one queued record carries. One text field serves both
     // kinds of line — the client address of a request, or the sentence of an
     // event — so the queue holds one type of record and the writing task decides
-    // which shape to build from the flag.
-    static constexpr int kFileQueueDepth = 16;
-    static constexpr int kFileTaskStack = 4096;   // no TLS and no HTTP here
-    static constexpr int kFileTaskPriority = 3;
-    /** How often a write that keeps failing is repeated on the terminal. */
-    static constexpr uint32_t kWriteFailureWarnEvery = 100;
+    // which shape to build from the flag. The queue depth, the task's stack and
+    // priority and the failure-report period are `core/LogFileTaskLimits.h`: the
+    // DNS forwarded log is written the same way, and two copies of those numbers
+    // are two things to change.
     /** Longest event sentence the queue carries (it is clamped, not dropped). */
     static constexpr size_t kEventTextBytes = 160;
 
@@ -172,6 +183,8 @@ private:
     std::string cardMountPoint_;
     CardMountedCheck cardMounted_;
     std::unique_ptr<core::NtpLogWriter> fileWriter_;
+    /** The cap the writer rotates at (stage 204), from the settings page. */
+    size_t fileLogSize_ = core::kLogFileDefaultMaxBytes;
     uint32_t writeFailures_ = 0;
 
     QueueHandle_t restQueue_ = nullptr;

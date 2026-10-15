@@ -20,18 +20,25 @@
             </label>
         </div>
 
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="time_logging.log_file">Log to File</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="time-log-file" onchange="toggleTimeLogFile()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="time_logging.log_file_size">Log file size</span>
+                <select id="time-log-file-size" style="width:6.5rem;"
+                        onchange="saveTimeLogFileSize()"></select>
+            </div>
+        </div>
+
         <div class="card toggle-row">
             <span data-i18n="time_logging.log_rest">Log to External REST</span>
             <label class="toggle-switch">
                 <input type="checkbox" id="time-log-rest" onchange="toggleTimeLogRest()">
-                <span class="toggle-slider"></span>
-            </label>
-        </div>
-
-        <div class="card toggle-row">
-            <span data-i18n="time_logging.log_file">Log to File</span>
-            <label class="toggle-switch">
-                <input type="checkbox" id="time-log-file" onchange="toggleTimeLogFile()">
                 <span class="toggle-slider"></span>
             </label>
         </div>
@@ -81,6 +88,7 @@
                 log_terminal: document.getElementById('time-log-terminal').checked,
                 log_rest: document.getElementById('time-log-rest').checked,
                 log_file: document.getElementById('time-log-file').checked,
+                log_file_size: Number(document.getElementById('time-log-file-size').value),
                 log_url: document.getElementById('time-log-url').value,
                 log_auth: document.getElementById('time-log-auth').checked,
                 log_auth_user: document.getElementById('time-log-auth-user').value,
@@ -93,6 +101,7 @@
             document.getElementById('time-log-terminal').checked = data.log_terminal || false;
             document.getElementById('time-log-rest').checked = data.log_rest || false;
             document.getElementById('time-log-file').checked = data.log_file || false;
+            fillLogFileSizes('time-log-file-size', data.log_file_size);
             document.getElementById('time-log-url').value = data.log_url || '';
             document.getElementById('time-log-auth').checked = data.log_auth || false;
             document.getElementById('time-log-auth-user').value = data.log_auth_user || '';
@@ -132,6 +141,21 @@
         async function toggleTimeLogRest() { await toggleTimeField('log_rest', 'time-log-rest'); }
 
         async function toggleTimeLogFile() { await toggleTimeField('log_file', 'time-log-file'); }
+
+        // The size saves itself, like the switches: it is one value, and the
+        // device applies it to the writer that is already running — a smaller cap
+        // archives a file that is over it at once. On error the page re-reads
+        // what the device has rather than leaving a value that is not in force.
+        async function saveTimeLogFileSize() {
+            const value = Number(document.getElementById('time-log-file-size').value);
+            const result = await saveTimePartial({ log_file_size: value });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                await loadTimeSettings();
+            }
+        }
 
         async function toggleTimeLogAuth() {
             const checked = document.getElementById('time-log-auth').checked;

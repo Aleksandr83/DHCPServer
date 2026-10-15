@@ -384,12 +384,18 @@ Get DNS server configuration.
 {
   "external_dns": "192.168.1.1",
   "log_terminal": false,
+  "log_forwarded": true,
+  "log_local": true,
+  "log_cache": true,
   "log_rest": false,
   "log_rest_sent": false,
   "log_url": "",
   "log_auth": false,
   "log_auth_user": "",
   "log_auth_password": "",
+  "log_file": false,
+  "log_file_forwarded": true,
+  "log_file_size": 65536,
   "cache_url": "",
   "cache_rest": false,
   "cache_rest_read": true,
@@ -419,6 +425,20 @@ Get DNS server configuration.
 > `log_auth` / `cache_auth` — send HTTP Basic auth to the REST log / cache
 > endpoint. `log_auth_user` / `log_auth_password` and
 > `cache_auth_user` / `cache_auth_password` hold the credentials.
+> `log_file`, `log_file_forwarded` and `log_file_size` (stage 204) are the fourth
+> logging destination: the answers that came from outside are written to
+> `/fat/logs/Forwarded.log`, with the local time of each one and the sentence the
+> terminal shows (`[2026.10.12 19:22:14] DNS: [forward] A example.com -> 1.2.3.4
+> (from 192.168.1.5 mac=aa:bb:cc:dd:ee:ff)`). `log_file` starts and stops it
+> (default off), and `log_file_forwarded` (default on) is the **file's** own
+> filter, deliberately separate from the terminal's `log_forwarded`: the operator
+> may want the terminal quiet while the file keeps the record. `log_file_size` is
+> the cap in bytes and is **one of three values** — `65536` (default), `131072`,
+> `262144` — because the settings page offers a combobox and nothing else; a value
+> outside that set is replaced by the default rather than honoured, and the device
+> applies the chosen size to the log that is already there (a smaller cap archives
+> a file that is over it at once, a larger one simply raises the limit — neither
+> loses the log).
 > `cache_rest` — master switch for the external DNS cache; `cache_rest_read`
 > enables lookups (reading from the cache) and `cache_rest_write` enables
 > storing forwarded answers into the cache (they default to on).
@@ -491,12 +511,18 @@ Update DNS server configuration.
 {
   "external_dns": "192.168.1.1",
   "log_terminal": true,
+  "log_forwarded": true,
+  "log_local": true,
+  "log_cache": true,
   "log_rest": false,
   "log_rest_sent": false,
   "log_url": "http://example.com/api/dns-log",
   "log_auth": false,
   "log_auth_user": "",
   "log_auth_password": "",
+  "log_file": true,
+  "log_file_forwarded": true,
+  "log_file_size": 65536,
   "cache_url": "http://example.com/api/dns-cache",
   "cache_rest": true,
   "cache_rest_read": true,
@@ -1002,11 +1028,36 @@ Get security/authentication configuration.
   "username": "admin",
   "max_attempts": 5,
   "lockout_period": 300,
+  "log_file": false,
+  "log_file_size": 65536,
   "https_enabled": false,
   "https_available": false,
   "https_status": "no_certificate"
 }
 ```
+
+`log_file` (stage 205) is the switch that keeps the login attempts in
+`/fat/logs/Auth.log`, and `log_file_size` is one of the three sizes the settings
+page offers — `65536` (default), `131072`, `262144` — because the page shows a
+combobox and nothing else; a value outside that set is replaced by the default.
+What the file holds when the switch is on: a refused password with the attempt and
+the budget (`[2026-10-12 19:22:14] auth: failed login from 192.168.1.5 (3 of 5)`),
+a client that was then locked out and for how long, and a login that came **after**
+failures. A successful request with nothing before it is deliberately not written:
+the interface asks for credentials on every request (HTTP Basic), so a polling page
+would produce thousands of lines an hour. Nothing a client typed is ever stored —
+the file holds an address, an attempt number and a period. The cap is applied to
+the writer that is already running: a smaller one archives a file that is over it at
+once, a larger one simply raises the limit.
+
+The address both that file and the failed-attempt counter name is the peer of the
+TCP connection — read in **either** family the board's listener reports, and never
+from a header: the HTTP server sits on a dual-stack socket, so an IPv4 client
+arrives as a v4-mapped IPv6 address and is named by its IPv4 address (reading only
+`AF_INET` left every client at `0.0.0.0`, one counter for the whole LAN). A peer
+whose address could not be read is named `unknown`, so the file never shows a
+plausible address in place of a client's own — and such a request still shares one
+counter, as it did when the name was `0.0.0.0`.
 
 `https_enabled` is what is listening, not what is stored: it is true only while the
 TLS server on port 443 is actually up. A device that comes back with HTTPS in its
@@ -1032,9 +1083,17 @@ Update security/authentication configuration.
   "password": "newpassword",
   "max_attempts": 5,
   "lockout_period": 300,
+  "log_file": true,
+  "log_file_size": 131072,
   "https_enabled": true
 }
 ```
+
+> `log_file` absent means **off** (a partial client must not start a log), and
+> `log_file_size` is read through the same closed set as everywhere else: a size
+> this firmware does not offer becomes the default instead of a cap of nothing or of
+> a gigabyte. Both take effect at once — the switch decides whether the next refused
+> password is written, and a smaller cap archives a file that is already over it.
 
 > If `password` is empty or omitted, the existing password is kept unchanged.
 
@@ -1400,6 +1459,7 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "log_terminal": false, "log_forwarded": true, "log_local": true,
     "log_cache": true, "log_rest_sent": false, "log_rest": false,
     "log_url": "", "log_auth": false, "log_auth_user": "",
+    "log_file": true, "log_file_forwarded": true, "log_file_size": 65536,
     "cache_rest": false, "cache_rest_read": true, "cache_rest_write": true,
     "cache_url": "", "cache_auth": false, "cache_auth_user": "",
     "cache_internal": true, "cache_internal_size_mb": 4,
@@ -1419,6 +1479,7 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "rate_limit_per_sec": 10, "allow_own_subnet": true,
     "only_allowed_computers": false,
     "log_terminal": false, "log_rest": false, "log_url": "",
+    "log_file": false, "log_file_size": 65536,
     "log_auth": false, "log_auth_user": ""
   },
   "local_hosts": [
@@ -1426,6 +1487,7 @@ Full backup of all persisted settings as a single JSON document. Passwords are
   ],
   "security": {
     "username": "admin", "max_attempts": 5, "lockout_period": 300,
+    "log_file": true, "log_file_size": 65536,
     "https_enabled": false, "cert_storage": "internal",
     "cert_name": "dhcpserver"
   },
@@ -1438,7 +1500,10 @@ certificate pair lives (`cert_storage` is `internal` or `sdcard`, `cert_name` is
 the common name of the certificate — a host name). The **pair itself is not
 exported** — a private key is a secret, exactly like a password — so a device
 restored from a backup still needs its own certificate (the Certificates page
-generates one).
+generates one). Since stage 205 the same section also carries the authorisation
+log's two settings (`log_file`, `log_file_size`); the import applies them at once
+and, like every other size, refuses a value this firmware does not offer by keeping
+the one the device has.
 
 ---
 
@@ -1889,6 +1954,7 @@ Get the NTP (time) server configuration and runtime status.
   "log_terminal": false,
   "log_rest": false,
   "log_file": false,
+  "log_file_size": 65536,
   "log_url": "",
   "log_auth": false,
   "log_auth_user": "",
@@ -1984,6 +2050,11 @@ the offset in force all year. NTP clients are unaffected: they are served **UTC*
 > firmware build date by the version scripts (`scripts/inc_firmware_ver.py`,
 > `scripts/set_firmware_date.py`, from `CONFIG_FW_MIN_DATETIME`); the web page
 > rejects earlier values, while the device itself does not enforce the limit.
+> `log_file_size` (stage 204) is the cap the file log rotates at, in bytes — one of
+> `65536` (default), `131072` or `262144`, the three sizes the settings page
+> offers (a value outside that set is replaced by the default). The device applies
+> it to the writer that is already running: a smaller cap archives a file that is
+> over it at once, a larger one raises the limit where it stands.
 > `log_file` (stage 191) is the third logging destination: served requests are
 > appended to `/fat/logs/Ntp.log`, and when that file reaches 64 KB it is
 > archived to the card as `log/Archive/Ntp/<first day>-<last day>/Ntp.log` and the

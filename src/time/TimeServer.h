@@ -6,6 +6,7 @@
 #include "NtpMessage.h"
 #include "NtpProbeFormat.h"
 #include "core/NtpServers.h"
+#include "core/SubnetFilter.h"
 
 #include <functional>
 #include <string>
@@ -359,12 +360,12 @@ private:
     uint8_t stratum_ = kStratum;
 
     // Access control (applyAccessFilter)
-    bool allowOwnSubnet_ = false;      // drop clients outside subnetNet_/Mask_
+    // The "own subnet only" decision lives in `core::SubnetFilter`, shared with the
+    // DNS server and the file manager (stage 200).
+    core::SubnetFilter subnetFilter_;
     /** Drop clients the DHCP side would refuse as well (stage 196). */
     bool onlyAllowedComputers_ = false;
     ::dhcp::dhcp::IDhcpServer* dhcpServer_ = nullptr;
-    uint32_t subnetNet_ = 0;           // host byte order
-    uint32_t subnetMask_ = 0;          // host byte order (0 = not configured)
     uint32_t rateLimitPerSec_ = 5;     // replies/second/IP (0 = no limit)
     RateSlot rateSlots_[kRateSlots];
     uint32_t foreignDropped_ = 0;      // dropped by the subnet filter

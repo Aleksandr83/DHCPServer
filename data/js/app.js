@@ -21,6 +21,11 @@ const kBytesPerMib = 1024 * 1024;
 const kSmallValueRatio = 0.01;   // below this many MB a value is shown in KB
 const kUsPerMs = 1000;
 
+// The sizes a file log can be given, in bytes. The device offers exactly these
+// three and turns anything else into the first of them (core/LogFileSizes.h), so
+// the pages must not invent a fourth value here.
+const LOG_FILE_SIZES = [64 * kBytesPerKib, 128 * kBytesPerKib, 256 * kBytesPerKib];
+
 // The modal input is shared by every prompt of the interface. The firmware
 // truncates a client name at 32 bytes (DhcpClientName::kMaxLen) and stores 20
 // in the allow-list, so a longer text typed here is cut by the device — the
@@ -1024,6 +1029,25 @@ function formatBytes(bytes) {
     const mb = kb / kBytesPerKib;
     if (mb < kBytesPerKib) return mb.toFixed(mb < 10 ? 1 : 0) + ' MB';
     return (mb / kBytesPerKib).toFixed(2) + ' GB';
+}
+
+/* The "log file size" combobox of a logging page (stage 204): the three sizes the
+   device offers, with the one it reported selected. A size the device does not
+   know selects the first entry — exactly what the firmware's own
+   `logFileSizeIndex()` answers — so the page never shows a limit that is not in
+   force. */
+function fillLogFileSizes(selectId, bytes) {
+    const el = document.getElementById(selectId);
+    if (!el) return;
+    el.innerHTML = '';
+    for (const size of LOG_FILE_SIZES) {
+        const option = document.createElement('option');
+        option.value = String(size);
+        option.textContent = formatBytes(size);
+        el.appendChild(option);
+    }
+    const wanted = Number(bytes);
+    el.value = String(LOG_FILE_SIZES.includes(wanted) ? wanted : LOG_FILE_SIZES[0]);
 }
 
 /* A countdown as "Nd HH:MM" — the same fixed shape the uptime row uses, so a

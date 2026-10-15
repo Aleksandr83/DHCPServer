@@ -237,6 +237,24 @@ private:
     bool macByIpArp(uint32_t ip, uint8_t mac[6]) const;
 
     /**
+     * @brief One ARP-cache walk, used in both directions (stage 201).
+     *
+     * `etharp_get_entry()` hands out the three parallel pieces of one entry (its
+     * address, its netif and its hardware address), so "which address does this
+     * MAC live at" and "whose address is this" are the same walk with a different
+     * comparison. The walk lives here once, together with the `LOCK_TCPIP_CORE()`
+     * the lwIP core requires — a second copy is a second place to forget it.
+     *
+     * @param macWant Look for this MAC (6 bytes) when it is not null.
+     * @param ipWant  Look for this address (network byte order) when @p macWant is null.
+     * @param macOut  Optional: the owner of @p ipWant.
+     * @param ipOut   Optional: the address of @p macWant (network byte order).
+     * @return true when the cache holds a matching entry.
+     */
+    bool arpWalk(const uint8_t* macWant, uint32_t ipWant,
+                 uint8_t* macOut, uint32_t* ipOut) const;
+
+    /**
      * @brief Name the client reported about itself (lease/offer entry).
      * @return "" when this MAC has no fresh entry with a name.
      */

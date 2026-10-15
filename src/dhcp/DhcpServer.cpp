@@ -1329,6 +1329,32 @@ string DhcpServer::clientHostnameByMac(const uint8_t mac[6]) const
     return string();
 }
 
+bool DhcpServer::arpWalk(const uint8_t* macWant, uint32_t ipWant,
+                         uint8_t* macOut, uint32_t* ipOut) const
+{
+    // One walk for both directions the project asks for: "which address does this
+    // MAC live at" (the name lookup) and "whose address is this" (the NTP/file
+    // filters of stage 196). `etharp_get_entry()` hands out the three parallel
+    // pieces of one entry, so the two directions differ only in the comparison -
+    // and keeping the walk in one place is what keeps the lwIP core lock with it.
+    LOCK_TCPIP_CORE();
+    bool found = false;
+    for (size_t i = 0; i < ARP_TABLE_SIZE && !found; i++) {
+        ip4_addr_t* ip = nullptr;
+        struct netif* nif = nullptr;
+        struct eth_addr* eth = nullptr;
+        if (etharp_get_entry(i, &ip, &nif, &eth) != 1 || !ip || !eth) continue;
+        const bool hit = macWant ? (memcmp(eth->addr, macWant, 6) == 0)
+                                 : (ip->addr == ipWant);
+        if (!hit) continue;
+        if (macOut) memcpy(macOut, eth->addr, 6);
+        if (ipOut) *ipOut = ip->addr;
+        found = true;
+    }
+    UNLOCK_TCPIP_CORE();
+    return found;
+}
+
 bool DhcpServer::clientIpByMac(const uint8_t mac[6], uint32_t& ipNet) const
 {
     const uint32_t now = getCurrentTimeSec();
@@ -1344,20 +1370,7 @@ bool DhcpServer::clientIpByMac(const uint8_t mac[6], uint32_t& ipNet) const
     // No lease: the computer may have a fixed address, or one from before this
     // device was installed. The ARP cache still knows where it lives — and
     // without an address no probe is possible at all.
-    LOCK_TCPIP_CORE();
-    bool found = false;
-    for (size_t i = 0; i < ARP_TABLE_SIZE && !found; i++) {
-        ip4_addr_t* ip = nullptr;
-        struct netif* nif = nullptr;
-        struct eth_addr* eth = nullptr;
-        if (etharp_get_entry(i, &ip, &nif, &eth) != 1 || !ip || !eth) continue;
-        if (memcmp(eth->addr, mac, 6) == 0) {
-            ipNet = ip->addr;
-            found = true;
-        }
-    }
-    UNLOCK_TCPIP_CORE();
-    return found;
+    return arpWalk(mac, 0, nullptr, &ipNet);
 }
 
 uint32_t DhcpServer::nameServerIp() const
@@ -1476,21 +1489,8 @@ bool DhcpServer::getMacByIp(uint32_t ip, uint8_t mac[6]) const
 bool DhcpServer::macByIpArp(uint32_t ip, uint8_t mac[6]) const
 {
     // The mirror of clientIpByMac(): the NTP filter knows the address and needs
-    // the owner. Same lock, because the cache belongs to the lwIP core.
-    LOCK_TCPIP_CORE();
-    bool found = false;
-    for (size_t i = 0; i < ARP_TABLE_SIZE && !found; i++) {
-        ip4_addr_t* entryIp = nullptr;
-        struct netif* nif = nullptr;
-        struct eth_addr* eth = nullptr;
-        if (etharp_get_entry(i, &entryIp, &nif, &eth) != 1 || !entryIp || !eth) continue;
-        if (entryIp->addr == ip) {
-            memcpy(mac, eth->addr, DHCP_HWADDR_LEN);
-            found = true;
-        }
-    }
-    UNLOCK_TCPIP_CORE();
-    return found;
+    // the owner. Both directions are the same ARP-cache walk (`arpWalk`).
+    return arpWalk(nullptr, ip, mac, nullptr);
 }
 
 bool DhcpServer::isClientAddressAllowed(uint32_t ip, bool allowOnly) const

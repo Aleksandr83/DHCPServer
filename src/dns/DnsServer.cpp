@@ -7,7 +7,7 @@
 #include "../core/ErrorLogCore.h"
 #include "../core/JobRegistry.h"
 #include "../core/Md5.h"
-#include "../core/Subnet.h"
+#include "../core/SubnetFilter.h"
 
 #include <cstdio>
 #include <cstring>
@@ -126,6 +126,12 @@ bool DnsServer::start()
     logger_.setLogUrl(dnsCfg.logUrl);
     logger_.setLogAuth(dnsCfg.logAuthEnabled,
                        dnsCfg.logAuthUser, dnsCfg.logAuthPassword);
+    // The file log of forwarded answers (stage 204): the file's own Forwarded
+    // filter, the cap, and the switch that starts the writing task. The volumes
+    // are wired from `main.cpp`, where they are known.
+    logger_.setLogFileForwarded(dnsCfg.logFileForwarded);
+    logger_.setFileLogSize(dnsCfg.logFileSize);
+    logger_.setLogFile(dnsCfg.logFile);
     cache_.setEnabled(dnsCfg.cacheRest);
     cache_.setReadEnabled(dnsCfg.cacheRestRead);
     cache_.setWriteEnabled(dnsCfg.cacheRestWrite);
@@ -635,39 +641,27 @@ void DnsServer::setBlockForwardNonAA(bool enabled)
 
 void DnsServer::applySubnetFilter()
 {
-    const auto dnsCfg = core::Config::instance().getDns();
-    allowOwnSubnet_ = dnsCfg.allowOwnSubnet;
+    // One copy of the "own subnet only" decisions for the whole device (stage 200):
+    // the filter reads the two DHCP settings itself, falls back to "no filter" when
+    // they cannot be used, and answers `contains()` for the packet path.
+    core::SubnetFilter::Settings filterCfg;
+    filterCfg.enabled = core::Config::instance().getDns().allowOwnSubnet;
+    const auto dhcpCfg = core::Config::instance().getDhcp();
+    filterCfg.deviceIp = dhcpCfg.serverIp;
+    filterCfg.netmask = dhcpCfg.subnet;
+    subnetFilter_.apply(filterCfg);
 
-    if (!allowOwnSubnet_) {
-        subnetNet_ = 0;
-        subnetMask_ = 0;
+    if (!filterCfg.enabled) {
         ESP_LOGI(TAG, "Own-subnet filter disabled");
         return;
     }
-
-    // The subnet is owned by the DHCP page (device address + netmask).
-    const auto dhcpCfg = core::Config::instance().getDhcp();
-    uint32_t ip = 0, mask = 0;
-    const bool ipOk = core::Subnet::parseIp4(dhcpCfg.serverIp, ip);
-    const bool maskOk = core::Subnet::parseIp4(dhcpCfg.subnet, mask) &&
-                        core::Subnet::isValidMask(mask);
-    if (!ipOk || !maskOk) {
+    if (!subnetFilter_.active()) {
         // Fail-open with a loud warning: a broken subnet must not black-hole
         // the LAN's DNS traffic.
-        allowOwnSubnet_ = false;
-        subnetNet_ = 0;
-        subnetMask_ = 0;
-        ESP_LOGW(TAG, "Own-subnet filter requested but the DHCP subnet is "
-                      "invalid (server_ip='%s', subnet='%s') — filter SKIPPED",
-                 dhcpCfg.serverIp.c_str(), dhcpCfg.subnet.c_str());
+        ESP_LOGW(TAG, "%s", subnetFilter_.skippedText().c_str());
         return;
     }
-
-    subnetNet_ = core::Subnet::network(ip, mask);
-    subnetMask_ = mask;
-    ESP_LOGI(TAG, "Own-subnet filter enabled: %s/%d — other clients are dropped",
-             core::Subnet::toString(subnetNet_).c_str(),
-             core::Subnet::prefixLength(subnetMask_));
+    ESP_LOGI(TAG, "%s — other clients are dropped", subnetFilter_.enabledText().c_str());
 }
 
 void DnsServer::syncLoggerLocalHosts()
@@ -1613,9 +1607,8 @@ void DnsServer::serverLoop()
             // own subnet WITHOUT a reply — no reply means we serve neither as
             // an open resolver nor as a reflection amplifier. Dropped packets
             // are counted and logged at most once per 5 s.
-            if (allowOwnSubnet_ &&
-                !core::Subnet::contains(subnetNet_, subnetMask_,
-                                        ntohl(from.sin_addr.s_addr))) {
+            if (subnetFilter_.active() &&
+                !subnetFilter_.contains(ntohl(from.sin_addr.s_addr))) {
                 ++foreignDropped_;
                 const uint64_t nowMsValue = nowMs();
                 if (nowMsValue - lastForeignLogMs_ >= DNS_FOREIGN_LOG_THROTTLE_MS) {

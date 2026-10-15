@@ -1,7 +1,13 @@
 #include "DnsLogger.h"
+#include "DnsLogFormat.h"
+#include "core/ErrorLog.h"
+#include "core/ErrorLogCore.h"
+#include "core/LogFileSizes.h"
+#include "core/LogFileTaskLimits.h"
 #include "core/RestSenderLimits.h"
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -18,11 +24,8 @@ static const char* TAG = "DnsLogger";
 // Laravel's 400/422 JSON error) can be logged for diagnostics.
 namespace {
 
-// Rule 39: the record types this logger prints and the drop log period.
-constexpr uint16_t kTypeA = 1;
-constexpr uint16_t kTypeAaaa = 28;
-constexpr uint16_t kTypeMx = 15;
-constexpr uint16_t kTypeCname = 5;
+// Rule 39: the drop log period. The record types a line names live in
+// DnsLogFormat.h, where the line itself is built.
 constexpr unsigned kDropLogEvery = 50;
 struct RestRespCapture {
     char buf[256] = {0};
@@ -57,6 +60,27 @@ esp_err_t restRespHandler(esp_http_client_event_t* evt)
 
 namespace dhcp {
 namespace dns {
+
+namespace {
+
+/**
+ * @brief The tag a line carries: `local`, `cache` or `forward`.
+ *
+ * One place for the two destinations that print it: the terminal line and the
+ * file line are built from the same sentence (`dnsLogQueryText`), so the only
+ * thing that could still differ between them is this word.
+ */
+const char* sourceTag(DnsLogSource source)
+{
+    switch (source) {
+        case DnsLogSource::LOCAL: return "local";
+        case DnsLogSource::CACHE: return "cache";
+        case DnsLogSource::FORWARDED: break;
+    }
+    return "forward";
+}
+
+} // namespace
 
 DnsLogger::DnsLogger()
 {
@@ -137,6 +161,46 @@ void DnsLogger::logQuery(const string& domain, uint16_t type,
         logToRest(domain, type, clientAddr, clientMac,
                   source, resolved, answer);
     }
+    if (logFile_ && source == DnsLogSource::FORWARDED && logFileForwarded_) {
+        logToFile(domain, type, clientAddr, clientMac,
+                  source, resolved, answer);
+    }
+}
+
+void DnsLogger::logToFile(const string& domain, uint16_t type,
+                          const string& clientAddr,
+                          const string& clientMac,
+                          DnsLogSource source,
+                          bool resolved, const string& answer)
+{
+    if (!fileQueue_) return;
+
+    // The same fixed-size record the REST half uses (see the class header): the
+    // DNS task must not allocate and must not block, so the record is filled here
+    // and the writing task builds the text.
+    RestLogRecord rec;
+    rec.type = type;
+    rec.resolved = resolved;
+    rec.source = static_cast<uint8_t>(source);
+    rec.ts = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    strncpy(rec.domain, domain.c_str(), sizeof(rec.domain) - 1);
+    strncpy(rec.client, clientAddr.c_str(), sizeof(rec.client) - 1);
+    strncpy(rec.mac, clientMac.c_str(), sizeof(rec.mac) - 1);
+    strncpy(rec.answer, answer.c_str(), sizeof(rec.answer) - 1);
+
+    if (xQueueSendToBack(fileQueue_, &rec, 0) == pdTRUE) return;
+
+    // Full: drop the oldest record and try once more, the same rule the REST
+    // queue uses, so a burst of queries costs the oldest lines and not the newest.
+    RestLogRecord discard;
+    if (xQueueReceive(fileQueue_, &discard, 0) == pdTRUE) {
+        xQueueSendToBack(fileQueue_, &rec, 0);
+    }
+    ++fileDropped_;
+    if ((fileDropped_ % kDropLogEvery) == 1) {
+        ESP_LOGW(TAG, "forwarded log queue full, oldest dropped (%u total)",
+                 static_cast<unsigned>(fileDropped_));
+    }
 }
 
 void DnsLogger::logToTerminal(const string& domain, uint16_t type,
@@ -145,23 +209,12 @@ void DnsLogger::logToTerminal(const string& domain, uint16_t type,
                                DnsLogSource source,
                                bool resolved, const string& answer)
 {
-    const char* tag = (source == DnsLogSource::LOCAL) ? "local" :
-                      (source == DnsLogSource::CACHE) ? "cache" : "forward";
-
-    const char* typeStr = (type == kTypeA) ? "A" :
-                          (type == kTypeAaaa) ? "AAAA" :
-                          (type == kTypeMx) ? "MX" :
-                          (type == kTypeCname) ? "CNAME" : "OTHER";
-
-    if (resolved) {
-        ESP_LOGI(TAG, "DNS: [%s] %s %s -> %s (from %s mac=%s)",
-                 tag, typeStr, domain.c_str(), answer.c_str(),
-                 clientAddr.c_str(), clientMac.c_str());
-    } else {
-        ESP_LOGI(TAG, "DNS: [%s] %s %s -> NXDOMAIN (from %s mac=%s)",
-                 tag, typeStr, domain.c_str(), clientAddr.c_str(),
-                 clientMac.c_str());
-    }
+    // The sentence is built by `dnsLogQueryText` — the same one the file log
+    // writes, with the stamp in front of it — so the two destinations cannot
+    // drift apart.
+    ESP_LOGI(TAG, "DNS: %s",
+             dnsLogQueryText(sourceTag(source), type, domain, resolved, answer,
+                             clientAddr, clientMac).c_str());
 }
 
 void DnsLogger::logToRest(const string& domain, uint16_t type,
@@ -396,6 +449,143 @@ void DnsLogger::sendRestLog(const RestLogRecord& rec)
         }
     }
     esp_http_client_cleanup(client);
+}
+
+// ─── Async file logging (stage 204) ─────────────────
+
+void DnsLogger::setLogFile(bool enabled)
+{
+    logFile_ = enabled;
+    updateFileLogState();
+}
+
+void DnsLogger::setLogFileForwarded(bool enabled)
+{
+    logFileForwarded_ = enabled;
+}
+
+void DnsLogger::setFileLogSize(size_t bytes)
+{
+    fileLogSize_ = bytes;
+    // A writer that is already running takes the new cap at once: a smaller one
+    // archives a file that is over it, a larger one raises the limit where it
+    // stands, and neither throws the log away.
+    if (fileWriter_) fileWriter_->setMaxBytes(bytes);
+}
+
+void DnsLogger::setFileLogVolumes(const string& fatMountPoint,
+                                  const string& cardMountPoint,
+                                  CardMountedCheck cardMounted)
+{
+    fatMountPoint_ = fatMountPoint;
+    cardMountPoint_ = cardMountPoint;
+    cardMounted_ = move(cardMounted);
+    fileVolumesReady_ = !fatMountPoint_.empty();
+    updateFileLogState();
+}
+
+void DnsLogger::updateFileLogState()
+{
+    const bool want = logFile_ && fileVolumesReady_;
+    if (want && !fileTask_) {
+        ensureFileWriter();
+    } else if (!want && fileTask_) {
+        stopFileWriter();
+    }
+}
+
+void DnsLogger::ensureFileWriter()
+{
+    // The live file goes on the internal volume and a full one is archived to the
+    // card; a failed archive is the operator's business, so it is written into
+    // Errors.log — the file he reads when something is wrong — and not only into
+    // the terminal.
+    fileWriter_ = make_unique<DnsForwardedLogWriter>(
+        fatMountPoint_ + "/" + core::kLogFileLiveFolder + "/" + kDnsForwardedLogFileName,
+        cardMountPoint_,
+        [this] { return cardMounted_ && cardMounted_(); },
+        [](const string& message) {
+            core::ErrorLog::instance().errorf("DnsLogger", "%s", message.c_str());
+        },
+        fileLogSize_);
+    if (fileQueue_ == nullptr) {
+        fileQueue_ = xQueueCreate(core::kFileLogQueueDepth, sizeof(RestLogRecord));
+    }
+    if (!fileQueue_) {
+        ESP_LOGE(TAG, "Failed to create file log queue");
+        return;
+    }
+    fileStopRequested_ = false;
+    if (xTaskCreate(&DnsLogger::fileLogTask, "dns_file", core::kFileLogTaskStack, this,
+                    core::kFileLogTaskPriority, &fileTask_) != pdPASS) {
+        fileTask_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create file log task");
+    }
+}
+
+void DnsLogger::stopFileWriter()
+{
+    if (fileTask_) {
+        fileStopRequested_ = true;
+        RestLogRecord marker;
+        marker.stop = true;
+        if (fileQueue_) {
+            xQueueSendToBack(fileQueue_, &marker, pdMS_TO_TICKS(core::kStopMarkerPollMs));
+        }
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(core::kDrainDeadlineMs);
+        while (fileTask_ != nullptr && xTaskGetTickCount() < deadline) {
+            vTaskDelay(pdMS_TO_TICKS(core::kStopMarkerPollMs));
+        }
+        fileStopRequested_ = false;
+    }
+    fileWriter_.reset();
+    writeFailures_ = 0;
+}
+
+void DnsLogger::fileLogTask(void* arg)
+{
+    auto* self = static_cast<DnsLogger*>(arg);
+    RestLogRecord rec;
+    while (!self->fileStopRequested_) {
+        if (xQueueReceive(self->fileQueue_, &rec, pdMS_TO_TICKS(core::kQueueWaitMs)) == pdTRUE) {
+            if (rec.stop) break;
+            self->writeFileLog(rec);
+        }
+    }
+    self->fileTask_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void DnsLogger::writeFileLog(const RestLogRecord& rec)
+{
+    if (!fileWriter_) return;
+
+    // The line's stamp is the device's LOCAL time — the same clock the pages,
+    // Errors.log and the NTP log show — and it is read here, in the writing task,
+    // so the line says when it was written rather than when the query arrived.
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+    const bool clockSet = core::ErrorLogCore::clockIsSet(static_cast<uint64_t>(now)) &&
+                          core::ErrorLogCore::localTime(now, local);
+    const core::LogStamp stamp = core::logStampFromLocal(local, clockSet);
+
+    const string body = dnsLogQueryText(sourceTag(static_cast<DnsLogSource>(rec.source)),
+                                        rec.type, rec.domain, rec.resolved,
+                                        rec.answer, rec.client, rec.mac);
+    if (fileWriter_->append(dnsForwardedLogLine(stamp, body), stamp)) {
+        writeFailures_ = 0;
+        return;
+    }
+
+    // The volume refused the line. It is not repeated here — the next answer will
+    // try again on its own — but a file log that silently stops is worse than a
+    // noisy one, so the failure is named on the terminal at a rate that cannot
+    // bury anything else.
+    ++writeFailures_;
+    if (writeFailures_ == 1 || (writeFailures_ % core::kFileLogWriteWarnEvery) == 0) {
+        ESP_LOGW(TAG, "forwarded log write failed (%u in a row): %s",
+                 static_cast<unsigned>(writeFailures_), fatMountPoint_.c_str());
+    }
 }
 
 string DnsLogger::buildRestJson(const RestLogRecord& rec) const

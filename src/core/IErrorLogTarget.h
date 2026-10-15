@@ -24,11 +24,11 @@ enum class LogLevel {
 /**
  * @brief Where the error log lines end up.
  *
- * A seam on purpose. Today it is a file on the internal FAT
- * (`/fat/logs/Errors.log`); the plan is that the operator picks the volume in
- * the settings later (the microSD card is the obvious candidate), and the host
- * tests use an in-memory list. The log itself knows none of that: it formats a
- * line and hands it over.
+ * A seam on purpose: the log itself formats a line and hands it over, and does not
+ * know what is on the other side. Today that is `ArchiveFileLogTarget` over a
+ * `LogFileWriter` — a file on the internal volume whose full generations are
+ * copied to the card (stage 206) — while the host tests hand the same core an
+ * in-memory list.
  */
 class IErrorLogTarget {
 public:
