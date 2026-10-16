@@ -120,14 +120,17 @@ public:
      * @param clientAddr Source IP in string form.
      * @param clientMac  Client MAC ("xx:xx:xx:xx:xx:xx") or empty if unknown.
      * @param source     Where the query was resolved from.
-     * @param resolved   Whether the query was resolved successfully.
-     * @param answer     The resolved IP (or empty if not resolved).
+     * @param outcome    How it ended — see @ref DnsQueryOutcome; the text of the
+     *                   line is decided there, because the difference between "the
+     *                   name does not exist" and "we gave up waiting" is the whole
+     *                   reason the enumeration exists
+     * @param answer     The resolved IP (empty when there is no answer).
      */
     void logQuery(const std::string& domain, uint16_t type,
                   const std::string& clientAddr,
                   const std::string& clientMac,
                   DnsLogSource source,
-                  bool resolved, const std::string& answer);
+                  DnsQueryOutcome outcome, const std::string& answer);
 
     /**
      * @brief Enable/disable the file log of forwarded answers (stage 204).
@@ -187,17 +190,17 @@ private:
                        const std::string& clientAddr,
                        const std::string& clientMac,
                        DnsLogSource source,
-                       bool resolved, const std::string& answer);
+                       DnsQueryOutcome outcome, const std::string& answer);
     void logToRest(const std::string& domain, uint16_t type,
                    const std::string& clientAddr,
                    const std::string& clientMac,
                    DnsLogSource source,
-                   bool resolved, const std::string& answer);
+                   DnsQueryOutcome outcome, const std::string& answer);
     void logToFile(const std::string& domain, uint16_t type,
                    const std::string& clientAddr,
                    const std::string& clientMac,
                    DnsLogSource source,
-                   bool resolved, const std::string& answer);
+                   DnsQueryOutcome outcome, const std::string& answer);
 
     // ─── Async REST logging (fire-and-forget) ──────
     // Log records go into a bounded ring buffer (FreeRTOS queue); on overflow
@@ -213,7 +216,11 @@ private:
     struct RestLogRecord {
         uint32_t ts = 0;      // uptime ms (diagnostics)
         uint16_t type = 0;    // DNS query type (1=A, 28=AAAA)
-        bool resolved = false;
+        // How the query ended (`DnsQueryOutcome`), not a boolean: the file line
+        // and the terminal sentence have to say *why* there is no answer, and the
+        // record is what carries the reason from the query path to the writer
+        // (stage 216). The REST body still sends `resolved`, derived from it.
+        uint8_t outcome = 0;
         bool stop = false;    // internal: stop marker for the sender task
         uint8_t source = 0;   // 0=local, 1=cache, 2=forwarded
         char domain[kDomainBytes] = {0};

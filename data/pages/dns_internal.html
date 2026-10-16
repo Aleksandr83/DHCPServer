@@ -206,6 +206,14 @@
                         style="margin-top:0.8rem; display:none;">Save</button>
                 <p class="hint" data-i18n="dns_internal.stats_file_hint">The counters are written to /fat/Statistica.dat and read back at boot.</p>
             </div>
+
+            <!-- The look into the PSRAM cache itself (stage 209): a page of its own,
+                 opened by this button and closed by the cross on it. Centred under
+                 the Statistics block, which is the last one of this options block. -->
+            <div class="cache-view-open">
+                <button type="button" class="btn" onclick="openCacheView()"
+                        data-i18n="dns_internal.cache_view">Cache view</button>
+            </div>
         </div>
 
         <p id="dns-internal-psram-note" style="display:none; color:#f59e0b;" data-i18n="dns_internal.psram_note">Internal cache is unavailable — no PSRAM detected on this device.</p>
@@ -1185,6 +1193,15 @@
             updateStatsFileStatus();
         }
         document.addEventListener('DOMContentLoaded', refreshFileStatusWhenReady);
+
+        /* The cache view (stage 209): a page of its own, opened **in this tab** — the
+           operator asked for that after seeing the tab version, and it is also the
+           honest shape for a page whose only way back is a cross: a tab opened by a
+           script cannot always be closed by one, while a page that replaced the
+           current one can always be left. */
+        function openCacheView() {
+            window.location.href = 'dns_cache_view.html';
+        }
     </script>
 </body>
 </html>

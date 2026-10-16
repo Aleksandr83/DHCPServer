@@ -635,6 +635,51 @@ static int test_hit_reports_its_time_split()
     return 0;
 }
 
+/** The split of the average is a **sum and the count it is divided by**: `waitUs`
+ *  and `walkedNodes` are counted per hit, so the page divides them by `hits_`
+ *  (see the class comment). A restore that puts the sums back without the count
+ *  therefore divides the whole history by the first few lookups of the new
+ *  session — which is what the operator saw on the main page after a reboot
+ *  (16.10.2026): `Avg hit: 157µs · Wait: 615µs · Work: 0µs · Walk: 71.1`.
+ *  `Wait` was larger than the average it is a part of, `Work` (the average minus
+ *  the wait) was pinned at zero, and nothing brought it back: the inflated
+ *  divisor was the count of hits since the reboot. */
+static int test_restored_split_keeps_its_divisor()
+{
+    resetClock();
+    InternalDnsCache c;
+    TEST_ASSERT_TRUE(c.enable(1));
+    c.store("restore.test", 1, ipA("10.9.9.9"), 60);
+
+    // What the statistics file carries out of the previous session: ten thousand
+    // hits that waited 615 µs each for the arena lock and walked nine nodes.
+    const uint64_t kHistoryHits = 10000;
+    const uint64_t kHistoryWaitUs = 6150000;
+    const uint64_t kHistoryWalked = 90000;
+    c.restoreMeasurement(kHistoryHits, kHistoryWaitUs, kHistoryWalked,
+                         /*stores=*/4, /*evictScans=*/0, /*evictScanUs=*/0,
+                         /*evictScanNodes=*/0);
+
+    const auto restored = c.stats();
+    TEST_ASSERT_EQ(restored.hits, kHistoryHits);   // the divisor came back with them
+    TEST_ASSERT_EQ(restored.waitUs, kHistoryWaitUs);
+    TEST_ASSERT_EQ(restored.waitUs / restored.hits, 615);
+    TEST_ASSERT_EQ((restored.walkedNodes * 100u) / restored.hits, 900);
+
+    // One more hit — on the host it waits for nothing — must move the average by
+    // at most a microsecond. Without the count it would be the whole history over
+    // a single lookup: 6 150 000 µs.
+    vector<string> out;
+    uint32_t ttl = 0;
+    TEST_ASSERT_TRUE(c.lookup("restore.test", 1, out, ttl));
+    const auto after = c.stats();
+    TEST_ASSERT_EQ(after.hits, kHistoryHits + 1);
+    TEST_ASSERT_TRUE(after.waitUs / after.hits < 1000);
+    TEST_ASSERT_TRUE(after.waitUs / after.hits + 1 >= 615);
+    TEST_ASSERT_TRUE((after.walkedNodes * 100u) / after.hits < 1000);
+    return 0;
+}
+
 /** The full-arena eviction scan holds the mutex while it walks everything, so it
  *  is the one event that can make somebody else's hit wait for milliseconds.
  *  Counted and timed, and its size is the pool — not a guess. */
@@ -737,6 +782,7 @@ void app_main()
     failures += test_save_reports_nothing_to_save();
     failures += test_ignore_ttl();
     failures += test_hit_reports_its_time_split();
+    failures += test_restored_split_keeps_its_divisor();
     failures += test_eviction_scan_is_measured();
     failures += test_saved_file_passes_the_restart_check();
 

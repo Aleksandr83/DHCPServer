@@ -46,6 +46,17 @@ struct DhcpConfig {
     // would take a LAN hostage.
     bool allowOnly = false;
     bool logTerminal = false;
+    // The file log of DHCP events (stage 212): `/fat/logs/Dhcp.log`, archived to
+    // the card when full. `logFile` starts and stops it and is the switch of the
+    // "Log to File" card on the DHCP Logging page - its own switch, not a copy of
+    // `logTerminal`: the terminal keeps the diagnostic lines only, the file keeps
+    // the whole record, and the operator may well want one without the other.
+    // `logFileSize` is one of the sizes the page offers, in bytes (see
+    // core/LogFileSizes.h); it lives in its own NVS key (`dhcp_log_size`, 13
+    // characters) because the two of them in one key would need a name longer than
+    // the 15 NVS allows.
+    bool logFile = false;
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
     // DNS handed to DHCP clients: "auto" = built-in DNS server if running,
     // otherwise the router; "manual" = use dnsAddress
     std::string dnsMode = "auto";

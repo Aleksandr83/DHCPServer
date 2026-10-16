@@ -3,9 +3,11 @@
 #include "PtrProbe.h"
 #include "NbstatProbe.h"
 #include "../core/Config.h"
+#include "../core/ErrorLogCore.h"
 
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include <algorithm>
 
 #include "esp_log.h"
@@ -24,6 +26,8 @@
 #include "freertos/semphr.h"
 
 using namespace std;
+using ::dhcp::core::ErrorLogCore;
+using ::dhcp::core::LogLevel;
 
 static const char* TAG = "DhcpServer";
 
@@ -121,6 +125,41 @@ static_assert(sizeof(DhcpMessage) == DHCP_MESSAGE_BYTES,
 
 namespace dhcp {
 namespace dhcp {
+
+// ─── The DHCP log: one text for the terminal and for the file (stage 212) ───
+
+// `const` because the probes and the name lookup report from methods that are
+// const (they only read the table they ask about), and the file log is a
+// `mutable` member for the same reason — the sibling logs are members of their
+// servers' loggers, which those servers reach from const methods too.
+void DhcpServer::logEvent(LogLevel level, TerminalGate gate, const char* format, ...) const
+{
+    // The family's line budget, not a number of this file: the file log keeps a
+    // message of this length and no more, so building a longer one here would mean
+    // the terminal showing what the file has to cut.
+    char text[ErrorLogCore::kMaxMessage + 1];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+
+    if (gate == TerminalGate::Always || logTerminal_) {
+        // The same string the file gets, printed as it is: whoever reads the
+        // console and whoever reads the file are told the same thing.
+        if (level == LogLevel::Warn) {
+            ESP_LOGW(TAG, "%s", text);
+        } else {
+            ESP_LOGI(TAG, "%s", text);
+        }
+    }
+    fileLog_.note(level, text);
+}
+
+bool DhcpServer::startFileLog(const string& mountPoint, const string& cardMountPoint,
+                              DhcpFileLog::CardMountedCheck cardMounted)
+{
+    return fileLog_.start(mountPoint, cardMountPoint, move(cardMounted));
+}
 
 // ─────────────────────────────────────────────────────
 // ARP conflict probe (runs on the lwIP tcpip thread)
@@ -226,10 +265,8 @@ bool DhcpServer::arpProbeIp(uint32_t ip, uint8_t ownerMac[6]) const
         memcpy(ownerMac, ctx.ownerMac, DHCP_HWADDR_LEN);
     }
     vSemaphoreDelete(ctx.done);
-    if (logTerminal_) {
-        ESP_LOGI(TAG, "ARP probe " IP_FMT ": %s", IP_FMT_ARGS(ip),
-                 inUse ? "in use" : "free");
-    }
+    logEvent(LogLevel::Info, TerminalGate::Switch, "ARP probe " IP_FMT ": %s", IP_FMT_ARGS(ip),
+             inUse ? "in use" : "free");
     return inUse;
 }
 
@@ -297,10 +334,8 @@ bool DhcpServer::icmpProbeIp(uint32_t ip) const
     esp_ping_delete_session(hdl);
     vSemaphoreDelete(ctx.done);
 
-    if (logTerminal_) {
-        ESP_LOGI(TAG, "ICMP probe " IP_FMT ": %s", IP_FMT_ARGS(ip),
-                 inUse ? "in use" : "free");
-    }
+    logEvent(LogLevel::Info, TerminalGate::Switch, "ICMP probe " IP_FMT ": %s", IP_FMT_ARGS(ip),
+             inUse ? "in use" : "free");
     return inUse;
 }
 
@@ -353,6 +388,9 @@ bool DhcpServer::start()
     logTerminal_ = dhcpCfg.logTerminal;
     dnsMode_ = dhcpCfg.dnsMode;
     dnsManualIp_ = ipStrToU32(dhcpCfg.dnsAddress);
+    // A statement about the terminal switch itself, and deliberately not routed
+    // through logEvent(): the file log has a switch of its own, and "Terminal
+    // logging enabled" in Dhcp.log would describe a switch that file does not own.
     if (logTerminal_) ESP_LOGI(TAG, "Terminal logging enabled");
     // External REST logging of DHCP events
     restLogger_.setAuth(dhcpCfg.logAuthEnabled, dhcpCfg.logAuthUser,
@@ -420,7 +458,8 @@ bool DhcpServer::start()
         return false;
     }
 
-    ESP_LOGI(TAG, "DHCP server started on " IP_FMT ", range " IP_FMT " - " IP_FMT,
+    logEvent(LogLevel::Info, TerminalGate::Always,
+             "DHCP server started on " IP_FMT ", range " IP_FMT " - " IP_FMT,
              IP_FMT_ARGS(serverIp_),
              IP_FMT_ARGS(rangeStart_),
              IP_FMT_ARGS(rangeEnd_));
@@ -446,7 +485,7 @@ void DhcpServer::stop()
 
     state_ = DhcpServerState::STOPPED;
     leases_.clear();
-    ESP_LOGI(TAG, "DHCP server stopped");
+    logEvent(LogLevel::Info, TerminalGate::Always, "DHCP server stopped");
 }
 
 void DhcpServer::reloadStaticBindings()
@@ -542,7 +581,7 @@ void DhcpServer::serverLoop()
     struct timeval rcvTimeout = { .tv_sec = kSocketRecvTimeoutSec, .tv_usec = 0 };
     setsockopt(socketFd_, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, sizeof(rcvTimeout));
 
-    ESP_LOGI(TAG, "DHCP server listening on port 67");
+    logEvent(LogLevel::Info, TerminalGate::Always, "DHCP server listening on port 67");
 
     uint8_t buf[1024];
     struct sockaddr_in from;
@@ -565,11 +604,10 @@ void DhcpServer::serverLoop()
 
         removeExpiredLeases();
 
-        if (logTerminal_) {
-            ESP_LOGI(TAG, "DHCP packet received from " IP_FMT ":%u, len=%d",
-                     IP_FMT_ARGS(from.sin_addr.s_addr),
-                     ntohs(from.sin_port), static_cast<int>(recvLen));
-        }
+        logEvent(LogLevel::Info, TerminalGate::Switch,
+                 "DHCP packet received from " IP_FMT ":%u, len=%d",
+                 IP_FMT_ARGS(from.sin_addr.s_addr),
+                 ntohs(from.sin_port), static_cast<int>(recvLen));
 
         handleDhcpMessage(buf, static_cast<size_t>(recvLen),
                           from.sin_addr.s_addr, ntohs(from.sin_port));
@@ -675,7 +713,7 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
             : string();
 
     // Log incoming DHCP messages if terminal logging enabled
-    if (logTerminal_) {
+    {
         const char* typeStr = "UNKNOWN";
         switch (msgType) {
             case DHCP_DISCOVER: typeStr = "DISCOVER"; break;
@@ -683,7 +721,8 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
             case DHCP_RELEASE:  typeStr = "RELEASE";  break;
             case DHCP_DECLINE:  typeStr = "DECLINE";  break;
         }
-        ESP_LOGI(TAG, "DHCP %s from " IP_FMT " MAC=%02x:%02x:%02x:%02x:%02x:%02x",
+        logEvent(LogLevel::Info, TerminalGate::Switch,
+                 "DHCP %s from " IP_FMT " MAC=%02x:%02x:%02x:%02x:%02x:%02x",
                  typeStr, IP_FMT_ARGS(srcAddr),
                  msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
                  msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
@@ -697,18 +736,16 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
     // is never handed out.
     if (!DhcpAllowedList::isClientAllowed(msg->chaddr, allowOnly_,
                                           allowedList_, allowedStaticRefs_)) {
-        if (logTerminal_) {
-            ESP_LOGW(TAG, "DHCP refused (not an allowed computer): "
-                          "MAC=%02x:%02x:%02x:%02x:%02x:%02x",
-                     msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
-                     msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
-        }
+        logEvent(LogLevel::Warn, TerminalGate::Switch, "DHCP refused (not an allowed computer): "
+                                 "MAC=%02x:%02x:%02x:%02x:%02x:%02x",
+                 msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
+                 msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
         return false;
     }
 
     switch (msgType) {
     case DHCP_DISCOVER:
-        if (logTerminal_) ESP_LOGI(TAG, "DHCP DISCOVER — broadcasting OFFER");
+        logEvent(LogLevel::Info, TerminalGate::Switch, "DHCP DISCOVER — broadcasting OFFER");
         sendDhcpOffer(msg->chaddr, msg->xid, requestedIp, msg->giaddr, clientName);
         break;
 
@@ -738,11 +775,9 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                         // just missed). The NAK sends it back to DISCOVER, and
                         // selectIp no longer offers this address.
                         ack = false;
-                        if (logTerminal_) {
-                            ESP_LOGI(TAG, "DHCP REQUEST " IP_FMT
-                                          ": refusing a declined address",
-                                     IP_FMT_ARGS(assignIp));
-                        }
+                        logEvent(LogLevel::Info, TerminalGate::Switch, "DHCP REQUEST " IP_FMT
+                                                 ": refusing a declined address",
+                                 IP_FMT_ARGS(assignIp));
                     } else {
                         // No lease — ARP-probe to detect a conflict
                         uint8_t ownerMac[6];
@@ -753,14 +788,13 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                             // IP present on the network: OK only if the
                             // requesting client is itself the owner
                             ack = (memcmp(ownerMac, msg->chaddr, 6) == 0);
-                            if (logTerminal_) {
-                                ESP_LOGI(TAG, "DHCP REQUEST " IP_FMT " owned by %02x:%02x:%02x:%02x:%02x:%02x, requester %02x:%02x:%02x:%02x:%02x:%02x",
-                                         IP_FMT_ARGS(assignIp),
-                                         ownerMac[0], ownerMac[1], ownerMac[2],
-                                         ownerMac[3], ownerMac[4], ownerMac[5],
-                                         msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
-                                         msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
-                            }
+                            logEvent(LogLevel::Info, TerminalGate::Switch,
+                                     "DHCP REQUEST " IP_FMT " owned by %02x:%02x:%02x:%02x:%02x:%02x, requester %02x:%02x:%02x:%02x:%02x:%02x",
+                                     IP_FMT_ARGS(assignIp),
+                                     ownerMac[0], ownerMac[1], ownerMac[2],
+                                     ownerMac[3], ownerMac[4], ownerMac[5],
+                                     msg->chaddr[0], msg->chaddr[1], msg->chaddr[2],
+                                     msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
                         }
                     }
                 }
@@ -768,21 +802,21 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                     if (!canAddLeaseEntry(assignIp)) {
                         // Lease table at its cap: refuse instead of ACKing an
                         // address we could not track (the client retries).
-                        if (logTerminal_) {
-                            ESP_LOGW(TAG, "DHCP REQUEST — sending NAK (lease table full)");
-                        }
+                        logEvent(LogLevel::Warn, TerminalGate::Switch,
+                                 "DHCP REQUEST — sending NAK (lease table full)");
                         sendDhcpNak(msg->chaddr, msg->xid, msg->giaddr);
                         break;
                     }
-                    if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending ACK");
+                    logEvent(LogLevel::Info, TerminalGate::Switch, "DHCP REQUEST — sending ACK");
                     sendDhcpAck(msg->chaddr, msg->xid, assignIp, msg->giaddr);
                     addLease(msg->chaddr, assignIp, clientName);
                 } else {
-                    if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending NAK (conflict)");
+                    logEvent(LogLevel::Info, TerminalGate::Switch,
+                             "DHCP REQUEST — sending NAK (conflict)");
                     sendDhcpNak(msg->chaddr, msg->xid, msg->giaddr);
                 }
             } else {
-                if (logTerminal_) ESP_LOGI(TAG, "DHCP REQUEST — sending NAK");
+                logEvent(LogLevel::Info, TerminalGate::Switch, "DHCP REQUEST — sending NAK");
                 sendDhcpNak(msg->chaddr, msg->xid, msg->giaddr);
             }
         }
@@ -796,13 +830,15 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
                 logDhcpRest("RELEASE", it->second.mac, msg->ciaddr,
                             0, 0, false, 0, 0);
                 leases_.erase(it);
-                ESP_LOGI(TAG, "Lease released for " IP_FMT, IP_FMT_ARGS(msg->ciaddr));
+                logEvent(LogLevel::Info, TerminalGate::Always,
+                         "Lease released for " IP_FMT, IP_FMT_ARGS(msg->ciaddr));
             }
         }
         break;
 
     case DHCP_DECLINE: {
-        ESP_LOGW(TAG, "DHCP DECLINE for " IP_FMT, IP_FMT_ARGS(requestedIp));
+        logEvent(LogLevel::Warn, TerminalGate::Always,
+                 "DHCP DECLINE for " IP_FMT, IP_FMT_ARGS(requestedIp));
         // The client ARP-probed this address and somebody answered (RFC 2131), so
         // it is not ours to hand out: its own probe is the stronger witness here,
         // because the server's probe is the one that had just failed. A lease the
@@ -815,15 +851,15 @@ bool DhcpServer::handleDhcpMessage(const uint8_t* buf, size_t len,
             leases_.erase(lease);
         }
         if (!declined_.add(requestedIp, getCurrentTimeMs())) {
-            ESP_LOGW(TAG, "DECLINE: the hold-down table is full, "
-                          "the oldest refusal was forgotten");
+            logEvent(LogLevel::Warn, TerminalGate::Always,
+                     "DECLINE: the hold-down table is full, "
+                     "the oldest refusal was forgotten");
         }
-        if (logTerminal_) {
-            ESP_LOGI(TAG, "IP " IP_FMT " held down for %u s, %u address(es) refused",
-                     IP_FMT_ARGS(requestedIp),
-                     static_cast<unsigned>(DeclinedAddresses::kDeclineHoldMs / 1000ULL),
-                     static_cast<unsigned>(declined_.count(getCurrentTimeMs())));
-        }
+        logEvent(LogLevel::Info, TerminalGate::Switch,
+                 "IP " IP_FMT " held down for %u s, %u address(es) refused",
+                 IP_FMT_ARGS(requestedIp),
+                 static_cast<unsigned>(DeclinedAddresses::kDeclineHoldMs / 1000ULL),
+                 static_cast<unsigned>(declined_.count(getCurrentTimeMs())));
         logDhcpRest("DECLINE", msg->chaddr, requestedIp, 0, 0, false, 0, 0);
         break;
     }
@@ -857,10 +893,12 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
         } else if (refused) {
             // A separate branch rather than a conditional *format* string: the log
             // macro cannot take one (the format argument has to be a literal).
-            ESP_LOGI(TAG, "Requested IP " IP_FMT " was declined, picking another",
+            logEvent(LogLevel::Info, TerminalGate::Always,
+                     "Requested IP " IP_FMT " was declined, picking another",
                      IP_FMT_ARGS(requestedIp));
         } else {
-            ESP_LOGI(TAG, "Requested IP " IP_FMT " in use on network, picking another",
+            logEvent(LogLevel::Info, TerminalGate::Always,
+                     "Requested IP " IP_FMT " in use on network, picking another",
                      IP_FMT_ARGS(requestedIp));
         }
     }
@@ -869,7 +907,7 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     }
 
     if (offerIp == 0) {
-        ESP_LOGW(TAG, "No available IP for offer");
+        logEvent(LogLevel::Warn, TerminalGate::Always, "No available IP for offer");
         return;
     }
 
@@ -877,7 +915,8 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     // When the lease table is at its cap the reservation fails and no OFFER is
     // sent (the client retries; nothing is leaked).
     if (!reserveOffer(clientMac, offerIp, clientName)) {
-        ESP_LOGW(TAG, "No OFFER for %02x:%02x:%02x:%02x:%02x:%02x: lease table full",
+        logEvent(LogLevel::Warn, TerminalGate::Always,
+                 "No OFFER for %02x:%02x:%02x:%02x:%02x:%02x: lease table full",
                  clientMac[0], clientMac[1], clientMac[2],
                  clientMac[3], clientMac[4], clientMac[5]);
         return;
@@ -939,7 +978,8 @@ void DhcpServer::sendDhcpOffer(const uint8_t* clientMac, uint32_t transactionId,
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
-    ESP_LOGI(TAG, "DHCP OFFER " IP_FMT " to %02x:%02x:%02x:%02x:%02x:%02x"
+    logEvent(LogLevel::Info, TerminalGate::Always,
+             "DHCP OFFER " IP_FMT " to %02x:%02x:%02x:%02x:%02x:%02x"
              " | mask=" IP_FMT " router=" IP_FMT "(sent=%d)"
              " dns=" IP_FMT " lease=%lus",
              IP_FMT_ARGS(offerIp),
@@ -1011,7 +1051,8 @@ void DhcpServer::sendDhcpAck(const uint8_t* clientMac, uint32_t transactionId,
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
-    ESP_LOGI(TAG, "DHCP ACK " IP_FMT " to %02x:%02x:%02x:%02x:%02x:%02x"
+    logEvent(LogLevel::Info, TerminalGate::Always,
+             "DHCP ACK " IP_FMT " to %02x:%02x:%02x:%02x:%02x:%02x"
              " | mask=" IP_FMT " router=" IP_FMT "(sent=%d)"
              " dns=" IP_FMT " lease=%lus",
              IP_FMT_ARGS(assignedIp),
@@ -1054,7 +1095,8 @@ void DhcpServer::sendDhcpNak(const uint8_t* clientMac, uint32_t transactionId,
     sendUdp(destIp, DHCP_CLIENT_PORT, reinterpret_cast<uint8_t*>(&msg),
             sizeof(DhcpMessage) - sizeof(msg.options) + (opt - msg.options));
 
-    ESP_LOGW(TAG, "DHCP NAK to %02x:%02x:%02x:%02x:%02x:%02x",
+    logEvent(LogLevel::Warn, TerminalGate::Always,
+             "DHCP NAK to %02x:%02x:%02x:%02x:%02x:%02x",
              clientMac[0], clientMac[1], clientMac[2],
              clientMac[3], clientMac[4], clientMac[5]);
     logDhcpRest("NAK", clientMac, 0, 0, 0, false, 0, 0);
@@ -1091,17 +1133,15 @@ uint32_t DhcpServer::selectIp(const uint8_t* clientMac)
             // An address a client refused is not free, whatever the probe of the
             // moment says: see DhcpServer::addressDeclined.
             if (addressDeclined(ip)) {
-                if (logTerminal_) {
-                    ESP_LOGI(TAG, "IP " IP_FMT " was declined, skipping",
-                             IP_FMT_ARGS(ip));
-                }
+                logEvent(LogLevel::Info, TerminalGate::Switch,
+                         "IP " IP_FMT " was declined, skipping",
+                         IP_FMT_ARGS(ip));
                 continue;
             }
             if (probeIp(ip, nullptr)) {
-                if (logTerminal_) {
-                    ESP_LOGI(TAG, "IP " IP_FMT " in use on network, skipping",
-                             IP_FMT_ARGS(ip));
-                }
+                logEvent(LogLevel::Info, TerminalGate::Switch,
+                         "IP " IP_FMT " in use on network, skipping",
+                         IP_FMT_ARGS(ip));
                 continue;
             }
             return ip;
@@ -1228,8 +1268,9 @@ bool DhcpServer::canAddLeaseEntry(uint32_t ip)
     if (leases_.size() < maxLeaseEntriesEffective_) return true;
 
     ++leaseLimitRejects_;
-    ESP_LOGW(TAG, "Lease table full (%u entries, cap %u) — refusing " IP_FMT
-                  ", %u refused so far",
+    logEvent(LogLevel::Warn, TerminalGate::Always,
+             "Lease table full (%u entries, cap %u) — refusing " IP_FMT
+             ", %u refused so far",
              (unsigned)leases_.size(), (unsigned)maxLeaseEntriesEffective_,
              IP_FMT_ARGS(ip), (unsigned)leaseLimitRejects_);
     return false;
@@ -1244,13 +1285,12 @@ void DhcpServer::addLease(const uint8_t* mac, uint32_t ip, const string& hostnam
     lease.hostname = hostname;
     leases_[ip] = lease;
 
-    if (logTerminal_) {
-        ESP_LOGI(TAG, "Lease added: " IP_FMT " -> %02x:%02x:%02x:%02x:%02x:%02x (expires in %lu s)%s%s",
-                 IP_FMT_ARGS(ip),
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                 (unsigned long)leaseTimeSec_,
-                 hostname.empty() ? "" : " name=", hostname.c_str());
-    }
+    logEvent(LogLevel::Info, TerminalGate::Switch,
+             "Lease added: " IP_FMT " -> %02x:%02x:%02x:%02x:%02x:%02x (expires in %lu s)%s%s",
+             IP_FMT_ARGS(ip),
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             (unsigned long)leaseTimeSec_,
+             hostname.empty() ? "" : " name=", hostname.c_str());
 }
 
 bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const string& hostname)
@@ -1281,11 +1321,10 @@ bool DhcpServer::reserveOffer(const uint8_t* mac, uint32_t ip, const string& hos
     lease.hostname = hostname;
     leases_[ip] = lease;
 
-    if (logTerminal_) {
-        ESP_LOGI(TAG, "IP " IP_FMT " reserved (offer) for %02x:%02x:%02x:%02x:%02x:%02x",
-                 IP_FMT_ARGS(ip),
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    }
+    logEvent(LogLevel::Info, TerminalGate::Switch,
+             "IP " IP_FMT " reserved (offer) for %02x:%02x:%02x:%02x:%02x:%02x",
+             IP_FMT_ARGS(ip),
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return true;
 }
 
@@ -1410,8 +1449,9 @@ IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6])
             if (!name.empty()) {
                 result.name = name;
                 result.source = "ptr";
-                ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
-                              "%s (PTR via " IP_FMT ")",
+                logEvent(LogLevel::Info, TerminalGate::Always,
+                         "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
+                         "%s (PTR via " IP_FMT ")",
                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                          name.c_str(), IP_FMT_ARGS(nameServer));
                 return result;
@@ -1431,8 +1471,9 @@ IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6])
             if (!name.empty()) {
                 result.name = name;
                 result.source = "netbios";
-                ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
-                              "%s (NBSTAT via " IP_FMT ")",
+                logEvent(LogLevel::Info, TerminalGate::Always,
+                         "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: "
+                         "%s (NBSTAT via " IP_FMT ")",
                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                          name.c_str(), IP_FMT_ARGS(ipNet));
                 return result;
@@ -1441,16 +1482,15 @@ IDhcpServer::ClientNameResult DhcpServer::lookupClientName(const uint8_t mac[6])
     }
 
     result.source = "none";
-    if (logTerminal_) {
-        // Step 3 — NetBIOS node status is tried for every client we have an
-        // address for, so the log says "ip=?" when that was the reason nothing
-        // was probed at all.
-        ESP_LOGI(TAG, "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: nothing "
-                      "found (ip=%s, dns=" IP_FMT ")",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                 haveIp ? ipToStr(result.ipNet).c_str() : "-",
-                 IP_FMT_ARGS(nameServer));
-    }
+    // Step 3 — NetBIOS node status is tried for every client we have an
+    // address for, so the log says "ip=?" when that was the reason nothing
+    // was probed at all.
+    logEvent(LogLevel::Info, TerminalGate::Switch,
+             "Name lookup for %02x:%02x:%02x:%02x:%02x:%02x: nothing "
+             "found (ip=%s, dns=" IP_FMT ")",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             haveIp ? ipToStr(result.ipNet).c_str() : "-",
+             IP_FMT_ARGS(nameServer));
     return result;
 }
 

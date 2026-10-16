@@ -562,12 +562,15 @@ bool InternalDnsCache::lookup(const string& domain, uint16_t qtype,
     return true;
 }
 
-void InternalDnsCache::restoreMeasurement(uint64_t waitUs, uint64_t walkedNodes,
-                                         uint64_t stores, uint64_t evictScans,
-                                         uint64_t evictScanUs,
+void InternalDnsCache::restoreMeasurement(uint64_t hits, uint64_t waitUs,
+                                         uint64_t walkedNodes, uint64_t stores,
+                                         uint64_t evictScans, uint64_t evictScanUs,
                                          uint64_t evictScanNodes)
 {
     lock();
+    // The count first: it is the divisor of the next two sums, and a reader of
+    // stats() must never see the sums of a session with the count of another.
+    hits_ = hits;
     lookupWaitUs_ = waitUs;
     walkedNodes_ = walkedNodes;
     stores_ = stores;
@@ -597,6 +600,96 @@ void InternalDnsCache::clear()
     resetTop();
     unlock();
     ESP_LOGI(TAG, "Internal DNS cache cleared");
+}
+
+// ─────────────────────────────────────────────────────
+// The cache view (stage 209)
+// ─────────────────────────────────────────────────────
+
+/** The stored record as the viewer shows it; `now` is the walk's one reading. */
+void InternalDnsCache::fillEntryView(CacheEntryView& out, const Node& n,
+                                     uint32_t now) const
+{
+    out.name.assign(n.name);
+    out.qtype = n.qtype;
+    out.ttl = n.ttl;
+    out.uses = n.uses;
+    out.age = elapsedMs(now, n.storedMs) / 1000u;
+    out.remaining = (out.age >= n.ttl) ? 0u : n.ttl - out.age;
+    // The policy, not the arithmetic: with "Ignore TTL" on the cache serves a
+    // record past its TTL by design, and a record with no TTL never expires.
+    out.expired = !ignoreTtl_ && n.ttl != 0 && out.age >= n.ttl;
+
+    out.a4Count = static_cast<uint8_t>(n.nA < kCacheViewMaxA ? n.nA : kCacheViewMaxA);
+    for (uint8_t i = 0; i < out.a4Count; ++i) out.a4[i] = n.a4[i];
+    out.a6Count = static_cast<uint8_t>(n.nAAAA < kCacheViewMaxAAAA ? n.nAAAA
+                                                                  : kCacheViewMaxAAAA);
+    for (uint8_t i = 0; i < out.a6Count; ++i) {
+        memcpy(out.a6[i], n.a6[i], sizeof(out.a6[i]));
+    }
+}
+
+CacheEntryPage InternalDnsCache::entries(const CacheEntryQuery& query) const
+{
+    CacheEntryPage page;
+    page.available = (arena_ != nullptr);
+    if (!arena_) return page;
+
+    page.limit = cacheViewClampLimit(query.limit);
+    page.offset = query.offset;
+
+    // One walk, under the lock, copying only the page that was asked for. The
+    // records that are counted but not copied are the cost of the total the pager
+    // needs; nothing beyond the page is ever held in memory.
+    lock();
+    if (!arena_) {
+        unlock();
+        page.available = false;
+        return page;
+    }
+
+    const uint32_t now = nowMs();
+    size_t matched = 0;
+    for (uint32_t b = 0; b < numBuckets_; b++) {
+        for (int idx = buckets_[b]; idx >= 0; idx = nodes_[idx].next) {
+            const Node& n = nodes_[idx];
+            if (n.name[0] == '\0') continue;
+            page.scanned++;
+            if (!cacheEntryMatches(n.name, n.qtype, query)) continue;
+            if (matched >= page.offset && page.items.size() < page.limit) {
+                page.items.emplace_back();
+                fillEntryView(page.items.back(), n, now);
+            }
+            matched++;
+        }
+    }
+    page.total = matched;
+    unlock();
+    return page;
+}
+
+bool InternalDnsCache::erase(const std::string& domain, uint16_t qtype)
+{
+    if (!arena_ || domain.empty()) return false;
+
+    const std::string lname = lower(domain);
+    lock();
+    if (!arena_) {
+        unlock();
+        return false;
+    }
+    const uint32_t h = hashName(lname.c_str());
+    const uint32_t b = bucketOf(h);
+    const int idx = findNode(b, h, lname.c_str(), qtype);
+    if (idx >= 0) unlinkNode(b, idx);   // frees the node and decrements entries_
+    const uint32_t left = entries_;
+    unlock();
+
+    if (idx < 0) return false;
+    ESP_LOGI(TAG, "internal cache: %s %s removed from the web interface (%u records left)",
+             lname.c_str(), qtype == 1 ? "A" : (qtype == 28 ? "AAAA" : "record"),
+             static_cast<unsigned>(left));
+    return true;
 }
 
 // ─────────────────────────────────────────────────────

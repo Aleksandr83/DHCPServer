@@ -1,6 +1,7 @@
 #include "AuthManager.h"
 #include "../core/AuthAttemptPolicy.h"
 #include "../core/AuthLog.h"
+#include "../core/AuthLogFormat.h"
 #include "../core/Config.h"
 
 #include <cstring>
@@ -52,6 +53,18 @@ void AuthManager::reloadConfig()
 bool AuthManager::authenticate(const string& authHeader,
                                 const string& clientIp)
 {
+    return verify(authHeader, clientIp, /*fromLoginForm=*/false);
+}
+
+bool AuthManager::authenticateLogin(const string& authHeader,
+                                    const string& clientIp)
+{
+    return verify(authHeader, clientIp, /*fromLoginForm=*/true);
+}
+
+bool AuthManager::verify(const string& authHeader, const string& clientIp,
+                         bool fromLoginForm)
+{
     cleanupExpired();
 
     // Check lockout
@@ -102,12 +115,14 @@ bool AuthManager::authenticate(const string& authHeader,
     if (user == username_ && pass == password_) {
         // Success — clear failed attempts for this IP. The count is read before it
         // is cleared, because "got in after three failures" is the one line that
-        // tells a guest who mistyped from somebody who guessed (stage 205).
+        // tells a guest who mistyped from somebody who guessed (stage 205), and
+        // because it is half of the rule that decides whether this success is
+        // written at all (the other half is "was this the login form", stage 213).
         const auto it = failedAttempts_.find(clientIp);
         const uint32_t failedBefore =
             (it != failedAttempts_.end()) ? it->second.count : 0;
         failedAttempts_.erase(clientIp);
-        if (failedBefore > 0) {
+        if (core::authLogWritesSuccess(fromLoginForm, failedBefore)) {
             core::AuthLog::instance().noteLogin(clientIp, failedBefore);
         }
         return true;

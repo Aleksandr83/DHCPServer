@@ -516,6 +516,9 @@ const WebRoute WebServer::kRoutes[] = {
     // REST API routes
     { "/api/status",                      RouteMethod::Get,   &WebServer::getStatusHandler },
     { "/api/version",                     RouteMethod::Get,   &WebServer::getVersionHandler },
+    // The login form's request (stage 213): the one request that says "this is a
+    // login", which is what makes a successful login writable to `Auth.log`.
+    { "/api/auth/login",                  RouteMethod::Post,  &WebServer::postAuthLoginHandler },
     { "/api/dhcp/settings",               RouteMethod::Get,   &WebServer::getDhcpSettingsHandler },
     { "/api/dhcp/settings",               RouteMethod::Post,  &WebServer::postDhcpSettingsHandler },
     { "/api/dhcp/static-bindings",        RouteMethod::Get,   &WebServer::getStaticBindingsHandler },
@@ -569,6 +572,10 @@ const WebRoute WebServer::kRoutes[] = {
     { "/api/dns/internal-cache/save",     RouteMethod::Post,  &WebServer::postInternalCacheSaveHandler },
     { "/api/dns/internal-cache/load",     RouteMethod::Post,  &WebServer::postInternalCacheLoadHandler },
     { "/api/dns/internal-cache/reset",    RouteMethod::Post,  &WebServer::postInternalCacheResetHandler },
+    // The cache view page (stage 209): a page of records with the numbers its
+    // pager needs, and the delete button that forgets one record.
+    { "/api/dns/internal-cache/entries",  RouteMethod::Get,   &WebServer::getInternalCacheEntriesHandler },
+    { "/api/dns/internal-cache/entry",    RouteMethod::Post,  &WebServer::postInternalCacheEntryDeleteHandler },
     // Time (NTP) server
     { "/api/time/settings",               RouteMethod::Get,   &WebServer::getTimeSettingsHandler },
     { "/api/time/settings",               RouteMethod::Post,  &WebServer::postTimeSettingsHandler },
@@ -623,6 +630,7 @@ const WebRoute WebServer::kRoutes[] = {
     { "/pages/dns_logging.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/dns_cache.html",            RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/dns_internal.html",         RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/dns_cache_view.html",       RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/dns_local_hosts.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/ntp_setup.html",            RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/ntp_logging.html",          RouteMethod::Get,   &WebServer::staticFileHandler },

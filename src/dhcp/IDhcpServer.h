@@ -2,6 +2,7 @@
 #define DHCP_DHCP_IDHCPSERVER_H
 
 #include <string>
+#include <cstddef>
 #include <cstdint>
 
 namespace dhcp {
@@ -85,6 +86,23 @@ public:
      * @brief Enable/disable terminal logging at runtime.
      */
     virtual void setLogTerminal(bool enabled) = 0;
+
+    /**
+     * @brief Keep the DHCP log in a file as well (stage 212).
+     *
+     * Its own switch, independent of the terminal's: an operator may want the
+     * console quiet while the file keeps the record, which is the same choice the
+     * DNS and NTP logs offer.
+     */
+    virtual void setLogFile(bool enabled) = 0;
+
+    /**
+     * @brief The cap the DHCP log file rotates at, in bytes.
+     *
+     * Applied to a writer that is already running: a smaller cap archives a file
+     * that is over it at once, a larger one raises the limit where it stands.
+     */
+    virtual void setFileLogSize(size_t bytes) = 0;
 
     /**
      * @brief Configure external REST logging of DHCP events.

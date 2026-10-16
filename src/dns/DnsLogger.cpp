@@ -141,7 +141,7 @@ void DnsLogger::logQuery(const string& domain, uint16_t type,
                           const string& clientAddr,
                           const string& clientMac,
                           DnsLogSource source,
-                          bool resolved, const string& answer)
+                          DnsQueryOutcome outcome, const string& answer)
 {
     if (logTerminal_) {
         bool allowed = (source == DnsLogSource::LOCAL && logLocal_) ||
@@ -154,16 +154,16 @@ void DnsLogger::logQuery(const string& domain, uint16_t type,
         }
         if (allowed) {
             logToTerminal(domain, type, clientAddr, clientMac,
-                          source, resolved, answer);
+                          source, outcome, answer);
         }
     }
     if (logRest_ && !logUrl_.empty()) {
         logToRest(domain, type, clientAddr, clientMac,
-                  source, resolved, answer);
+                  source, outcome, answer);
     }
     if (logFile_ && source == DnsLogSource::FORWARDED && logFileForwarded_) {
         logToFile(domain, type, clientAddr, clientMac,
-                  source, resolved, answer);
+                  source, outcome, answer);
     }
 }
 
@@ -171,7 +171,7 @@ void DnsLogger::logToFile(const string& domain, uint16_t type,
                           const string& clientAddr,
                           const string& clientMac,
                           DnsLogSource source,
-                          bool resolved, const string& answer)
+                          DnsQueryOutcome outcome, const string& answer)
 {
     if (!fileQueue_) return;
 
@@ -180,7 +180,7 @@ void DnsLogger::logToFile(const string& domain, uint16_t type,
     // and the writing task builds the text.
     RestLogRecord rec;
     rec.type = type;
-    rec.resolved = resolved;
+    rec.outcome = static_cast<uint8_t>(outcome);
     rec.source = static_cast<uint8_t>(source);
     rec.ts = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     strncpy(rec.domain, domain.c_str(), sizeof(rec.domain) - 1);
@@ -207,13 +207,13 @@ void DnsLogger::logToTerminal(const string& domain, uint16_t type,
                                const string& clientAddr,
                                const string& clientMac,
                                DnsLogSource source,
-                               bool resolved, const string& answer)
+                               DnsQueryOutcome outcome, const string& answer)
 {
     // The sentence is built by `dnsLogQueryText` — the same one the file log
     // writes, with the stamp in front of it — so the two destinations cannot
     // drift apart.
     ESP_LOGI(TAG, "DNS: %s",
-             dnsLogQueryText(sourceTag(source), type, domain, resolved, answer,
+             dnsLogQueryText(sourceTag(source), type, domain, outcome, answer,
                              clientAddr, clientMac).c_str());
 }
 
@@ -221,7 +221,7 @@ void DnsLogger::logToRest(const string& domain, uint16_t type,
                            const string& clientAddr,
                            const string& clientMac,
                            DnsLogSource source,
-                           bool resolved, const string& answer)
+                           DnsQueryOutcome outcome, const string& answer)
 {
     if (!restQueue_) return;
 
@@ -230,7 +230,7 @@ void DnsLogger::logToRest(const string& domain, uint16_t type,
     // overwritten (ring buffer semantics) so the DNS task never blocks.
     RestLogRecord rec;
     rec.type = type;
-    rec.resolved = resolved;
+    rec.outcome = static_cast<uint8_t>(outcome);
     rec.source = static_cast<uint8_t>(source);
     rec.ts = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     strncpy(rec.domain, domain.c_str(), sizeof(rec.domain) - 1);
@@ -570,7 +570,8 @@ void DnsLogger::writeFileLog(const RestLogRecord& rec)
     const core::LogStamp stamp = core::logStampFromLocal(local, clockSet);
 
     const string body = dnsLogQueryText(sourceTag(static_cast<DnsLogSource>(rec.source)),
-                                        rec.type, rec.domain, rec.resolved,
+                                        rec.type, rec.domain,
+                                        static_cast<DnsQueryOutcome>(rec.outcome),
                                         rec.answer, rec.client, rec.mac);
     if (fileWriter_->append(dnsForwardedLogLine(stamp, body), stamp)) {
         writeFailures_ = 0;
@@ -603,7 +604,11 @@ string DnsLogger::buildRestJson(const RestLogRecord& rec) const
     json += "\",\"source\":\"";
     json += src;
     json += "\",\"resolved\":";
-    json += rec.resolved ? "true" : "false";
+    // The REST body keeps the boolean it always had, derived from the outcome:
+    // an external service that reads `resolved: false` for a name that does not
+    // exist must not start reading `false` only for "we gave up" (stage 216).
+    json += (rec.outcome == static_cast<uint8_t>(DnsQueryOutcome::Answered))
+                ? "true" : "false";
     json += ",\"answer\":\"";
     json += rec.answer;
     json += "\"}";

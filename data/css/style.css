@@ -453,6 +453,244 @@ input:focus, select:focus, textarea:focus {
     opacity: 0.9;
 }
 
+/* ─── Cache view page (stage 209) ──────────────────── */
+
+/* The heading with the cross of the cache view page: the cross belongs to the
+   page, not to the site header, so it sits on the title's own line at the far
+   right — where a window's close button is looked for. */
+.page-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.page-title-row h1 {
+    margin: 0;
+}
+
+.btn-close {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    font-size: 1.2rem;
+    line-height: 1;
+    padding: 0.35rem 0.75rem;
+    margin: 0;
+}
+
+.btn-close:hover {
+    background: var(--danger);
+    color: #fff;
+}
+
+.cache-view-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 1rem;
+}
+
+.cache-view-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 10rem;
+}
+
+.cache-view-filter label {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.cache-view-filter .field-with-clear {
+    min-width: 12rem;
+}
+
+/* The two buttons of the filter row line up with the fields, not with the labels. */
+.cache-view-actions {
+    flex-direction: row;
+    gap: 0.5rem;
+}
+
+/* The "⋯" menu of the filter row: a button rather than a labelled field, so it
+   keeps its own width at the far right of the row instead of stretching like the
+   fields do (`.files-menu-wrap` is what puts it at the right end). */
+.cache-view-menu-wrap {
+    display: flex;
+    align-items: flex-end;
+}
+
+/* The button itself is the size of the ones beside it and **square**: the operator
+   asked for its height to match "Clear cache" and its width to match its own
+   height. The numbers are the box of a `.btn` in this row — its 0.6rem padding
+   above and below plus 0.95rem of text at Arial's line height, measured at 36 px —
+   and the same 0.25rem bottom margin those buttons carry, so all three end on the
+   same line instead of the menu sitting a few pixels lower. */
+.cache-view-menu-wrap .files-menu-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    aspect-ratio: 1 / 1;
+    padding: 0;
+    margin: 0 0 0.25rem 0;
+    font-size: 1.15rem;
+    line-height: 1;
+}
+
+.cache-view-status {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    min-height: 1.2rem;
+    margin-bottom: 0.4rem;
+}
+
+/* The button that opens the cache view: centred under the Statistics block of the
+   Internal Cache page, which is where the operator asked for it — with the same
+   air under it as above it. Above, the card's own margin and the button's own
+   margin add up to 20 px; below, the button's 4 px plus this 1 rem is the same 20,
+   so the button does not sit on the footer. */
+.cache-view-open {
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+/* The selection column of the cache view: wide enough for the box, narrow enough
+   that it does not take room from the name. */
+.cache-view-select {
+    width: 2.4rem;
+    text-align: center;
+}
+
+/* The table fits the card instead of running past it. `table-layout: fixed` is what
+   makes these widths binding — before, the columns sized themselves and the address
+   column (a cache record can hold sixteen addresses) pushed `Uses` off the right
+   edge of the card, where it could only be reached by scrolling the table
+   sideways. The name column takes whatever is left, and a long name or a long IPv6
+   address wraps inside its own cell rather than widening the table. */
+#cache-view-table {
+    table-layout: fixed;
+}
+
+/* A cell's content wraps rather than widening the table. The **header** is the
+   exception: `anywhere` breaks a word wherever it has to, and a Russian column
+   called `Запросов` came out as `Запрос` / `ов` — a word broken in half reads as a
+   typo. Headers therefore break only where a space is, and the widths below are
+   sized to hold their longest word; a unit that does not fit after the label drops
+   to a line of its own instead. */
+#cache-view-table th {
+    white-space: normal;
+    overflow-wrap: normal;
+}
+
+#cache-view-table td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.cache-view-col-name {
+    width: auto;
+}
+
+.cache-view-col-type {
+    /* Wide enough for `AAAA` on one line and for the header word (`Type`, `Тип`):
+       one pixel narrower and the type itself breaks in half, which is what a fixed
+       layout with `overflow-wrap: anywhere` does to a word that does not fit. */
+    width: 4.5rem;
+}
+
+.cache-view-col-addr {
+    /* As wide as the longest IPv4 address the column can hold, and no wider: the
+       widths here are a budget, and every rem the address takes is a rem the name
+       column does not have. A longer IPv6 address wraps inside its cell. */
+    width: 9rem;
+}
+
+.cache-view-col-num {
+    width: 5rem;
+}
+
+/* The three columns whose header carries the unit — "TTL (s)", "Left (s)",
+   "Age (s)" — and the wide `Uses`, are sized for the longer of the two languages,
+   because one stylesheet serves both: the Russian "Осталось" and "Запросов" are
+   wider than "Left (s)" and "Uses". The English header still reads on one line; in
+   Russian the unit follows the label on a second line, which is what a table does
+   when a word and its unit together do not fit — the alternative was a name column
+   too narrow for the 28 characters it has to show. */
+.cache-view-col-left {
+    width: 6rem;
+}
+
+.cache-view-col-age {
+    width: 5.5rem;
+}
+
+/* The two headers whose unit does not fit beside their label are centred: that is
+   what puts the wrapped "(s)"/"(с)" under the word instead of leaving it hanging at
+   the left edge (the cell values themselves stay left-aligned, as numbers in a
+   column are read from their first digit). */
+#cache-view-table th.cache-view-col-left,
+#cache-view-table th.cache-view-col-age {
+    text-align: center;
+}
+
+.cache-view-col-uses {
+    width: 6rem;
+}
+
+/* The addresses of one record sit one per line; a little leading keeps a row of
+   ten of them readable without the lines running together. */
+.cache-view-addr div {
+    line-height: 1.35;
+}
+
+/* The pager: first/previous, the pages around the one that is open, next/last.
+   A disabled button is drawn, not hidden — the ends of the list have to look like
+   ends rather than like a pager that lost its buttons. */
+.pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    margin-top: 0.8rem;
+}
+
+.pager-btn {
+    min-width: 2.2rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.pager-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+}
+
+.pager-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* The page that is open: not a button, because pressing it would reload what is
+   already on screen. */
+.pager-current {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+
+.pager-gap {
+    color: var(--text-secondary);
+    padding: 0 0.3rem;
+}
+
 /* ─── Toggle Switch ──────────────────────────────── */
 
 .dns-filter-row {

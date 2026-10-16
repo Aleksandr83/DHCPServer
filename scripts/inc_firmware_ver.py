@@ -8,9 +8,15 @@ Usage:
     python scripts/inc_firmware_ver.py --rel       # increment release (xxx +1)
     python scripts/inc_firmware_ver.py --min-only  # only refresh the build date
 
-Every run also sets ``CONFIG_FW_MIN_DATETIME`` (the lowest date/time the web
-page accepts for a manual clock setting) to the current date and time — the
-build moment — so the clock can never be set to a meaningless value (1970).
+A version bump also stamps the version's year and month (``CONFIG_FW_VER_YEAR``
+and ``CONFIG_FW_VER_MONTH`` — the ``YY.MM`` part of the version string) with the
+current date, so a bump can never leave the version reporting the month of an
+earlier release. ``--min-only`` deliberately leaves ``YY.MM`` alone: it changes
+no version data.
+
+It also sets ``CONFIG_FW_MIN_DATETIME`` (the lowest date/time the web page
+accepts for a manual clock setting) to the current date and time — the build
+moment — so the clock can never be set to a meaningless value (1970).
 
 Separate file: kconfig_tools.py (shared helpers for both version scripts).
 
@@ -130,6 +136,12 @@ def increment(increment_sub=True, min_only=False):
     name = "subrelease" if increment_sub else "release"
     print(f"Firmware {name} incremented: {old_val} → {new_val}")
     print(f"Version file: {sdkconfig_path}")
+
+    # Stamp the version's own date (YY.MM) with the build moment: a release
+    # bumped in October must not keep reporting September.
+    now_year, now_month = kcfg.current_year_month()
+    print(f"Version date (YY.MM): {now_year:02d}.{now_month:02d}")
+    kcfg.apply_year_month(now_year, now_month)
 
     # Keep the minimum manual clock setting at the build moment (the page
     # refuses earlier values — see CONFIG_FW_MIN_DATETIME in Kconfig.projbuild).

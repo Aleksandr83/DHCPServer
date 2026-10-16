@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="dns">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cache View — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <!-- The page the "Cache view" button of Internal Cache opens (stage 209):
+             it is a page of its own, and the cross is its way back — it closes the
+             tab when the button opened one, and takes the operator to the Internal
+             Cache page when he opened this one himself. -->
+        <div class="page-title-row">
+            <h1 data-i18n="cache_view.title">Cache View</h1>
+            <button type="button" class="btn btn-close" id="cache-view-close"
+                    onclick="closeCacheView()">&#215;</button>
+        </div>
+
+        <div class="card">
+            <div class="cache-view-filters">
+                <div class="cache-view-filter">
+                    <label for="cache-view-name" data-i18n="cache_view.filter_name">Name</label>
+                    <div class="field-with-clear">
+                        <input type="text" id="cache-view-name" autocomplete="off" spellcheck="false">
+                        <button type="button" class="field-clear"
+                                id="cache-view-name-clear">&#215;</button>
+                    </div>
+                </div>
+                <div class="cache-view-filter">
+                    <label for="cache-view-type" data-i18n="cache_view.filter_type">Type</label>
+                    <select id="cache-view-type">
+                        <option value="" data-i18n="cache_view.type_all">All</option>
+                        <option value="A">A</option>
+                        <option value="AAAA">AAAA</option>
+                    </select>
+                </div>
+                <div class="cache-view-filter cache-view-actions">
+                    <button type="button" class="btn" onclick="reloadCacheView()"
+                            data-i18n="cache_view.refresh">Refresh</button>
+                    <button type="button" class="btn btn-danger" onclick="clearCacheFromView()"
+                            data-i18n="cache_view.clear">Clear cache</button>
+                </div>
+                <!-- The "⋯" menu with the actions that work on the ticked rows. It
+                     reuses the action-menu of the file explorer (`.files-menu*`):
+                     that is one dropdown, positioned from its button's rect and
+                     closed by a click anywhere else, and a second copy of it would
+                     be a second set of those rules to keep in step. It stands after
+                     the buttons at the far right of the row, and stays a button's
+                     width rather than stretching like a labelled field. -->
+                <div class="files-menu-wrap cache-view-menu-wrap">
+                    <button class="files-menu-btn" type="button" id="cache-view-menu-btn"
+                            aria-label="Actions">&#8943;</button>
+                    <div class="files-menu files-toolbar-menu" id="cache-view-menu">
+                        <button type="button" id="cache-view-menu-delete" class="danger"
+                                data-i18n="cache_view.delete">Delete</button>
+                    </div>
+                </div>
+            </div>
+            <p class="hint" data-i18n="cache_view.filters_hint">The name filter is a substring of the name, and it is the cache in PSRAM that is shown here, not the file on the card.</p>
+        </div>
+
+        <div class="card">
+            <div class="cache-view-status" id="cache-view-status"></div>
+            <p class="hint" id="cache-view-unavailable" style="display:none;"
+               data-i18n="cache_view.unavailable">Internal cache is unavailable — no PSRAM detected on this device.</p>
+            <div class="table-wrap">
+                <table id="cache-view-table">
+                    <thead>
+                        <tr>
+                            <th class="cache-view-select">
+                                <input type="checkbox" id="cache-view-select-all">
+                            </th>
+                            <th class="cache-view-col-name" data-i18n="cache_view.col_name">Name</th>
+                            <th class="cache-view-col-type" data-i18n="cache_view.col_type">Type</th>
+                            <th class="cache-view-col-addr" data-i18n="cache_view.col_address">Address</th>
+                            <th class="cache-view-col-num" data-i18n="cache_view.col_ttl">TTL (s)</th>
+                            <th class="cache-view-col-left" data-i18n="cache_view.col_left">Left (s)</th>
+                            <th class="cache-view-col-num cache-view-col-age" data-i18n="cache_view.col_age">Age (s)</th>
+                            <th class="cache-view-col-num cache-view-col-uses" data-i18n="cache_view.col_uses">Uses</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cache-view-rows"></tbody>
+                </table>
+            </div>
+            <div class="pager" id="cache-view-pager"></div>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        /* The cache view (stage 209).
+
+           One page of records at a time, asked from the device with the filter the
+           operator typed: a pool of tens of thousands of records cannot travel in
+           one answer, and the pager is what makes the far end of it reachable.
+           The order is the pool's own, which shifts while records are stored and
+           evicted — a viewer looks at the cache, it does not report on it — so the
+           name filter is what actually finds a record, and every interaction reloads
+           the page that is on screen. */
+
+        const cacheView = { offset: 0, limit: 100, total: 0, pages: 1, page: 1 };
+
+        // The ticked rows, keyed by "name|type": a record of the cache is those two
+        // together, and the same name appears twice (A and AAAA) often enough that
+        // a key of the name alone would tick both.
+        const cacheViewSelected = new Set();
+
+        function cacheViewKey(item) {
+            return item.name + '|' + item.type;
+        }
+
+        /* Names longer than this are cut and ended with "..." — the operator named
+           `cache8-fra1.steamcontent.com` (28 characters) as the width the column
+           should hold, and one name of a content network is longer than the whole
+           rest of the row. Only the cell is cut: the delete action below asks for
+           the record by its **whole** name, and the full name stays in the cell's
+           tooltip, because a truncated name is still a name the operator has to
+           recognise before removing it. */
+        const kCacheViewNameMaxLen = 28;
+
+        function cacheViewShortName(name) {
+            if (name.length <= kCacheViewNameMaxLen) return name;
+            return name.slice(0, kCacheViewNameMaxLen) + '...';
+        }
+
+        /* "1 записей" is not Russian and "1 records" is not English, and both are
+           what a plain count would print. Russian needs three forms of the word
+           (1 запись, 2 записи, 5 записей) and English two, so the number and the
+           word are put together here rather than concatenated at each call site. */
+        function cacheViewRecordsText(count) {
+            const ru = document.documentElement.lang === 'ru';
+            if (ru) {
+                const mod10 = count % 10;
+                const mod100 = count % 100;
+                if (mod10 === 1 && mod100 !== 11) return count + ' ' + tr('cache_view.record_one');
+                if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+                    return count + ' ' + tr('cache_view.record_few');
+                }
+                return count + ' ' + tr('cache_view.record_many');
+            }
+            return count + ' ' + tr(count === 1 ? 'cache_view.record_one' : 'cache_view.record_many');
+        }
+
+        function cacheViewFilterName() {
+            return document.getElementById('cache-view-name').value.trim();
+        }
+
+        function cacheViewFilterType() {
+            return document.getElementById('cache-view-type').value;
+        }
+
+        async function loadCacheViewPage(retry = true) {
+            const url = '/api/dns/internal-cache/entries'
+                + '?offset=' + cacheView.offset
+                + '&limit=' + cacheView.limit
+                + '&name=' + encodeURIComponent(cacheViewFilterName())
+                + '&type=' + encodeURIComponent(cacheViewFilterType());
+
+            const data = await fetchJSON(url);
+            const status = document.getElementById('cache-view-status');
+            const unavailable = document.getElementById('cache-view-unavailable');
+            const table = document.getElementById('cache-view-table');
+
+            if (!data || !data.available) {
+                // "No PSRAM" is not an empty cache, and the two must not read alike:
+                // no pager is drawn at all, because there is nothing to page through.
+                status.textContent = '';
+                unavailable.style.display = '';
+                table.style.display = 'none';
+                document.getElementById('cache-view-pager').innerHTML = '';
+                document.getElementById('cache-view-rows').innerHTML = '';
+                updateCacheViewSelection();
+                return;
+            }
+            unavailable.style.display = 'none';
+            table.style.display = '';
+
+            cacheView.total = data.total || 0;
+            cacheView.pages = data.pages || 1;
+            cacheView.page = data.page || 1;
+            cacheView.offset = data.offset || 0;
+            cacheView.limit = data.limit || cacheView.limit;
+
+            // Emptying a page (the ticked rows all deleted) leaves the offset past
+            // the end of what is left; the operator is put back on the last page
+            // that has records rather than on an empty one. Once only: a second
+            // empty answer means the pool really is empty.
+            if (retry && !data.items.length && cacheView.total > 0 && cacheView.page > 1) {
+                cacheView.offset = (cacheView.pages - 1) * cacheView.limit;
+                return loadCacheViewPage(false);
+            }
+
+            renderRows(data.items || []);
+            renderPager(cacheView.page, cacheView.pages, cacheView.total);
+        }
+
+        function renderRows(items) {
+            const tbody = document.getElementById('cache-view-rows');
+            tbody.innerHTML = '';
+            // A selection belongs to the records that were on screen: another page
+            // or another filter is another set of rows, and ticking a record the
+            // operator can no longer see is how the wrong one gets deleted.
+            cacheViewSelected.clear();
+            for (const item of items) {
+                const row = document.createElement('tr');
+
+                const selectCell = document.createElement('td');
+                selectCell.className = 'cache-view-select';
+                const tick = document.createElement('input');
+                tick.type = 'checkbox';
+                tick.dataset.key = cacheViewKey(item);
+                tick.onchange = () => {
+                    if (tick.checked) cacheViewSelected.add(cacheViewKey(item));
+                    else cacheViewSelected.delete(cacheViewKey(item));
+                    updateCacheViewSelection();
+                };
+                selectCell.appendChild(tick);
+                row.appendChild(selectCell);
+
+                // Cells are filled with textContent, never with markup: a cache name
+                // comes from a DNS query, and any client on the LAN can ask for a
+                // name that looks like HTML.
+                const nameCell = document.createElement('td');
+                nameCell.textContent = cacheViewShortName(item.name);
+                nameCell.title = item.name;
+                row.appendChild(nameCell);
+
+                const typeCell = document.createElement('td');
+                typeCell.textContent = item.type;
+                row.appendChild(typeCell);
+
+                const addrCell = document.createElement('td');
+                const addresses = (item.a4 || []).concat(item.a6 || []);
+                if (!addresses.length) {
+                    addrCell.textContent = '—';
+                } else {
+                    // One address per line: a record can hold sixteen of them, and a
+                    // row of comma-separated addresses cannot be read.
+                    addrCell.className = 'cache-view-addr';
+                    for (const addr of addresses) {
+                        const line = document.createElement('div');
+                        line.textContent = addr;
+                        addrCell.appendChild(line);
+                    }
+                }
+                row.appendChild(addrCell);
+
+                const ttlCell = document.createElement('td');
+                ttlCell.textContent = item.ttl ? String(item.ttl) : '—';
+                row.appendChild(ttlCell);
+
+                // "Left" is the arithmetic and "expired" is the policy: with "Ignore
+                // TTL" on, a record past its TTL is kept on purpose, and the row says
+                // both rather than calling a served record dead. The unit lives in the
+                // header, so the numbers here are plain.
+                const leftCell = document.createElement('td');
+                leftCell.textContent = String(item.remaining);
+                if (item.expired) {
+                    leftCell.textContent += ' (' + tr('cache_view.expired') + ')';
+                    leftCell.style.color = '#f59e0b';
+                }
+                row.appendChild(leftCell);
+
+                const ageCell = document.createElement('td');
+                ageCell.textContent = String(item.age);
+                row.appendChild(ageCell);
+
+                const usesCell = document.createElement('td');
+                usesCell.textContent = item.uses;
+                row.appendChild(usesCell);
+
+                tbody.appendChild(row);
+            }
+
+            if (!items.length) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.colSpan = 8;
+                cell.textContent = cacheView.total
+                    ? tr('cache_view.hidden_by_page')
+                    : (cacheViewFilterName() || cacheViewFilterType()
+                        ? tr('cache_view.no_match')
+                        : tr('cache_view.empty'));
+                row.appendChild(cell);
+                tbody.appendChild(row);
+            }
+
+            updateCacheViewSelection();
+        }
+
+        /* The header box ticks every row of the page and untick it again; the menu's
+           Delete is disabled while nothing is ticked — a disabled item says "tick
+           something first" better than an error after the click (the file explorer
+           made the same choice for its bulk actions). */
+        function updateCacheViewSelection() {
+            const boxes = Array.from(document.querySelectorAll('#cache-view-rows input[type="checkbox"]'));
+            const all = document.getElementById('cache-view-select-all');
+            all.checked = boxes.length > 0 && boxes.every(b => b.checked);
+            all.indeterminate = !all.checked && boxes.some(b => b.checked);
+            all.disabled = boxes.length === 0;
+
+            const del = document.getElementById('cache-view-menu-delete');
+            del.disabled = cacheViewSelected.size === 0;
+        }
+
+        /* The pager the operator asked for: first, previous, the pages around the
+           one that is open, and the two ends — with the pages in between written as
+           an ellipsis rather than listed (a full pool makes four figures of them). */
+        function renderPager(page, pages, total) {
+            const pager = document.getElementById('cache-view-pager');
+            pager.innerHTML = '';
+
+            const addButton = (label, target, enabled, current) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'pager-btn' + (current ? ' pager-current' : '');
+                b.textContent = label;
+                b.disabled = !enabled;
+                if (enabled) b.onclick = () => gotoCachePage(target);
+                pager.appendChild(b);
+            };
+
+            addButton(tr('cache_view.pager_first'), 1, page > 1, false);
+            addButton(tr('cache_view.pager_prev'), page - 1, page > 1, false);
+
+            for (const entry of pagerWindow(page, pages)) {
+                if (entry === 0) {
+                    const dots = document.createElement('span');
+                    dots.className = 'pager-gap';
+                    dots.textContent = '…';
+                    pager.appendChild(dots);
+                } else {
+                    addButton(String(entry), entry, entry !== page, entry === page);
+                }
+            }
+
+            addButton(tr('cache_view.pager_next'), page + 1, page < pages, false);
+            addButton(tr('cache_view.pager_last'), pages, page < pages, false);
+
+            const status = document.getElementById('cache-view-status');
+            status.textContent = cacheViewRecordsText(total)
+                + ' · ' + tr('cache_view.page') + ' ' + page + ' / ' + pages;
+        }
+
+        /* The page numbers a pager shows: the ends, the current page with one
+           neighbour on each side, and a zero for every gap between them. */
+        function pagerWindow(page, pages) {
+            const wanted = new Set([1, pages, page]);
+            for (let p = page - 1; p <= page + 1; p++) {
+                if (p >= 1 && p <= pages) wanted.add(p);
+            }
+            const sorted = Array.from(wanted).sort((a, b) => a - b);
+            const out = [];
+            let prev = 0;
+            for (const p of sorted) {
+                if (prev && p - prev > 1) out.push(0);
+                out.push(p);
+                prev = p;
+            }
+            return out;
+        }
+
+        function gotoCachePage(page) {
+            if (page < 1 || page > cacheView.pages) return;
+            cacheView.offset = (page - 1) * cacheView.limit;
+            loadCacheViewPage().catch(reportCacheViewError);
+        }
+
+        function reloadCacheView() {
+            loadCacheViewPage().catch(reportCacheViewError);
+        }
+
+        function reportCacheViewError(err) {
+            document.getElementById('cache-view-status').textContent =
+                tr('common.error') + ': ' + (err && err.message ? err.message : err);
+        }
+
+        /* The "⋯" menu, placed from its button's rect exactly as the file explorer
+           places its own menu (see the class comment in the CSS): a menu inside the
+           horizontally scrollable table would be clipped. */
+        function closeCacheViewMenu() {
+            document.querySelectorAll('.files-menu.open').forEach(m => m.classList.remove('open'));
+        }
+
+        function toggleCacheViewMenu() {
+            const btn = document.getElementById('cache-view-menu-btn');
+            const menu = document.getElementById('cache-view-menu');
+            const wasOpen = menu.classList.contains('open');
+            closeCacheViewMenu();
+            if (wasOpen) return;
+
+            menu.classList.add('open');
+            const r = btn.getBoundingClientRect();
+            const menuRect = menu.getBoundingClientRect();
+            let top = r.bottom + 4;
+            if (top + menuRect.height > window.innerHeight - 8) {
+                top = Math.max(8, r.top - menuRect.height - 4);
+            }
+            let left = r.right - menuRect.width;
+            if (left < 8) left = 8;
+            menu.style.top = top + 'px';
+            menu.style.left = left + 'px';
+        }
+
+        document.addEventListener('click', () => closeCacheViewMenu());
+        window.addEventListener('scroll', () => closeCacheViewMenu(), true);
+        window.addEventListener('resize', () => closeCacheViewMenu());
+
+        /* The records that were ticked are asked for by name **and** type, one
+           request each: the endpoint forgets one record, and a request that names
+           two would be a guess at what "the record" means. What happened is counted
+           rather than assumed — a record that another client asked for again between
+           the tick and the click is gone from the page and not from the pool. */
+        async function deleteSelectedCacheEntries() {
+            const keys = Array.from(cacheViewSelected);
+            if (!keys.length) return;
+
+            const answer = await showDialog({
+                title: tr('cache_view.confirm_delete'),
+                hint: cacheViewRecordsText(keys.length),
+                okLabel: tr('cache_view.delete'),
+                danger: true
+            });
+            if (!answer) return;
+
+            let done = 0;
+            for (const key of keys) {
+                const parts = key.split('|');
+                try {
+                    // `postJSON` answers with the parsed body whatever the status,
+                    // so "ok" is what counts here, not the absence of a throw: a
+                    // record that another tick already removed answers 404 and is
+                    // simply not counted.
+                    const res = await postJSON('/api/dns/internal-cache/entry',
+                                               { name: parts[0], type: parts[1] });
+                    if (res && res.status === 'ok') done++;
+                } catch (err) {
+                    // A request that never arrived leaves the record in the pool;
+                    // the count below is what tells the operator that.
+                }
+            }
+
+            await showDialog({
+                title: tr('cache_view.deleted'),
+                hint: done + ' / ' + cacheViewRecordsText(keys.length),
+                hideCancel: true
+            });
+            await loadCacheViewPage();
+        }
+
+        async function clearCacheFromView() {
+            const answer = await showDialog({
+                title: tr('cache_view.confirm_clear'),
+                hint: tr('cache_view.confirm_clear_hint'),
+                okLabel: tr('cache_view.clear'),
+                danger: true
+            });
+            if (!answer) return;
+            try {
+                await postJSON('/api/dns/internal-cache/reset', {});
+            } catch (err) {
+                await showDialog({ title: tr('common.error'),
+                                   hint: err.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                return;
+            }
+            cacheView.offset = 0;
+            loadCacheViewPage().catch(reportCacheViewError);
+        }
+
+        /* The cross: this page opens in the tab the button was pressed in (stage 211),
+           so leaving it is a step back, not a closed tab. Going back is what keeps
+           the Internal Cache page as the operator left it (its scroll position and
+           its own state); the address is used when there is no step to take back —
+           a bookmark or a typed address has no previous page of this device. */
+        function closeCacheView() {
+            if (document.referrer && document.referrer.indexOf('dns_internal.html') !== -1) {
+                history.back();
+                return;
+            }
+            window.location.href = 'dns_internal.html';
+        }
+
+        /* The name filter runs as the operator types, but the device is asked once
+           per pause rather than once per letter. */
+        let cacheViewFilterTimer = null;
+        function onCacheViewNameInput() {
+            if (cacheViewFilterTimer) clearTimeout(cacheViewFilterTimer);
+            cacheViewFilterTimer = setTimeout(() => {
+                cacheViewFilterTimer = null;
+                gotoFirstCachePage();
+            }, 400);
+        }
+
+        function gotoFirstCachePage() {
+            cacheView.offset = 0;
+            loadCacheViewPage().catch(reportCacheViewError);
+        }
+
+        // True once the first answer arrived, so a language change redraws the pager
+        // (its labels and its status line are built in JavaScript) only when there
+        // is one on screen.
+        let cacheViewRowsLoaded = false;
+
+        document.addEventListener('i18n-applied', () => {
+            document.getElementById('cache-view-close').title = tr('cache_view.close');
+            document.getElementById('cache-view-name').placeholder = tr('cache_view.filter_name_placeholder');
+            const menuBtn = document.getElementById('cache-view-menu-btn');
+            menuBtn.title = tr('cache_view.menu');
+            menuBtn.setAttribute('aria-label', tr('cache_view.menu'));
+            document.getElementById('cache-view-select-all').title = tr('cache_view.select_all');
+            if (cacheViewRowsLoaded) renderPager(cacheView.page, cacheView.pages, cacheView.total);
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const field = document.getElementById('cache-view-name');
+            field.oninput = onCacheViewNameInput;
+            field.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (cacheViewFilterTimer) clearTimeout(cacheViewFilterTimer);
+                    gotoFirstCachePage();
+                }
+            };
+            document.getElementById('cache-view-name-clear').onclick = () => {
+                field.value = '';
+                field.focus();
+                gotoFirstCachePage();
+            };
+            document.getElementById('cache-view-type').onchange = gotoFirstCachePage;
+
+            document.getElementById('cache-view-menu-btn').onclick = (e) => {
+                // The menu closes on any click in the document; without this the one
+                // that opened it would close it again immediately.
+                e.stopPropagation();
+                toggleCacheViewMenu();
+            };
+            document.getElementById('cache-view-menu').onclick = (e) => e.stopPropagation();
+            document.getElementById('cache-view-menu-delete').onclick = () => {
+                closeCacheViewMenu();
+                deleteSelectedCacheEntries().catch(reportCacheViewError);
+            };
+
+            document.getElementById('cache-view-select-all').onchange = (e) => {
+                const wanted = e.target.checked;
+                cacheViewSelected.clear();
+                document.querySelectorAll('#cache-view-rows input[type="checkbox"]')
+                    .forEach(box => {
+                        box.checked = wanted;
+                        if (wanted) cacheViewSelected.add(box.dataset.key);
+                    });
+                updateCacheViewSelection();
+            };
+
+            loadCacheViewPage().then(() => { cacheViewRowsLoaded = true; })
+                .catch(reportCacheViewError);
+        });
+    </script>
+</body>
+</html>

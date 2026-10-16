@@ -138,7 +138,13 @@
 
             setAuth(user, pass);
             try {
-                const resp = await apiFetch('/api/version');
+                // The login form's own endpoint, and the only request in the
+                // interface that means "somebody is logging in": the browser
+                // attaches the password to *every* request, so without this the
+                // device cannot tell a login from a page load. The session check
+                // above (`/api/version`) is deliberately not a login — nothing
+                // was typed into it.
+                const resp = await apiFetch('/api/auth/login', { method: 'POST' });
                 if (resp.status === 200 || resp.ok) {
                     // Save to session storage
                     sessionStorage.setItem('dhcp_auth', JSON.stringify({ user, pass }));

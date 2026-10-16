@@ -11,8 +11,8 @@ namespace core {
  * @file AuthLogFormat.h
  * @brief How an authorisation attempt reads in `Auth.log` (stage 205).
  *
- * The operator asked for a file that holds the login attempts, and for three
- * things to be findable in it:
+ * The operator asked for a file that holds the login attempts, and for four things
+ * to be findable in it:
  *
  *   * **a refused password** — with the attempt number and the budget, so a
  *     reader can see a guest mistyping three times as easily as a machine working
@@ -20,14 +20,20 @@ namespace core {
  *   * **a lockout** — the moment the device stopped answering that address, and
  *     for how long;
  *   * **getting in after failing** — the line that answers the only question these
- *     three leave open: was it the same person, or somebody who guessed?
+ *     leave open: was it the same person, or somebody who guessed?
+ *   * **a login through the form** — added 16.10.2026, when the operator pointed
+ *     out that a correct password typed into the login form was silent: he had
+ *     asked for a record of logins, and the file held everything about a login
+ *     except the one that went right.
  *
- * A successful login with **no** failures before it is deliberately not written:
- * the interface asks for credentials on every request (HTTP Basic), so a page that
- * polls the device would produce a line every few seconds — thousands an hour —
- * and the file would stop being a record of attempts and become a record of
- * browsing. That is the operator's decision, and it is why only three sentences
- * exist here.
+ * Only `authLogWritesSuccess()` decides which of the successes are written, and it
+ * exists because a correct password is **not** an event at the HTTP layer: the
+ * interface authenticates with Basic on every request, so a page load is dozens of
+ * requests carrying the same credentials. Writing each of them would turn the file
+ * into a record of browsing (thousands of lines an hour), which is what this file
+ * is deliberately not. A login form is an event, so the page announces it with one
+ * request of its own (`POST /api/auth/login`), and that request — and only that
+ * request — writes the line even when nothing failed before it.
  *
  * The text is built without its timestamp — `ErrorLogCore` adds that, exactly as
  * it does for the journal — so the sentences can be checked on a host, which is
@@ -52,10 +58,12 @@ inline std::string authLockoutText(const std::string& clientIp, uint32_t lockout
  * @brief `logged in from 192.168.1.5 after 3 failed attempts`.
  *
  * @param failedBefore how many attempts that address had spent before it got in.
- *                     Zero (nothing to recover from) is said plainly rather than
- *                     dressed up as "after 0 failed attempts" — the caller does
- *                     not write that line at all today, and a sentence that cannot
- *                     be misread is worth the branch.
+ *                     Zero (nothing to recover from) says the login plainly —
+ *                     `logged in from 192.168.1.5` — because "after 0 failed
+ *                     attempts" would be a sentence nobody should have to read
+ *                     twice. Since 16.10.2026 that plain form is written as well:
+ *                     it is what the login form reports when the password was
+ *                     right the first time.
  */
 inline std::string authLoginText(const std::string& clientIp, uint32_t failedBefore)
 {
@@ -63,6 +71,27 @@ inline std::string authLoginText(const std::string& clientIp, uint32_t failedBef
 
     return "logged in from " + clientIp + " after " + std::to_string(failedBefore) +
            (failedBefore == 1 ? " failed attempt" : " failed attempts");
+}
+
+/**
+ * @brief Does this successful authentication belong in `Auth.log`?
+ *
+ * Two things are events, and this is the whole rule:
+ *
+ *   * **the login form was submitted** (`fromLoginForm`) — a person arriving. The
+ *     page says so in a request of its own (`POST /api/auth/login`); nothing else
+ *     claims to be a login, so the credentials the browser attaches to every other
+ *     request cannot pretend to be one.
+ *   * **the address had spent attempts before it got in** (`failedBefore > 0`) —
+ *     the line stage 205 added, which is what tells a guest who mistyped from
+ *     somebody working through a list.
+ *
+ * @param fromLoginForm the request came from the login form, not from a page.
+ * @param failedBefore  attempts that address had spent before this success.
+ */
+inline bool authLogWritesSuccess(bool fromLoginForm, uint32_t failedBefore)
+{
+    return fromLoginForm || failedBefore > 0;
 }
 
 } // namespace core

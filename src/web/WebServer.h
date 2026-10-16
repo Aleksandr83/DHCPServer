@@ -169,6 +169,7 @@ private:
 
     static esp_err_t getStatusHandler(httpd_req* req)  { return RestApi::handleGetStatus(req); }
     static esp_err_t getVersionHandler(httpd_req* req) { return RestApi::handleGetVersion(req); }
+    static esp_err_t postAuthLoginHandler(httpd_req* req) { return RestApi::handlePostAuthLogin(req); }
     static esp_err_t getDhcpSettingsHandler(httpd_req* req)  { return RestApi::handleGetDhcpSettings(req); }
     static esp_err_t postDhcpSettingsHandler(httpd_req* req) { return RestApi::handlePostDhcpSettings(req); }
     static esp_err_t getStaticBindingsHandler(httpd_req* req)  { return RestApi::handleGetStaticBindings(req); }
@@ -209,6 +210,8 @@ private:
     static esp_err_t postInternalCacheSaveHandler(httpd_req* req) { return RestApi::handlePostInternalCacheSave(req); }
     static esp_err_t postInternalCacheLoadHandler(httpd_req* req) { return RestApi::handlePostInternalCacheLoad(req); }
 static esp_err_t postInternalCacheResetHandler(httpd_req* req) { return RestApi::handlePostInternalCacheReset(req); }
+    static esp_err_t getInternalCacheEntriesHandler(httpd_req* req) { return RestApi::handleGetInternalCacheEntries(req); }
+    static esp_err_t postInternalCacheEntryDeleteHandler(httpd_req* req) { return RestApi::handlePostInternalCacheEntryDelete(req); }
     static esp_err_t getTimeSettingsHandler(httpd_req* req) { return RestApi::handleGetTimeSettings(req); }
     static esp_err_t postTimeSettingsHandler(httpd_req* req) { return RestApi::handlePostTimeSettings(req); }
     static esp_err_t postTimeSettingsResetHandler(httpd_req* req) { return RestApi::handlePostTimeSettingsReset(req); }

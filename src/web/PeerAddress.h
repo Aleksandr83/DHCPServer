@@ -3,9 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 
+#include "../core/IpText.h"
 #include "../core/Subnet.h"
 
 // Like RouteTable.h and RedirectPolicy.h, this header is compiled on a host as
@@ -41,15 +41,6 @@ struct PeerAddress {
 
 namespace detail {
 
-/** @brief Four bytes as a host-order IPv4 address — the order `Subnet` works in. */
-inline uint32_t ipv4HostOrder(const uint8_t* bytes)
-{
-    return (static_cast<uint32_t>(bytes[0]) << 24) |
-           (static_cast<uint32_t>(bytes[1]) << 16) |
-           (static_cast<uint32_t>(bytes[2]) << 8) |
-           static_cast<uint32_t>(bytes[3]);
-}
-
 /** @brief True for `::ffff:a.b.c.d` — an IPv4 address in an IPv6 coat. */
 inline bool isV4Mapped(const uint8_t* bytes)
 {
@@ -57,56 +48,6 @@ inline bool isV4Mapped(const uint8_t* bytes)
         if (bytes[i] != 0) return false;
     }
     return bytes[10] == 0xFF && bytes[11] == 0xFF;
-}
-
-/**
- * @brief IPv6 text (RFC 5952 shape): lower case, no leading zeros, the longest
- *        run of zero groups — two or more, the first when two runs are equal —
- *        written as `::`.
- */
-inline std::string ipv6Text(const uint8_t* bytes)
-{
-    uint16_t groups[8];
-    for (int i = 0; i < 8; ++i) {
-        groups[i] = static_cast<uint16_t>((static_cast<uint16_t>(bytes[2 * i]) << 8) |
-                                          static_cast<uint16_t>(bytes[2 * i + 1]));
-    }
-
-    int bestStart = -1;
-    int bestLen = 0;
-    int runStart = -1;
-    for (int i = 0; i <= 8; ++i) {
-        const bool zero = (i < 8) && groups[i] == 0;
-        if (zero) {
-            if (runStart < 0) runStart = i;
-            continue;
-        }
-        if (runStart >= 0) {
-            const int len = i - runStart;
-            if (len > bestLen) {
-                bestLen = len;
-                bestStart = runStart;
-            }
-            runStart = -1;
-        }
-    }
-    if (bestLen < 2) bestStart = -1;   // one zero group is a zero, not a gap
-
-    std::string out;
-    for (int i = 0; i < 8; ++i) {
-        if (i == bestStart) {
-            out += "::";
-            i += bestLen - 1;
-            continue;
-        }
-        // The colon before a group is skipped when the group before it ended the
-        // compression, which is what turns `::` and a leading group into one `::`.
-        if (!out.empty() && out.back() != ':') out += ':';
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%x", static_cast<unsigned>(groups[i]));
-        out += buf;
-    }
-    return out;
 }
 
 } // namespace detail
@@ -140,23 +81,23 @@ inline PeerAddress peerAddressFromBytes(const uint8_t* bytes, size_t length)
     if (bytes == nullptr) return peer;
 
     if (length == 4) {
-        const uint32_t addr = detail::ipv4HostOrder(bytes);
+        const uint32_t addr = core::ip4HostOrder(bytes);
         if (addr == 0) return peer;
         peer.ipv4 = true;
         peer.ipv4HostOrder = addr;
-        peer.text = core::Subnet::toString(addr);
+        peer.text = core::ip4Text(bytes);
         return peer;
     }
 
     if (length == 16) {
         if (detail::isV4Mapped(bytes)) {
-            const uint32_t addr = detail::ipv4HostOrder(bytes + 12);
+            const uint32_t addr = core::ip4HostOrder(bytes + 12);
             if (addr == 0) return peer;
             peer.ipv4 = true;
             peer.ipv4HostOrder = addr;
-            peer.text = core::Subnet::toString(addr);
+            peer.text = core::ip4Text(bytes + 12);
         } else {
-            peer.text = detail::ipv6Text(bytes);
+            peer.text = core::ip6Text(bytes);
         }
     }
 

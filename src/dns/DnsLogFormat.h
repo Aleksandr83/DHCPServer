@@ -61,25 +61,74 @@ inline std::string dnsLogTypeText(uint16_t type)
 }
 
 /**
+ * @brief How a query ended — what the sentence says after `->`.
+ *
+ * It is an enumeration and not a boolean because the difference matters to whoever
+ * reads the file: `NXDOMAIN` is a statement about the **name** ("it does not
+ * exist", which a client caches for minutes), while the other four are statements
+ * about **us** (an upstream that stayed silent, a full table, a socket that would
+ * not open, a query this device refuses to forward on purpose). Until 16.10.2026
+ * every one of them printed `NXDOMAIN`, so a slow upstream read exactly like a
+ * name that does not exist - the operator's log showed three of those at 22:57 and
+ * the same name answered with addresses at 23:02, with nothing in the file to tell
+ * the two apart. A genuine NXDOMAIN from the upstream was invisible for the
+ * opposite reason: a forwarded answer was logged as `(forwarded)` whatever its
+ * return code.
+ */
+enum class DnsQueryOutcome {
+    Answered,   ///< an answer came back (a local host, a cache, or the upstream)
+    Nxdomain,   ///< the upstream said the name does not exist, and that is what the client got
+    Timeout,    ///< the upstream stayed silent: we stopped waiting and told the client NXDOMAIN
+    NoSlot,     ///< every forward slot was busy: NXDOMAIN was the answer the client got
+    NoSocket,   ///< the forward socket would not open: NXDOMAIN was the answer the client got
+    NoData,     ///< the name is known but has no record of this type: NODATA was the answer
+    Blocked,    ///< "block non-A/AAAA": NODATA was the answer, on purpose
+};
+
+/**
+ * @brief What the sentence prints after `->`, from the outcome and the answer.
+ *
+ * The three failures that end with a **fabricated NXDOMAIN** say so, and say why:
+ * `NXDOMAIN (timeout)` is a different fact from `NXDOMAIN`, and it is the one the
+ * reader needs. (Those three are recorded here rather than fixed: the operator
+ * asked for the log to tell the truth and left the behaviour alone, 16.10.2026.)
+ */
+inline std::string dnsLogOutcomeText(DnsQueryOutcome outcome,
+                                     const std::string& answer)
+{
+    switch (outcome) {
+    case DnsQueryOutcome::Answered: return answer;
+    case DnsQueryOutcome::Nxdomain: return "NXDOMAIN";
+    case DnsQueryOutcome::Timeout:  return "NXDOMAIN (timeout)";
+    case DnsQueryOutcome::NoSlot:   return "NXDOMAIN (no slot)";
+    case DnsQueryOutcome::NoSocket: return "NXDOMAIN (no socket)";
+    case DnsQueryOutcome::NoData:   return "(no data)";
+    case DnsQueryOutcome::Blocked:  return "(blocked)";
+    }
+    return answer;
+}
+
+/**
  * @brief The sentence both destinations show, without the stamp.
  *
  * @param tag        where the answer came from (`forward`, `local`, `cache`)
  * @param type       the query type
  * @param domain     the name that was asked
- * @param resolved   false for a name that did not resolve, which prints
- *                   `NXDOMAIN` in place of an answer
- * @param answer     the address that came back (ignored when unresolved)
+ * @param outcome    how the query ended — see @ref DnsQueryOutcome, and note that
+ *                   only `Nxdomain` prints `NXDOMAIN`
+ * @param answer     the address that came back (used by `Answered`)
  * @param clientAddr who asked
  * @param clientMac  its MAC, or "" when it is not known yet
  */
 inline std::string dnsLogQueryText(const std::string& tag, uint16_t type,
-                                   const std::string& domain, bool resolved,
+                                   const std::string& domain,
+                                   DnsQueryOutcome outcome,
                                    const std::string& answer,
                                    const std::string& clientAddr,
                                    const std::string& clientMac)
 {
     std::string text = "[" + tag + "] " + dnsLogTypeText(type) + " " + domain + " -> ";
-    text += resolved ? answer : std::string("NXDOMAIN");
+    text += dnsLogOutcomeText(outcome, answer);
     text += " (from " + clientAddr + " mac=" + clientMac + ")";
     return text;
 }

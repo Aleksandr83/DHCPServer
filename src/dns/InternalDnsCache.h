@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <functional>
 
+#include "CacheEntryView.h"
+
 namespace dhcp {
 namespace dns {
 
@@ -144,10 +146,18 @@ public:
      * after enable() — the same rule the usage counters follow, which come back
      * through store(..., countUse = false). Without this the page would show an
      * average that survived the reboot next to a split that starts from zero.
+     *
+     * The count comes back **with** the sums, and not as a courtesy: those sums
+     * are per hit and are divided by `hits_`, so a restore that left the count at
+     * zero would divide the whole history by the first few lookups of the new
+     * session. That is what happened until 16.10.2026 — the page showed a `Wait`
+     * larger than the average it is a part of (`Avg hit: 157µs · Wait: 615µs ·
+     * Work: 0µs`) and it never recovered, because the divisor was the number of
+     * hits since the reboot and nothing was going to catch up with the history.
      */
-    void restoreMeasurement(uint64_t waitUs, uint64_t walkedNodes, uint64_t stores,
-                            uint64_t evictScans, uint64_t evictScanUs,
-                            uint64_t evictScanNodes);
+    void restoreMeasurement(uint64_t hits, uint64_t waitUs, uint64_t walkedNodes,
+                            uint64_t stores, uint64_t evictScans,
+                            uint64_t evictScanUs, uint64_t evictScanNodes);
 
     // Progress callback: called periodically with the number of records
     // processed and the estimated total (0 until known). Used to render a
@@ -268,6 +278,37 @@ public:
     /// @brief True when a live record for that name/type is present.
     bool contains(const std::string& domain, uint16_t qtype) const;
 
+    /**
+     * @brief One page of records for the cache view page (stage 209).
+     *
+     * The walk over the pool happens under the arena lock and copies **only** the
+     * records of the page that was asked for, so the memory a request needs is
+     * bounded by the page (and the DNS path waits for a walk, not for a copy of the
+     * whole table). Counting the matches has to see every record — that is what the
+     * pager's total is — and a per-record lock/unlock pair would cost more than the
+     * single walk does.
+     *
+     * The order is the pool's own (bucket by bucket), which shifts as records are
+     * stored and evicted: a viewer is a look at the cache, not a report, and the name
+     * filter is what finds a record.
+     *
+     * `remaining` is the plain arithmetic (ttl − age, never below zero) while
+     * `expired` says whether the cache's **policy** considers the record dead — with
+     * "Ignore TTL" on, a record past its TTL is kept and served on purpose, and a
+     * viewer that called that "expired" would contradict the counters above it.
+     * A record with ttl 0 has no expiry at all.
+     */
+    CacheEntryPage entries(const CacheEntryQuery& query) const;
+
+    /**
+     * @brief Forget one record, as the delete button of the cache view asks.
+     *
+     * No file is touched: the pool loses the record, and the copy on the card is
+     * what it was — the same rule the whole-page reset follows.
+     * @return true when the record was there and is now gone.
+     */
+    bool erase(const std::string& domain, uint16_t qtype);
+
 private:
     // Fixed layout node — keeps the arena layout predictable.
     struct alignas(8) Node {
@@ -293,6 +334,9 @@ private:
 
     static uint32_t hashName(const char* s);
     static std::string lower(const std::string& s);
+
+    /// @brief One stored record as the cache view shows it (stage 209).
+    void fillEntryView(CacheEntryView& out, const Node& n, uint32_t now) const;
     // Milliseconds since boot, truncated to 32 bits. Never compare two of these
     // as absolute times — take the difference with elapsedMs().
     static uint32_t nowMs();

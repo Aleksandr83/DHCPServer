@@ -61,6 +61,10 @@ Get overall system status.
 > the pool is full: `internal_cache_evict_scans`, `internal_cache_evict_scan_ms`,
 > `internal_cache_evict_scan_nodes`. A device older than that stage does not send
 > them at all, and the page then keeps the average on the line it always had.
+> The split is a **per-hit** measurement, so it survives a restart together with
+> the number of hits it is divided by: a restored average wait describes the same
+> traffic the restored average does, and the first queries after a reboot move
+> both by the same amount.
 >
 > The cache block also answers **how often names are needed**:
 > `internal_cache_uses_total` (every counted use since the cache was enabled —
@@ -119,6 +123,40 @@ Get firmware version string.
 
 ---
 
+## POST /api/auth/login
+
+The login form's request. Nothing about the check differs from any other route —
+the same `Authorization: Basic …` header, the same attempt counter, the same
+lockout, the same `401 Unauthorized` with `WWW-Authenticate` — and the endpoint
+exists for what the request **means**: it is the only request in the interface that
+says "somebody is logging in".
+
+That distinction is what the authorisation log needs. The interface authenticates
+with Basic on **every** request, so a correct password is the normal state of a
+browsing session and not an event: a page load is dozens of requests, and a file
+that recorded each of them would be a record of browsing (thousands of lines an
+hour). So a successful login is written to `/fat/logs/Auth.log` in exactly two
+cases: this endpoint was called, or the address had spent failed attempts before it
+got in. Everything else that carries the right credentials writes nothing.
+
+**Request body:** none.
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok"
+}
+```
+
+> `401 Unauthorized` is the same answer as anywhere else, and it is also what the
+> login page shows as "invalid credentials". A login through the form adds one
+> line to `Auth.log` (`logged in from 192.168.1.5`, or
+> `logged in from 192.168.1.5 after 2 failed attempts` when there were attempts
+> before it); a script that authenticates with Basic never calls this endpoint, so
+> it appears in the file only when it failed first.
+
+---
+
 ## GET /api/dhcp/settings
 
 Get current DHCP server configuration.
@@ -133,6 +171,8 @@ Get current DHCP server configuration.
   "gateway": "192.168.1.1",
   "lease_time": 86400,
   "max_lease_entries": 0,
+  "log_file": false,
+  "log_file_size": 65536,
   "log_rest": false,
   "log_url": "",
   "log_auth": false,
@@ -143,6 +183,12 @@ Get current DHCP server configuration.
 
 > `log_rest` — send DHCP events (OFFER/ACK/NAK/RELEASE/DECLINE) to the
 > external REST URL `log_url`; `log_auth*` are the HTTP Basic credentials.
+> `log_file` (stage 212) is the switch that keeps the DHCP log in
+> `/fat/logs/Dhcp.log` and `log_file_size` is the cap it rotates at — one of the
+> three sizes the page offers (`65536` default, `131072`, `262144`); a value
+> outside that set is replaced by the default. What the file holds, and how it
+> differs from the terminal switch beside it, is described under
+> `POST /api/dhcp/settings` below.
 > `max_lease_entries` — hard cap on the lease/offer table: `0` = **auto**
 > (2× the configured pool size, clamped to 8..512) or an explicit 8..512.
 > `max_lease_entries_effective` (read-only) is the cap currently enforced and
@@ -236,6 +282,8 @@ Update DHCP server configuration.
   "gateway": "192.168.1.1",
   "lease_time": 86400,
   "max_lease_entries": 0,
+  "log_file": false,
+  "log_file_size": 65536,
   "log_rest": false,
   "log_url": "http://example.com/api/v1/dhcp/log",
   "log_auth": false,
@@ -250,6 +298,31 @@ Update DHCP server configuration.
   "status": "ok"
 }
 ```
+
+> `log_file` / `log_file_size` (stage 212) are applied to the running server at
+> once, like the other live switches: the file log is started or stopped and the
+> cap is applied to a writer that is already writing — a smaller cap archives a
+> file that is over it at once, a larger one raises the limit where it stands.
+> What the file receives is the whole DHCP record: the same lines the terminal
+> shows, built once and handed to both (stamp and `dhcp:` tag are added by the
+> file, so a line reads
+> `[2026-10-16 21:30:00] dhcp: DHCP OFFER 192.168.1.100 to …`). It holds the
+> client events — the probes, the packet that arrived, the OFFERs, ACKs and NAKs,
+> a DECLINE with the address held down, a RELEASE, a lease added or reserved, a
+> name lookup — plus the two lines that bracket the server's life (`started`,
+> `stopped`). Two consequences worth knowing:
+>
+> * **the terminal switch is not the file switch, and never was a complete one.**
+>   `log_terminal` governs the diagnostic half of the DHCP log (probes, the packet
+>   that arrived, refusals, lease bookkeeping, a lookup that found nothing); the
+>   handshake results (`DHCP OFFER …`, `DHCP ACK …`, `DHCP NAK …`, `DHCP DECLINE …`,
+>   `Lease released …`) have always been printed whatever that switch says. That is
+>   how the firmware behaved before this stage and it is unchanged; the file gets
+>   both halves, so nothing is lost by the terminal keeping its old manners.
+> * **a line is cut at 200 characters** (`ErrorLogCore::kMaxMessage`), the budget
+>   the whole family of file logs shares. The same text goes to the terminal, so the
+>   console is cut with the file: half a sentence in one and a whole one in the
+>   other would be the failure this arrangement exists to prevent.
 
 ---
 
@@ -429,7 +502,14 @@ Get DNS server configuration.
 > logging destination: the answers that came from outside are written to
 > `/fat/logs/Forwarded.log`, with the local time of each one and the sentence the
 > terminal shows (`[2026.10.12 19:22:14] DNS: [forward] A example.com -> 1.2.3.4
-> (from 192.168.1.5 mac=aa:bb:cc:dd:ee:ff)`). `log_file` starts and stops it
+> (from 192.168.1.5 mac=aa:bb:cc:dd:ee:ff)`). What that sentence says after `->`
+> is the answer itself, or **why there is no answer** — and it says which of the
+> two it is: `NXDOMAIN` only when the upstream said the name does not exist,
+> `NXDOMAIN (timeout)` / `(no slot)` / `(no socket)` when this device gave up and
+> told the client `NXDOMAIN` anyway, `(no data)` when the name is known but has no
+> record of the asked type (the client gets NODATA), `(blocked)` for the
+> non-A/AAAA policy, and `(forwarded)` for a forwarded answer. `log_file` starts
+> and stops it
 > (default off), and `log_file_forwarded` (default on) is the **file's** own
 > filter, deliberately separate from the terminal's `log_forwarded`: the operator
 > may want the terminal quiet while the file keeps the record. `log_file_size` is
@@ -733,6 +813,89 @@ file anyway. The request body is not read, so `{}` is enough.
 
 **Response `500 Internal Server Error`:** the internal cache is not available —
 no PSRAM on this device, or the cache is switched off.
+
+#### `GET /api/dns/internal-cache/entries`
+
+One page of the PSRAM cache, for the **Cache View** page (stage 209; auth
+required). Like `stats()` and `oldestEntries()` before it, this is the cache as it
+stands at this moment — the file on the card is a different thing and is served by
+`GET /api/dns/internal-cache/file`.
+
+Query parameters (all optional):
+
+| Parameter | Meaning |
+|---|---|
+| `offset` | Matching records to skip (default `0`) |
+| `limit` | Records this page may hold (default `100`, capped at `200`; `0` means "not set" and becomes the default) |
+| `name` | Substring of a name, case-insensitive (default: every name) |
+| `type` | `A` or `AAAA` (default: both; a value that is neither is treated as "both") |
+
+**Response `200 OK`:**
+```json
+{
+  "available": true,
+  "total": 1234,
+  "offset": 100,
+  "limit": 100,
+  "page": 2,
+  "pages": 13,
+  "scanned": 59520,
+  "items": [
+    {
+      "name": "example.com", "type": "A",
+      "a4": ["192.168.1.100", "192.168.1.101"], "a6": [],
+      "ttl": 300, "remaining": 120, "age": 180, "uses": 7,
+      "expired": false
+    }
+  ]
+}
+```
+
+> `total` counts the records **matching the filter**, `scanned` counts the records
+> the walk looked at (the whole pool, filtered or not), and `page`/`pages` are
+> derived from `offset`/`limit`/`total` so a client cannot disagree with them about
+> where it is. `items` holds the addresses of both families of one record —
+> `a4`/`a6` are arrays, an empty one is a record of the other type — and a name is
+> escaped like every other string the device emits.
+>
+> `remaining` is the arithmetic (`ttl` − `age`, never below zero) while `expired`
+> is the cache's **policy**: with **Ignore TTL** on, a record past its TTL is kept
+> and served on purpose and reports `expired: false`, and a record with `ttl` 0
+> never expires.
+>
+> `available: false` (with empty `items`) means the device has no PSRAM, i.e. there
+> is no internal cache at all — that is not the same answer as an enabled but empty
+> cache, which is `available: true` with `total: 0`.
+>
+> The order is the pool's own, which shifts as records are stored and evicted: the
+> view is a look at the cache, not a report about it, and `name` is what finds a
+> record. The walk holds the cache's lock while it counts, so a filter that matches
+> less is the cheaper request.
+
+#### `POST /api/dns/internal-cache/entry`
+
+Forget **one** record, asked for by the delete action of the Cache View page
+(stage 209; auth required). The file on the card is not touched, exactly as with
+the whole-cache reset below.
+
+**Request:**
+```json
+{ "name": "example.com", "type": "A" }
+```
+
+**Response `200 OK`:**
+```json
+{
+  "status": "ok"
+}
+```
+
+**Errors:** `400` an empty body, or a request without a name and one of the two
+types (a record is identified by name **and** type, so a request naming only one
+would be a guess at which of two records was meant) · `404` no such record in the
+cache · `500` the internal cache is not available. Every one of them answers JSON
+with a `message`, which is what the page shows.
+
 #### `GET /api/dns/internal-cache/progress`
 
 Progress of the running background save/load job (auth required).
@@ -1042,13 +1205,17 @@ page offers — `65536` (default), `131072`, `262144` — because the page shows
 combobox and nothing else; a value outside that set is replaced by the default.
 What the file holds when the switch is on: a refused password with the attempt and
 the budget (`[2026-10-12 19:22:14] auth: failed login from 192.168.1.5 (3 of 5)`),
-a client that was then locked out and for how long, and a login that came **after**
-failures. A successful request with nothing before it is deliberately not written:
-the interface asks for credentials on every request (HTTP Basic), so a polling page
-would produce thousands of lines an hour. Nothing a client typed is ever stored —
-the file holds an address, an attempt number and a period. The cap is applied to
-the writer that is already running: a smaller one archives a file that is over it at
-once, a larger one simply raises the limit.
+a client that was then locked out and for how long, a login through the **login
+form** (`logged in from 192.168.1.5`, written even when the password was right on
+the first try) and a login that came **after** failures
+(`logged in from 192.168.1.5 after 2 failed attempts`). Requests the pages make on
+their own are not written: the interface asks for credentials on every request
+(HTTP Basic), so a polling page would produce thousands of lines an hour — the form
+announces itself with `POST /api/auth/login` and that is the only request that
+counts as somebody arriving. Nothing a client typed is ever stored — the file holds
+an address, an attempt number and a period. The cap is applied to the writer that is
+already running: a smaller one archives a file that is over it at once, a larger one
+simply raises the limit.
 
 The address both that file and the failed-attempt counter name is the peer of the
 TCP connection — read in **either** family the board's listener reports, and never
@@ -1445,6 +1612,7 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "subnet": "255.255.255.0", "gateway": "192.168.1.1",
     "lease_time": 86400, "log_terminal": false, "log_rest": false,
     "log_url": "", "log_auth": false, "log_auth_user": "",
+    "log_file": false, "log_file_size": 65536,
     "dns_mode": "auto", "dns_address": "", "allow_only": false
   },
   "static_bindings": [
@@ -1630,14 +1798,20 @@ Import logic:
 4. **Unknown fields** (e.g. a file exported by a **newer** firmware) are not
    applied and are listed in `skipped_fields`. A key is told apart from an
    ordinary string value by what stands *before* it — `{` or `,` — so a name
-   holding a quote and a colon is never reported as an unknown field.
+   holding a quote and a colon is never reported as an unknown field. A
+   `log_file_size` (DHCP, DNS, time server or security log) is accepted only if it
+   is one of the three sizes this firmware offers — the document may come from a
+   build with a different set, and a cap the device cannot honour is worse than
+   the cap it already has.
 5. **Apply** — sections are saved to NVS and then handed to the running services
    through the same calls the settings pages use, so a restore **takes effect
-   immediately**: DHCP logging/lease limit/allow-list, every DNS setting (both
-   caches, autosave, auto-update, the non-A/AAAA policy, the subnet filter),
-   the time server, the security limits, the web-file access filter, and the
-   HTTPS switch. The DHCP/DNS/SNTP servers are started or stopped to match the
-   imported `enabled` flags. Two things cannot be applied on the fly:
+   immediately**: DHCP logging (the terminal switch, the file with its cap, the
+   REST log), the lease limit, the allow-list, every DNS setting (both caches, the
+   autosave of each of them — the cache and the statistics file — auto-update, the
+   non-A/AAAA policy, the subnet filter), the time server, the security limits, the
+   web-file access filter, and the HTTPS switch. The DHCP/DNS/SNTP servers are
+   started or stopped to match the imported `enabled` flags. Two things cannot be
+   applied on the fly:
    - a change of the network parameters (`server_ip` / `subnet` / `gateway`) —
      the response flags `reboot_required`, so a reboot picks up the new static IP;
    - the volume of the certificate pair (`cert_storage`). It is moved only when
@@ -1654,6 +1828,14 @@ Import logic:
    MAC table is rebuilt immediately (the entries are read only between the
    brackets of their own array, so the `static_bindings` / `local_hosts` entries
    in the same file cannot be picked up by their identical `mac`/`name` keys).
+   `warnings` cannot speak for a key the firmware **claims** to know and then
+   ignores — that is a defect in the firmware, not a report about the file, which
+   is why the three readers of the document are held to one key list: every key
+   the export writes is one the table of known keys lists and one the import reads,
+   and every key the table lists is written by the export. A setting that only two
+   of the three know is exactly what happened to the autosave of the cache's
+   statistics file (16.10.2026): the device answered `"dns": true` and kept the
+   autosave it already had.
 
 **Response `200 OK`:**
 ```json

@@ -27,10 +27,11 @@ namespace core {
  *
  * Everything else — the file's own name in an archive, the range folder, the
  * carried tail, the ten attempts, the flush per line — is decided once, here, so
- * that four logs cannot drift apart in rules about losing lines. Four of them use
- * this class today: the NTP request log, the DNS forwarded log, the error log and
- * the journal (`NtpLogWriter`, `DnsForwardedLogWriter`, `ErrorsLogWriter`,
- * `JobsLogWriter`), which is what made the split of stage 203 worth doing rather
+ * that six logs cannot drift apart in rules about losing lines. Six of them use
+ * this class today: the NTP request log, the DNS forwarded log, the error log, the
+ * journal, the authorisation log and the DHCP log (`NtpLogWriter`,
+ * `DnsForwardedLogWriter`, `ErrorsLogWriter`, `JobsLogWriter`, `AuthLogWriter`,
+ * `DhcpLogWriter`), which is what made the split of stage 203 worth doing rather
  * than a shape invented for one caller.
  *
  * Three properties are worth stating out loud, because each one is a decision

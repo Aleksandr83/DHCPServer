@@ -7,6 +7,7 @@
 #include "SettingsImportScan.h"
 #include "WebPrune.h"
 #include "PeerAddress.h"
+#include "CacheViewJson.h"
 #include "../core/ErrorLog.h"
 #include "../core/AuthLog.h"
 #include "../core/Version.h"
@@ -212,6 +213,16 @@ static PeerAddress peerAddressOf(httpd_req* req)
 
 bool RestApi::checkAuth(httpd_req* req)
 {
+    return checkAuth(req, /*fromLoginForm=*/false);
+}
+
+bool RestApi::checkLoginAuth(httpd_req* req)
+{
+    return checkAuth(req, /*fromLoginForm=*/true);
+}
+
+bool RestApi::checkAuth(httpd_req* req, bool fromLoginForm)
+{
     if (!s_auth) return false;
 
     size_t hdrLen = httpd_req_get_hdr_value_len(req, "Authorization");
@@ -223,7 +234,9 @@ bool RestApi::checkAuth(httpd_req* req)
 
     string clientIp = getClientIp(req);
 
-    if (!s_auth->authenticate(authHeader, clientIp)) {
+    const bool ok = fromLoginForm ? s_auth->authenticateLogin(authHeader, clientIp)
+                                  : s_auth->authenticate(authHeader, clientIp);
+    if (!ok) {
         respondUnauthorized(req);
         return false;
     }
@@ -469,6 +482,12 @@ static void applyDhcpSettingsLive(::dhcp::dhcp::IDhcpServer* dhcp,
 {
     if (!dhcp) return;
     dhcp->setLogTerminal(cfg.logTerminal);
+    // The DHCP file log's own switch and cap (stage 212). The volumes are wired at
+    // boot, in `main.cpp`, where the card is known - same arrangement as the DNS and
+    // NTP logs. Order matters and is copied from there: the size first, then the
+    // switch, so a file being started is started with the cap the operator chose.
+    dhcp->setFileLogSize(cfg.logFileSize);
+    dhcp->setLogFile(cfg.logFile);
     dhcp->setRestLogging(cfg.logRest, cfg.logUrl, cfg.logAuthEnabled,
                          cfg.logAuthUser, cfg.logAuthPassword);
     dhcp->applyLeaseLimit();
@@ -817,6 +836,26 @@ esp_err_t RestApi::handleGetVersion(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// POST /api/auth/login
+// ─────────────────────────────────────────────────────
+
+// The login form's request. It answers the same 200/401 as any authenticated
+// route; what makes it a route of its own is what it *means*: the page says here
+// "this is a login", and that is the only thing in the interface that can say it.
+// Every other request carries the browser's Basic credentials because that is how
+// the protocol works, so it cannot be read as somebody arriving — and a file that
+// counted those would be a record of browsing rather than of logins (stage 213,
+// `core::authLogWritesSuccess`).
+esp_err_t RestApi::handlePostAuthLogin(httpd_req* req)
+{
+    if (!checkLoginAuth(req)) return ESP_OK;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/dhcp/settings
 // ─────────────────────────────────────────────────────
 
@@ -835,6 +874,8 @@ esp_err_t RestApi::handleGetDhcpSettings(httpd_req* req)
     addJsonString(json, "gateway", cfg.gateway, true);
     addJsonString(json, "server_ip", cfg.serverIp, true);
     addJsonBool(json, "log_terminal", cfg.logTerminal, true);
+    addJsonBool(json, "log_file", cfg.logFile, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
     addJsonBool(json, "log_rest", cfg.logRest, true);
     addJsonString(json, "log_url", cfg.logUrl, true);
     addJsonBool(json, "log_auth", cfg.logAuthEnabled, true);
@@ -896,6 +937,12 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     cfg.serverIp = jsonGetStr(body, "server_ip");
     if (cfg.serverIp.empty()) cfg.serverIp = core::kDefaultServerIp;
     cfg.logTerminal = jsonGetBool(body, "log_terminal", false);
+    cfg.logFile = jsonGetBool(body, "log_file", false);
+    // Through `logFileSizeOrDefault`: the page offers three sizes, and anything else
+    // (a hand-made POST, a key written by a later firmware) becomes the default
+    // instead of a file with an arbitrary cap.
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(jsonGetInt(body, "log_file_size", 0)));
     cfg.logRest = jsonGetBool(body, "log_rest", false);
     cfg.logUrl = jsonGetStr(body, "log_url");
     cfg.logAuthEnabled = jsonGetBool(body, "log_auth", false);
@@ -2095,6 +2142,8 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
     addJsonInt(json, "max_lease_entries",
                static_cast<int64_t>(dhcp.maxLeaseEntries), true);
     addJsonBool(json, "log_terminal", dhcp.logTerminal, true);
+    addJsonBool(json, "log_file", dhcp.logFile, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(dhcp.logFileSize), true);
     addJsonBool(json, "log_rest", dhcp.logRest, true);
     addJsonString(json, "log_url", dhcp.logUrl, true);
     addJsonBool(json, "log_auth", dhcp.logAuthEnabled, true);
@@ -2404,6 +2453,18 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 string m = jsonGetStr(seg, "dns_mode"); if (m == "manual" || m == "auto") cur.dnsMode = m;
                 cur.allowOnly = jsonGetBool(seg, "allow_only", cur.allowOnly);
                 cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
+                cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
+                // Accepted only if it is one of the sizes this firmware offers - the
+                // same rule the DNS file log follows here: the document may come from
+                // another version, and a size this firmware cannot honour is worse
+                // than keeping the cap that is already set.
+                {
+                    const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                    if (size > 0 &&
+                        ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                        cur.logFileSize = static_cast<uint32_t>(size);
+                    }
+                }
                 cur.logRest = jsonGetBool(seg, "log_rest", cur.logRest);
                 cur.logAuthEnabled = jsonGetBool(seg, "log_auth", cur.logAuthEnabled);
                 cur.leaseTimeSec = jsonGetInt(seg, "lease_time", cur.leaseTimeSec);
@@ -2577,6 +2638,24 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                     static_cast<uint16_t>(jsonGetInt(
                         seg, "cache_internal_autosave_interval",
                         static_cast<int>(cur.cacheInternalAutosaveInterval))), 0);
+                // The autosave of the statistics file (stage 189) was missing here
+                // until 16.10.2026, and the shape of that defect is worth keeping in
+                // mind: the export wrote the three keys and `kKnownSettingsKeys`
+                // listed them, so a restore answered "dns: imported" and left the
+                // device with whatever statistics autosave it happened to have - no
+                // warning, because the firmware claimed to know the keys. The cache
+                // autosave above was the same story, one stage earlier.
+                cur.statsAutosave = jsonGetBool(seg, "stats_autosave",
+                                                cur.statsAutosave);
+                cur.statsAutosavePeriod = core::autosavePeriodFromIndex(
+                    static_cast<uint8_t>(jsonGetInt(
+                        seg, "stats_autosave_period",
+                        static_cast<int>(cur.statsAutosavePeriod))));
+                cur.statsAutosaveInterval = core::autosaveClampInterval(
+                    cur.statsAutosavePeriod,
+                    static_cast<uint16_t>(jsonGetInt(
+                        seg, "stats_autosave_interval",
+                        static_cast<int>(cur.statsAutosaveInterval))), 0);
                 cur.cacheInternalAutoUpdate =
                     jsonGetBool(seg, "cache_internal_autoupdate",
                                 cur.cacheInternalAutoUpdate);
@@ -4209,6 +4288,123 @@ esp_err_t RestApi::handlePostInternalCacheReset(httpd_req* req)
 
     s_dns->internalCache().clear();
     ESP_LOGI(TAG, "internal cache cleared from the web interface");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /api/dns/internal-cache/entries
+// ─────────────────────────────────────────────────────
+// One page of the PSRAM cache for the cache view page (stage 209). Query:
+//   offset=<n>  records to skip among the matching ones (default 0)
+//   limit=<n>   records this page may hold (default 100, capped at 200)
+//   name=<text> substring of a name, case-insensitive (default: every name)
+//   type=A|AAAA the record type (default: both)
+//
+// The page is what keeps a pool of tens of thousands of records out of one
+// answer, and the filter is what makes it useful: the device walks the pool for
+// every request, so a filter that matches less is the cheaper request here.
+//
+// A device without PSRAM answers `available:false` instead of an error: the page
+// then says the cache is not there, which is not a failure of the request.
+
+// The query-string helpers are defined further down, next to the file endpoints
+// that use them, and used here for the same reason they exist: a second copy of
+// query parsing is how two routes end up disagreeing about what an absent
+// parameter means. `queryParam` sits in this file's anonymous namespace while
+// `queryParamU64` is a file-static function, so the two declarations below differ
+// in the same way their definitions do.
+namespace {
+bool queryParam(httpd_req* req, const char* key, string& out);
+} // namespace
+static bool queryParamU64(httpd_req* req, const char* key, uint64_t& out);
+
+esp_err_t RestApi::handleGetInternalCacheEntries(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    ::dhcp::dns::CacheEntryQuery query;
+
+    uint64_t offset = 0;
+    if (queryParamU64(req, "offset", offset)) {
+        query.offset = static_cast<size_t>(offset);
+    }
+    uint64_t limit = 0;
+    if (queryParamU64(req, "limit", limit)) {
+        query.limit = ::dhcp::dns::cacheViewClampLimit(static_cast<size_t>(limit));
+    } else {
+        query.limit = ::dhcp::dns::kCacheViewPageSize;
+    }
+
+    string name;
+    if (queryParam(req, "name", name)) query.name = ::dhcp::dns::cacheViewLowerName(name);
+
+    string typeText;
+    uint16_t qtype = 0;
+    if (queryParam(req, "type", typeText) &&
+        ::dhcp::dns::cacheEntryTypeFromText(typeText, qtype)) {
+        query.qtype = qtype;
+    }
+
+    ::dhcp::dns::CacheEntryPage page;
+    if (s_dns) page = s_dns->internalCache().entries(query);
+
+    const string json = cacheEntryPageJson(page);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/dns/internal-cache/entry
+// ─────────────────────────────────────────────────────
+// Forget **one** record, asked for by the delete button of the cache view page
+// (stage 209). Body: {"name":"example.com","type":"A"}.
+//
+// The type is required and must be one of the two the cache stores: a record is
+// identified by name **and** type, so a request without it would be a guess at
+// which of two records the operator meant. A record that is not there answers
+// `404` rather than "ok" — the page shows what happened, and "removed" for
+// something that was never in the pool is the kind of answer that makes an
+// operator believe a cache he cannot see.
+
+esp_err_t RestApi::handlePostInternalCacheEntryDelete(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    if (!s_dns || !s_dns->internalCache().available()) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Internal cache is not available\"}");
+        return ESP_OK;
+    }
+
+    const string body = readBody(req, 512);
+    if (body.empty()) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Empty body\"}");
+        return ESP_OK;
+    }
+
+    const string name = jsonGetStr(body, "name");
+    uint16_t qtype = 0;
+    if (name.empty() ||
+        !::dhcp::dns::cacheEntryTypeFromText(jsonGetStr(body, "type"), qtype)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"name and type (A or AAAA) are required\"}");
+        return ESP_OK;
+    }
+
+    if (!s_dns->internalCache().erase(name, qtype)) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"no such record in the cache\"}");
+        return ESP_OK;
+    }
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");

@@ -286,6 +286,29 @@ static void onNetworkConnected()
     // the web page reports the table state, so it must exist either way.
     s_dhcpServer.reloadAllowedComputers();
 
+    // The DHCP log's file (stage 212): the internal volume, archived to the card,
+    // with its own switch and size from the settings. Wired before the server is
+    // started, so the "DHCP server started" line is already in the file. The volumes
+    // are known here and nowhere else — the same arrangement the DNS log (stage 204)
+    // and the NTP log (stage 191) use, and the same reason: this is the only place
+    // that knows whether the board has a card slot and whether a card is in it.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        auto dhcpLogCfg = ::dhcp::core::Config::instance().getDhcp();
+        if (!s_dhcpServer.startFileLog(
+                "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+                [] {
+                    auto* card = s_fileManager.find("sd");
+                    return card != nullptr && card->isMounted();
+                })) {
+            ESP_LOGW(TAG, "DHCP log file not started, the log stays on the terminal");
+        }
+        // Size before the switch, as everywhere else: a log being switched on is
+        // switched on with the cap the operator chose, not with the default one.
+        s_dhcpServer.setFileLogSize(dhcpLogCfg.logFileSize);
+        s_dhcpServer.setLogFile(dhcpLogCfg.logFile);
+    }
+
     // Start DHCP server (check config enabled flag)
     if (!s_dhcpServer.isRunning()) {
         auto dhcpCfg = ::dhcp::core::Config::instance().getDhcp();

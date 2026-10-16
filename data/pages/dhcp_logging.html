@@ -20,6 +20,21 @@
             </label>
         </div>
 
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="dhcp.log_file">Log to File</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="dhcp-log-file" onchange="toggleLogFile()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="dhcp.log_file_size">Log file size</span>
+                <select id="dhcp-log-file-size" style="width:6.5rem;"
+                        onchange="saveLogFileSize()"></select>
+            </div>
+        </div>
+
         <div class="card toggle-row">
             <span data-i18n="dhcp.log_rest">Log to External REST</span>
             <label class="toggle-switch">
@@ -73,6 +88,8 @@
         function readDhcpForm() {
             return {
                 log_terminal: document.getElementById('dhcp-log-terminal').checked,
+                log_file: document.getElementById('dhcp-log-file').checked,
+                log_file_size: Number(document.getElementById('dhcp-log-file-size').value),
                 log_rest: document.getElementById('dhcp-log-rest').checked,
                 log_url: document.getElementById('dhcp-log-url').value,
                 log_auth: document.getElementById('dhcp-log-auth').checked,
@@ -84,6 +101,8 @@
         async function loadDhcpSettings() {
             const data = await fetchJSON('/api/dhcp/settings');
             document.getElementById('dhcp-log-terminal').checked = data.log_terminal || false;
+            document.getElementById('dhcp-log-file').checked = data.log_file || false;
+            fillLogFileSizes('dhcp-log-file-size', data.log_file_size);
             document.getElementById('dhcp-log-rest').checked = data.log_rest || false;
             document.getElementById('dhcp-log-url').value = data.log_url || '';
             document.getElementById('dhcp-log-auth').checked = data.log_auth || false;
@@ -113,6 +132,31 @@
                                    hint: result.message || tr('common.unknown_error'),
                                    hideCancel: true });
                 document.getElementById('dhcp-log-terminal').checked = !checked;
+            }
+        }
+
+        async function toggleLogFile() {
+            const checked = document.getElementById('dhcp-log-file').checked;
+            const result = await saveDhcpPartial({ log_file: checked });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                document.getElementById('dhcp-log-file').checked = !checked;
+            }
+        }
+
+        // The size saves itself, like the switches: the device applies it to the
+        // writer that is already running, and a smaller cap archives a file that is
+        // over it at once. On error the page re-reads what the device has.
+        async function saveLogFileSize() {
+            const value = Number(document.getElementById('dhcp-log-file-size').value);
+            const result = await saveDhcpPartial({ log_file_size: value });
+            if (result.status === 'error') {
+                await showDialog({ title: tr('common.error'),
+                                   hint: result.message || tr('common.unknown_error'),
+                                   hideCancel: true });
+                await loadDhcpSettings();
             }
         }
 

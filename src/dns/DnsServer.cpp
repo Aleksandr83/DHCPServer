@@ -75,6 +75,25 @@ namespace dns {
 // the file reads `DnsMessage::kHeaderBytes` and the like.
 using DnsMessage = ::dhcp::dhcp::DnsMessage;
 
+/**
+ * @brief How an answer from the upstream ended, as the log line tells it.
+ *
+ * A reply whose return code says "no such name" is logged as `NXDOMAIN`, not as
+ * `(forwarded)`: the client receives the upstream's answer either way, and until
+ * 16.10.2026 the two were indistinguishable in the file — a real NXDOMAIN read as
+ * `(forwarded)`, while a timeout of ours printed `NXDOMAIN` (stage 216).
+ *
+ * A reply too short to carry flags is reported as an answer: it is one, and the
+ * alternative would be to call a damaged packet a missing name.
+ */
+static DnsQueryOutcome forwardingOutcome(const uint8_t* reply, size_t len)
+{
+    if (len < DnsMessage::kFlags2Offset + 1) return DnsQueryOutcome::Answered;
+    const uint8_t rcode = reply[DnsMessage::kFlags2Offset] & DnsMessage::kMaskRcode;
+    return (rcode == DNS_RCODE_NXDOMAIN) ? DnsQueryOutcome::Nxdomain
+                                         : DnsQueryOutcome::Answered;
+}
+
 // ─────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────
@@ -1107,9 +1126,16 @@ void DnsServer::applyStatsTotals(const DnsStatTotals& totals)
     // Stage 128: the split comes back as well, so the second line of the cache
     // block is exactly as old as the average on the first one. This runs after
     // applyInternalCache() — enable() zeroes these counters.
-    internalCache_.restoreMeasurement(totals.waitUs, totals.walkedNodes,
-                                      totals.stores, totals.evictScans,
-                                      totals.evictScanUs, totals.evictScanNodes);
+    //
+    // The hit count goes back **with** the sums (16.10.2026): those sums are per
+    // hit and the page divides them by it, so restoring them without it divided
+    // the whole history by the count since the reboot — a `Wait` larger than the
+    // average it is part of, and a `Work` that stayed at zero because nothing
+    // catches up with a divisor that starts over.
+    internalCache_.restoreMeasurement(internalCacheHits_, totals.waitUs,
+                                      totals.walkedNodes, totals.stores,
+                                      totals.evictScans, totals.evictScanUs,
+                                      totals.evictScanNodes);
 }
 
 // ─────────────────────────────────────────────────────
@@ -1475,7 +1501,9 @@ void DnsServer::serverLoop()
                         }
                     }
                     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
-                                     DnsLogSource::FORWARDED, true,
+                                     DnsLogSource::FORWARDED,
+                                     forwardingOutcome(response.data(),
+                                                      static_cast<size_t>(rl)),
                                      "(forwarded)");
                     if (logTerminal_ && logger_.logForwarded()) {
                         ESP_LOGI(TAG, "DNS query: %s type=%u from %s [forwarded]",
@@ -1565,7 +1593,8 @@ void DnsServer::serverLoop()
                     const string clientMac =
                         resolveClientMac(pf.client.sin_addr.s_addr);
                     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
-                                     DnsLogSource::CACHE, true, ips[0]);
+                                     DnsLogSource::CACHE, DnsQueryOutcome::Answered,
+                                     ips[0]);
                     if (logTerminal_ && logger_.logCache()) {
                         ESP_LOGI(TAG, "DNS query: %s type=%u from %s [cache]",
                                  pf.domain.c_str(), pf.qtype, clientIp);
@@ -1705,7 +1734,7 @@ void DnsServer::serverLoop()
                                       resolvedIps, respTtl);
                 logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                  fromLocal ? DnsLogSource::LOCAL : DnsLogSource::CACHE,
-                                 true, resolvedIps[0]);
+                                 DnsQueryOutcome::Answered, resolvedIps[0]);
                 if (respLen > 0) {
                     sendto(socketFd_, response.data(), respLen, 0,
                            (struct sockaddr*)&from, fromLen);
@@ -1718,7 +1747,7 @@ void DnsServer::serverLoop()
                                       qid, domain, qtype, qclass, {}, DNS_DEFAULT_TTL_SEC);
                 logger_.logQuery(domain, qtype, clientIpStr, clientMac,
                                  fromLocal ? DnsLogSource::LOCAL : DnsLogSource::CACHE,
-                                 false, "");
+                                 DnsQueryOutcome::NoData, "");
                 if (respLen > 0) {
                     sendto(socketFd_, response.data(), respLen, 0,
                            (struct sockaddr*)&from, fromLen);
@@ -1735,7 +1764,7 @@ void DnsServer::serverLoop()
                     respLen = buildAnswer(response.data(), response.size(),
                                           qid, domain, qtype, qclass, {}, DNS_DEFAULT_TTL_SEC);
                     logger_.logQuery(domain, qtype, clientIpStr, clientMac,
-                                     DnsLogSource::FORWARDED, false, "");
+                                     DnsLogSource::FORWARDED, DnsQueryOutcome::Blocked, "");
                     if (logTerminal_ && logger_.logForwarded()) {
                         ESP_LOGI(TAG,
                                  "DNS query: %s type=%u from %s [blocked non-A/AAAA]",
@@ -1788,10 +1817,12 @@ void DnsServer::serverLoop()
                                 }
                             } else {
                                 freePendingSlot(slot);
+                                // `startForward` could not open the socket.
                                 respLen = buildNxdomain(response.data(), response.size(),
                                                         qid, domain, qtype, qclass);
                                 logger_.logQuery(domain, qtype, clientIpStr, clientMac,
-                                                 DnsLogSource::FORWARDED, false, "");
+                                                 DnsLogSource::FORWARDED,
+                                                 DnsQueryOutcome::NoSocket, "");
                                 if (respLen > 0) {
                                     sendto(socketFd_, response.data(), respLen, 0,
                                            (struct sockaddr*)&from, fromLen);
@@ -1804,7 +1835,8 @@ void DnsServer::serverLoop()
                         respLen = buildNxdomain(response.data(), response.size(),
                                                 qid, domain, qtype, qclass);
                         logger_.logQuery(domain, qtype, clientIpStr, clientMac,
-                                         DnsLogSource::FORWARDED, false, "");
+                                         DnsLogSource::FORWARDED,
+                                         DnsQueryOutcome::NoSlot, "");
                         if (respLen > 0) {
                             sendto(socketFd_, response.data(), respLen, 0,
                                    (struct sockaddr*)&from, fromLen);
@@ -1859,7 +1891,7 @@ void DnsServer::expirePendingSlot(int idx)
     inet_ntop(AF_INET, &pf.client.sin_addr, clientIp, sizeof(clientIp));
     const string clientMac = resolveClientMac(pf.client.sin_addr.s_addr);
     logger_.logQuery(pf.domain, pf.qtype, clientIp, clientMac,
-                     DnsLogSource::FORWARDED, false, "");
+                     DnsLogSource::FORWARDED, DnsQueryOutcome::Timeout, "");
     // Always logged (not gated by terminal logging): a silent forward timeout
     // is the one failure mode that otherwise shows nothing on the serial port.
     ESP_LOGW(TAG, "DNS forward timeout: %s type=%u from %s",

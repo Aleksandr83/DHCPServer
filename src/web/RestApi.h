@@ -37,6 +37,15 @@ public:
 
     static esp_err_t handleGetStatus(httpd_req* req);
     static esp_err_t handleGetVersion(httpd_req* req);
+    /**
+     * @brief The login form's own request (stage 213).
+     *
+     * Answers the same 200/401 as any authenticated route, and exists for one
+     * reason: it is the only request that means "somebody is logging in", so it is
+     * the only one that writes a successful login into `Auth.log` when the address
+     * had nothing failed before it.
+     */
+    static esp_err_t handlePostAuthLogin(httpd_req* req);
     static esp_err_t handleGetDhcpSettings(httpd_req* req);
     static esp_err_t handlePostDhcpSettings(httpd_req* req);
     static esp_err_t handleGetStaticBindings(httpd_req* req);
@@ -118,6 +127,10 @@ public:
     static esp_err_t handlePostInternalCacheSave(httpd_req* req);
     static esp_err_t handlePostInternalCacheLoad(httpd_req* req);
     static esp_err_t handlePostInternalCacheReset(httpd_req* req);
+    // Stage 209: the cache view page — one page of records, and the delete button
+    // that forgets a single one.
+    static esp_err_t handleGetInternalCacheEntries(httpd_req* req);
+    static esp_err_t handlePostInternalCacheEntryDelete(httpd_req* req);
     // Time (NTP) server
     static esp_err_t handleGetTimeSettings(httpd_req* req);
     static esp_err_t handlePostTimeSettings(httpd_req* req);
@@ -157,6 +170,14 @@ public:
 
 private:
     static bool checkAuth(httpd_req* req);
+    /**
+     * @brief The same check for the login form, which `Auth.log` is told about.
+     *
+     * Kept beside `checkAuth` because the two must not drift: only the reason a
+     * successful login is *reported* differs, never how credentials are checked.
+     */
+    static bool checkLoginAuth(httpd_req* req);
+    static bool checkAuth(httpd_req* req, bool fromLoginForm);
     /**
      * @brief LAN-only gate for the file endpoints.
      *

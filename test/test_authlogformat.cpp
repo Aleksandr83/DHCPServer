@@ -41,6 +41,7 @@ using dhcp::core::ArchiveFileLogTarget;
 using dhcp::core::authFailedText;
 using dhcp::core::authLockoutText;
 using dhcp::core::authLoginText;
+using dhcp::core::authLogWritesSuccess;
 using dhcp::core::AuthLogWriter;
 using dhcp::core::LogLevel;
 using dhcp::core::LogStamp;
@@ -150,6 +151,31 @@ static void test_getting_in_after_failing()
           "a login with nothing before it is not dressed up as a recovery");
 }
 
+/**
+ * Which successes reach the file (16.10.2026). The operator pointed out that a
+ * password typed correctly on the first try into the login form was silent, and
+ * the reason it was silent is the reason the rule needs a name: at the HTTP layer
+ * every request carries the same credentials, so "the password was right" is the
+ * normal state of a browsing session, not an event.
+ */
+static void test_which_successes_are_written()
+{
+    check(authLogWritesSuccess(true, 0),
+          "a login through the form is written even when nothing failed before it");
+    check(authLogWritesSuccess(true, 3),
+          "and it is written after failures too - there is one line per login, "
+          "not two");
+    check(authLogWritesSuccess(false, 1),
+          "an address that got in after failing is written, as stage 205 promised");
+    check(authLogWritesSuccess(false, 5),
+          "however many attempts it spent");
+
+    // The line that must stay absent: every other request with correct credentials
+    // - a page load is dozens of them, and a file of those is not a log of logins.
+    check(!authLogWritesSuccess(false, 0),
+          "a request that merely carries the password is not a login");
+}
+
 static void test_a_full_file_is_archived_under_its_own_folder()
 {
     removeTree(kRoot);
@@ -177,6 +203,7 @@ int main()
     test_a_refused_attempt();
     test_a_lockout();
     test_getting_in_after_failing();
+    test_which_successes_are_written();
     test_a_full_file_is_archived_under_its_own_folder();
 
     if (g_failed == 0) {

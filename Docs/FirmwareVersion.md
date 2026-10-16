@@ -13,10 +13,10 @@ aa.bb.xxx.cc.YY.MM.RR
 | `xxx` | Release number | 000–999 | `043` | Major release |
 | `cc` | Sub-release | 00–99 | `00` | Incremented on each reflash |
 | `YY` | Year | 00–99 | `26` | Last 2 digits of year (2026) |
-| `MM` | Month | 01–12 | `09` | Month |
+| `MM` | Month | 01–12 | `10` | Month |
 | `RR` | Region | 2 chars | `RU` | Region code |
 
-**Example (ESP32-P4-ETH):** `01.03.043.00.26.09.RU`
+**Example (ESP32-P4-ETH):** `01.03.043.00.26.10.RU`
 
 > Device code: classic **ESP32 + ENC28J60** builds report `02`; the current
 > **Waveshare ESP32-P4-ETH** target reports `03`. The P4 value is set in
@@ -91,6 +91,7 @@ python scripts/inc_firmware_ver.py --rel
 python scripts/inc_firmware_ver.py --sub
 
 # Only refresh the build date (CONFIG_FW_MIN_DATETIME), no version change
+# (the version's own date, YY.MM, is left alone)
 python scripts/inc_firmware_ver.py --min-only
 ```
 
@@ -105,12 +106,21 @@ python scripts/inc_firmware_ver.py --min-only
    `sdkconfig.*` files that already contain the key (the ESP32-P4 `idf.py`
    build reads the live root `sdkconfig`, so it must not stay stale). Files are
    **updated, not deleted** — several are tracked in git.
-7. Sets `CONFIG_FW_MIN_DATETIME` (the lowest date/time the Time Server page
+7. Stamps the version's **year and month** — `CONFIG_FW_VER_YEAR` and
+   `CONFIG_FW_VER_MONTH`, the `YY.MM` part of the version string — with the
+   **current** date, in the same three files as the incremented field
+   (`sdkconfig.defaults`, the `Version.cpp` fallback, `platformio.ini`) and in
+   every other `sdkconfig*` file that carries the keys. A release bumped in
+   October must not keep reporting September
+8. Sets `CONFIG_FW_MIN_DATETIME` (the lowest date/time the Time Server page
    accepts for a manual clock setting, see [Minimum date/time](#minimum-datetime))
    to the current date **and time** — the build moment — in `sdkconfig.defaults`,
    every other `sdkconfig*` file (appended if a build has not created the key
    yet), the `Version.cpp` fallback and `platformio.ini`
-8. Prints the new version — ready for rebuild
+9. Prints the new version — ready for rebuild
+
+`--min-only` performs step 8 alone and changes no version data: the number and
+`YY.MM` are left untouched.
 
 **After running the script:**
 ```bash
@@ -132,6 +142,11 @@ python -m platformio run -e esp32dev-debug --target uploadfs  # SPIFFS
 ### `scripts/set_firmware_date.py`
 
 Sets the firmware **year (YY)** and **month (MM)** in all configuration files at once.
+
+A version bump (`inc_firmware_ver.py`) already stamps `YY.MM` with the current
+date, so this script is for an **explicit** value — a back-dated release, a
+build whose date is known in advance, or a change of just the minimum date/time
+with `--day`/`--hour`.
 
 **Usage:**
 
@@ -186,7 +201,10 @@ moment (current hour, minutes/seconds zeroed), `set_firmware_date.py` at the
 release date (`--day`/`--hour`, default 01/00) — and propagate it to
 `sdkconfig.defaults`, every other `sdkconfig*` file, the `Version.cpp` fallback
 and `platformio.ini`.
-The shared helpers live in `scripts/kconfig_tools.py`.
+The same run also stamps the version's own date (`YY.MM`) with the build date;
+`--min-only` refreshes the minimum alone.
+The shared helpers live in `scripts/kconfig_tools.py` (`apply_min_datetime()`,
+`apply_year_month()`).
 
 ---
 

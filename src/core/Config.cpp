@@ -26,6 +26,11 @@ static const char* KEY_DHCP_SERVER_IP = "dhcp_srv_ip";
 static const char* KEY_DHCP_LEASE     = "dhcp_lease";
 static const char* KEY_DHCP_MAX_LEASES = "dhcp_max_ent";
 static const char* KEY_DHCP_LOG_TERM   = "dhcp_log_term";
+// The DHCP file log (stage 212). Two keys and not one: `dhcp_logfile_size` is 16
+// characters, one over what NVS accepts, and that limit is not a compile-time one
+// — the call would just fail at runtime.
+static const char* KEY_DHCP_LOG_FILE   = "dhcp_logfile";
+static const char* KEY_DHCP_LOG_SIZE   = "dhcp_log_size";
 // Allowed computers / "only allowed" policy (NVS keys limited to 15 chars).
 static const char* KEY_DHCP_ALLOW_ONLY = "dhcp_allow_only";
 static const char* KEY_DHCP_ALLOWED    = "dhcp_allowed";
@@ -301,6 +306,12 @@ DhcpConfig Config::getDhcp() const
     }
     cfg.allowOnly = readI32(KEY_DHCP_ALLOW_ONLY, 0) != 0;   // OFF by default
     cfg.logTerminal = readI32(KEY_DHCP_LOG_TERM, 0) != 0;
+    cfg.logFile = readI32(KEY_DHCP_LOG_FILE, 0) != 0;
+    // Through the helper, not straight from NVS: a value left by an older firmware
+    // (or by a hand-edited key) must become one of the three the page offers, and
+    // an unknown size means "the default", not "whatever is in there".
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_DHCP_LOG_SIZE, 0)));
     cfg.dnsMode = readStr(KEY_DHCP_DNS_MODE, "auto");
     cfg.dnsAddress = readStr(KEY_DHCP_DNS_ADDR, "");
     cfg.logRest = readI32(KEY_DHCP_LOG_REST, 0) != 0;
@@ -323,6 +334,8 @@ void Config::setDhcp(const DhcpConfig& cfg)
     writeI32(KEY_DHCP_MAX_LEASES, static_cast<int32_t>(cfg.maxLeaseEntries));
     writeI32(KEY_DHCP_ALLOW_ONLY, cfg.allowOnly ? 1 : 0);
     writeI32(KEY_DHCP_LOG_TERM, cfg.logTerminal ? 1 : 0);
+    writeI32(KEY_DHCP_LOG_FILE, cfg.logFile ? 1 : 0);
+    writeI32(KEY_DHCP_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
     writeStr(KEY_DHCP_DNS_MODE, cfg.dnsMode.empty() ? "auto" : cfg.dnsMode);
     writeStr(KEY_DHCP_DNS_ADDR, cfg.dnsAddress);
     writeI32(KEY_DHCP_LOG_REST, cfg.logRest ? 1 : 0);

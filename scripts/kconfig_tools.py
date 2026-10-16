@@ -3,8 +3,9 @@
 
 Used by ``inc_firmware_ver.py`` and ``set_firmware_date.py`` so the
 kconfig-style key updates, the ``Version.cpp`` fallback defines, the
-``platformio.ini`` menuconfig entries and the ``CONFIG_FW_MIN_DATETIME``
-propagation live in ONE place.
+``platformio.ini`` menuconfig entries and the propagation of
+``CONFIG_FW_VER_YEAR``/``CONFIG_FW_VER_MONTH`` and ``CONFIG_FW_MIN_DATETIME``
+live in ONE place.
 
 `CONFIG_FW_MIN_DATETIME` is a Kconfig **string** (``"YYYY-MM-DD HH:00:00"``,
 see ``src/Kconfig.projbuild``) holding the lowest date/time the web page
@@ -33,6 +34,8 @@ VERSION_CPP = PROJECT_DIR / "src" / "core" / "Version.cpp"
 PLATFORMIO_INI = PROJECT_DIR / "platformio.ini"
 
 MIN_DATETIME_KEY = "CONFIG_FW_MIN_DATETIME"
+YEAR_KEY = "CONFIG_FW_VER_YEAR"
+MONTH_KEY = "CONFIG_FW_VER_MONTH"
 
 
 def read_int_key(path, key):
@@ -104,6 +107,79 @@ def update_platformio_string(key, new_val):
     return True
 
 
+def update_version_cpp_int(key, new_val):
+    """Update a numeric ``#ifndef KEY / #define KEY n`` fallback in Version.cpp."""
+    text = VERSION_CPP.read_text(encoding="utf-8")
+    new_text = re.sub(
+        rf"(#ifndef {re.escape(key)}\s*#define {re.escape(key)})\s*\d+",
+        lambda m: f"{m.group(1)} {new_val}", text)
+    if new_text == text:
+        return False
+    VERSION_CPP.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def update_platformio_int(key, new_val):
+    """Update a numeric ``board_build.menuconfig.<KEY>`` entry (both envs)."""
+    text = PLATFORMIO_INI.read_text(encoding="utf-8")
+    pio_key = key.replace("CONFIG_", "")
+    pattern = rf"(board_build\.menuconfig\.{re.escape(pio_key)}\s*=\s*)\d+"
+    new_text = re.sub(pattern, lambda m: f"{m.group(1)}{new_val}", text)
+    if new_text == text:
+        return False
+    PLATFORMIO_INI.write_text(new_text, encoding="utf-8")
+    return True
+
+
+def apply_year_month(year2, month, quiet=False):
+    """Store the version's year/month (``YY.MM``) in every file that carries them.
+
+    Writes ``CONFIG_FW_VER_YEAR`` and ``CONFIG_FW_VER_MONTH`` to
+    ``sdkconfig.defaults``, to every other ``sdkconfig*`` file that already has
+    the keys (the live root ``sdkconfig`` the ESP32-P4 build merges, plus the
+    generated per-env caches), to the ``Version.cpp`` fallbacks and to
+    ``platformio.ini``. A file without the keys is left alone — unlike
+    ``CONFIG_FW_MIN_DATETIME``, these are Kconfig integers that exist in every
+    configuration that reports a version.
+
+    Values are written as plain C integer literals, with no zero padding: a
+    leading zero would be read as an octal constant in ``Version.cpp``. The
+    version string is padded at runtime by ``Version::toString()``.
+
+    Returns the number of files that changed.
+    """
+    pairs = ((YEAR_KEY, int(year2)), (MONTH_KEY, int(month)))
+    changed = 0
+
+    missing = [key for key, _v in pairs if read_int_key(SDKCONFIG_DEFAULTS, key) is None]
+    for key in missing:
+        print(f"  Warning: {key} not found in {SDKCONFIG_DEFAULTS.name} — skipped")
+
+    others = [f for f in sorted(PROJECT_DIR.glob("sdkconfig*"))
+              if f.is_file() and f != SDKCONFIG_DEFAULTS]
+    for path in [SDKCONFIG_DEFAULTS] + others:
+        written = []
+        for key, value in pairs:
+            if update_key_in_file(path, key, value):
+                written.append(f"{key}={value}")
+        if written:
+            changed += len(written)
+            if not quiet:
+                print(f"  {path.name}: {', '.join(written)}")
+
+    for key, value in pairs:
+        if update_version_cpp_int(key, value):
+            changed += 1
+            if not quiet:
+                print(f"  {VERSION_CPP.name}: {key} fallback → {value}")
+        if update_platformio_int(key, value):
+            changed += 1
+            if not quiet:
+                print(f"  {PLATFORMIO_INI.name}: {key.replace('CONFIG_', '')} → {value}")
+
+    return changed
+
+
 def apply_min_datetime(value, quiet=False):
     """Store the minimum manual clock setting in every file that carries it.
 
@@ -155,3 +231,10 @@ def current_min_datetime():
     """Build-moment minimum as ``"YYYY-MM-DD HH:00:00"`` (hour granularity)."""
     from datetime import datetime
     return datetime.now().strftime("%Y-%m-%d %H:00:00")
+
+
+def current_year_month():
+    """Build-moment year/month as ``(YY, MM)`` — the two digits of the version."""
+    from datetime import datetime
+    now = datetime.now()
+    return now.year % 100, now.month
