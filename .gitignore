@@ -10,6 +10,7 @@
 sdkconfig
 sdkconfig.old
 build/
+managed_components/
 *.o
 *.elf
 *.bin

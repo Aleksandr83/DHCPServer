@@ -118,6 +118,20 @@ void EthManager::init()
         if (onError_) onError_();
         return;
     }
+    netif_ = ethNetif;
+
+    // ─── 1a. The host name the device was given (stage 218) ──
+    // Applied here, before the interface starts, so the name the interface
+    // reports is the stored one from its first moment.
+    if (!hostName_.empty()) {
+        const esp_err_t hostErr = esp_netif_set_hostname(netif_, hostName_.c_str());
+        if (hostErr != ESP_OK) {
+            ESP_LOGE(TAG, "esp_netif_set_hostname(%s) failed: %s",
+                     hostName_.c_str(), esp_err_to_name(hostErr));
+        } else {
+            ESP_LOGI(TAG, "Host name set to \"%s\"", hostName_.c_str());
+        }
+    }
 
     // ─── 1b/2/3. Create MAC + PHY (target-specific) ─
     esp_eth_mac_t* mac = nullptr;
@@ -324,6 +338,20 @@ void EthManager::setStaticIp(const string& ip4, const string& gateway,
     netmask_ = netmask;
     ESP_LOGI(TAG, "Static IP reconfigured: %s / %s / %s",
              ip4.c_str(), netmask.c_str(), gateway.c_str());
+}
+
+bool EthManager::setHostName(const string& name)
+{
+    hostName_ = name;
+    if (!netif_) return true;   // init() applies it once the netif exists
+    const esp_err_t err = esp_netif_set_hostname(netif_, name.c_str());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_set_hostname(%s) failed: %s",
+                 name.c_str(), esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Host name set to \"%s\"", name.c_str());
+    return true;
 }
 
 // ─────────────────────────────────────────────────────

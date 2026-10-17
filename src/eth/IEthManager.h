@@ -62,6 +62,15 @@ public:
     virtual void setStaticIp(const std::string& ip4, const std::string& gateway,
                              const std::string& netmask) = 0;
 
+    /**
+     * @brief Set the host name of this network interface (stage 218).
+     *
+     * A name set before @ref init is applied as soon as the netif exists; a
+     * name set later is applied at once. Returns false when the interface
+     * refuses it (the caller has already validated the text).
+     */
+    virtual bool setHostName(const std::string& name) = 0;
+
     // ─── Callbacks ─────────────────────────────────
     using Callback = std::function<void()>;
 

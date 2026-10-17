@@ -25,6 +25,15 @@ struct WebRoute {
     const char* uri;
     RouteMethod method;
     RouteHandler handler;
+    /**
+     * @brief Keep this route out of the http→https redirect (stage 220).
+     *
+     * Discovery clients (UPnP/SSDP, later WS-Discovery) cannot be told a
+     * password and cannot be expected to trust a self-signed certificate, so
+     * their metadata must stay reachable over plain HTTP even while every other
+     * plain route answers `301`/`308`. Only the public description is exempt.
+     */
+    bool redirectExempt = false;
 };
 
 /**

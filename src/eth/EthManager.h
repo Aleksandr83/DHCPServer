@@ -8,6 +8,7 @@
 
 #include "esp_event.h"
 #include "esp_eth.h"
+#include "esp_netif.h"
 
 namespace dhcp {
 namespace eth {
@@ -35,7 +36,7 @@ public:
     EthManager(const std::string& ip4 = core::kDefaultServerIp,
                const std::string& gateway = core::kDefaultGateway,
                const std::string& netmask = core::kDefaultSubnetMask,
-               const std::string& ip6 = "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d");
+               const std::string& ip6 = core::kDefaultServerIp6);
     ~EthManager() override;
 
     // IEthManager interface
@@ -46,6 +47,7 @@ public:
     std::string ip6() const override { return ip6_; }
     void setStaticIp(const std::string& ip4, const std::string& gateway,
                      const std::string& netmask) override;
+    bool setHostName(const std::string& name) override;
 
     void setOnConnected(Callback cb) override { onConnected_ = std::move(cb); }
     void setOnDisconnected(Callback cb) override { onDisconnected_ = std::move(cb); }
@@ -63,6 +65,9 @@ private:
     std::string staticIp6_;
     std::string ip4_;
     std::string ip6_;
+    /// The name the interface carries (stage 218). Kept here as well as in the
+    /// netif so a name set before @ref init is not lost.
+    std::string hostName_;
 
     EthStatus status_ = EthStatus::DISCONNECTED;
 
@@ -71,6 +76,7 @@ private:
     Callback onError_;
 
     esp_eth_handle_t ethHandle_ = nullptr;
+    esp_netif_t* netif_ = nullptr;
     bool initialized_ = false;
 };
 

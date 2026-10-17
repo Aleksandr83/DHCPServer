@@ -16,7 +16,8 @@ set(DHCPSERVER_SRC_DIRS
     "files"
     "security"
     "led"
-    "menu")
+    "menu"
+    "net")
 
 # Component dependencies used directly by the application sources. Native
 # idf.py builds resolve headers strictly through this REQUIRES list, so every
@@ -39,7 +40,7 @@ set(DHCPSERVER_REQUIRES
 # data partition is served through the FATFS + wear-levelling drivers.
 if(IDF_TARGET STREQUAL "esp32p4")
     list(APPEND DHCPSERVER_REQUIRES esp_partition fatfs wear_levelling
-                                    sdmmc esp_driver_sdmmc)
+                                    sdmmc esp_driver_sdmmc mdns)
 else()
     list(APPEND DHCPSERVER_SRC_DIRS "wifi")
     list(APPEND DHCPSERVER_REQUIRES enc28j60 esp_wifi)

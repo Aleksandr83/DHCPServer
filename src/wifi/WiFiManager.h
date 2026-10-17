@@ -32,7 +32,7 @@ public:
     WiFiManager(const std::string& ip4 = core::kDefaultServerIp,
                 const std::string& gateway = core::kDefaultGateway,
                 const std::string& netmask = core::kDefaultSubnetMask,
-                const std::string& ip6 = "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d");
+                const std::string& ip6 = core::kDefaultServerIp6);
 
     ~WiFiManager() override;
 
@@ -44,6 +44,7 @@ public:
     std::string ip4() const override { return ip4_; }
     std::string ip6() const override { return ip6_; }
     std::string ssid() const override { return currentSsid_; }
+    bool setHostName(const std::string& name) override;
 
     void setOnConnected(Callback cb) override { onConnected_ = std::move(cb); }
     void setOnDisconnected(Callback cb) override { onDisconnected_ = std::move(cb); }
@@ -89,6 +90,10 @@ private:
 
     bool initialized_ = false;
     bool dhcpRetry_ = false;
+
+    /// @brief The STA netif (stage 218) and the host name it carries.
+    esp_netif_t* netif_ = nullptr;
+    std::string hostName_;
 };
 
 } // namespace wifi

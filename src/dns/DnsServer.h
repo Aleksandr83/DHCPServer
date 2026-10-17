@@ -18,6 +18,8 @@
 #include <map>
 #include <vector>
 #include <cstdint>
+#include <atomic>
+#include <mutex>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -74,6 +76,21 @@ public:
      * instead of being sent to the external cache / upstream DNS.
      */
     void setBlockForwardNonAA(bool enabled);
+
+    /**
+     * @brief (Re)apply the device's own name (stage 219).
+     *
+     * @param enabled Answer `<hostname>` and `<hostname>.local` at all.
+     * @param hostName The name the device carries (Settings ▸ General).
+     * @param ip4      A-record answer; empty means no A answer.
+     * @param ip6      AAAA-record answer; empty means no AAAA answer.
+     *
+     * The answer is the device's own address, so it does not depend on the
+     * Local Hosts list — and it is checked before that list, so a stale entry
+     * cannot hide the device from itself.
+     */
+    void setLocalName(bool enabled, const std::string& hostName,
+                      const std::string& ip4, const std::string& ip6);
 
     /**
      * @brief (Re)apply the "own subnet only" client filter.
@@ -685,6 +702,15 @@ private:
 
     // Local hosts (domain → IP)
     std::map<std::string, std::vector<std::string>> localHosts_;
+
+    // The device's own name (stage 219): read by the DNS task, written by the
+    // web task, so the strings are swapped under a lock. The flag is atomic so
+    // the common "off" path costs no lock at all.
+    std::atomic<bool> localNameEnabled_{false};
+    mutable std::mutex localNameMutex_;
+    std::string localNameHost_;
+    std::string localNameIp4_;
+    std::string localNameIp6_;
 
     // DHCP server (for client IP → MAC fallback lookup)
     ::dhcp::dhcp::IDhcpServer* dhcpServer_ = nullptr;

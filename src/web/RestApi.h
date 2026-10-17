@@ -17,6 +17,7 @@ namespace time { class TimeServer; }
 namespace web  { class AuthManager; }
 namespace files { class IFileManager; }
 namespace security { class CertStore; }
+namespace net { class MdnsResponder; class SsdpResponder; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -77,6 +78,16 @@ public:
      * certificates page works.
      */
     static void setCertificateStore(::dhcp::security::CertStore* store);
+    /**
+     * @brief Give the REST layer the mDNS responder (stage 219).
+     *
+     * Same reason as the certificate store above: the responder lives in
+     * `main.cpp`, where the network is, and the web layer only needs to ask it
+     * to start, stop or rename.
+     */
+    static void setMdnsResponder(::dhcp::net::MdnsResponder* responder);
+    /// @brief Give the REST layer the SSDP responder (stage 220), same reason.
+    static void setSsdpResponder(::dhcp::net::SsdpResponder* responder);
     /** @brief State of the pair, the storage picker and the HTTPS switch. */
     static esp_err_t handleGetCertificates(httpd_req* req);
     /** @brief `generate` / `delete` / `storage` on the pair. */
@@ -96,6 +107,25 @@ public:
      */
     static esp_err_t handlePostWebSync(httpd_req* req);
     static esp_err_t handlePostTestConnection(httpd_req* req);
+    /**
+     * @brief Settings ▸ General (stage 218): the device's own host name.
+     *
+     * `GET` answers what the device carries, `POST` takes the name the operator
+     * typed — validated against the RFC 1123 label rules, saved in NVS and given
+     * to the network interface at once, so the page never has to say "takes
+     * effect after a reboot".
+     */
+    static esp_err_t handleGetSettingsGeneral(httpd_req* req);
+    static esp_err_t handlePostSettingsGeneral(httpd_req* req);
+    /**
+     * @brief The UPnP device description (`GET /upnp/device.xml`, stage 220).
+     *
+     * Public on purpose: SSDP/UPnP clients cannot be given a password, and this
+     * document is what turns the advertisement into an entry Windows can show.
+     * It carries the device's name, its model and the firmware version — nothing
+     * that is not already visible on the LAN.
+     */
+    static esp_err_t handleGetUpnpDevice(httpd_req* req);
     static esp_err_t handleGetSettingsExport(httpd_req* req);
     static esp_err_t handlePostSettingsImport(httpd_req* req);
     static esp_err_t handlePostSettingsReset(httpd_req* req);
@@ -221,6 +251,15 @@ private:
     /** @brief Body of the task above (waits, then switches HTTPS). */
     static void httpsSwitchTask(void* arg);
 
+    /**
+     * @brief Apply the local-name switch to the built-in DNS and to mDNS.
+     *
+     * The DNS half is a pure re-read of the settings; the mDNS half is the only
+     * place that can fail, and it is reported rather than hidden: @return false
+     * when the switch asks for publishing and the responder could not start.
+     */
+    static bool applyLocalNameLive();
+
     static ::dhcp::wifi::IWiFiManager* s_wifi;
     static ::dhcp::dhcp::IDhcpServer*  s_dhcp;
     static ::dhcp::dns::DnsServer*     s_dns;
@@ -236,6 +275,11 @@ private:
      * `no_store` instead of offering buttons that could not work.
      */
     static ::dhcp::security::CertStore* s_certs;
+    /** @brief The mDNS responder of this build (stage 219); may be null in a
+     *  host test, and unavailable on a target without the component. */
+    static ::dhcp::net::MdnsResponder* s_mdns;
+    /// @brief The SSDP responder of this build (stage 220).
+    static ::dhcp::net::SsdpResponder* s_ssdp;
 };
 
 } // namespace web

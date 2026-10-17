@@ -45,6 +45,20 @@ void WiFiManager::setStaticIp(const string& ip4, const string& gateway,
              ip4.c_str(), netmask.c_str(), gateway.c_str());
 }
 
+bool WiFiManager::setHostName(const string& name)
+{
+    hostName_ = name;
+    if (!netif_) return true;   // init() applies it once the netif exists
+    const esp_err_t err = esp_netif_set_hostname(netif_, name.c_str());
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_set_hostname(%s) failed: %s",
+                 name.c_str(), esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Host name set to \"%s\"", name.c_str());
+    return true;
+}
+
 void WiFiManager::init()
 {
     if (initialized_) return;
@@ -56,6 +70,16 @@ void WiFiManager::init()
     // Create default STA netif
     esp_netif_t* netif = esp_netif_create_default_wifi_sta();
     assert(netif);
+    netif_ = netif;
+
+    // The stored host name, applied before the interface starts (stage 218).
+    if (!hostName_.empty()) {
+        const esp_err_t hostErr = esp_netif_set_hostname(netif_, hostName_.c_str());
+        if (hostErr != ESP_OK) {
+            ESP_LOGE(TAG, "esp_netif_set_hostname(%s) failed: %s",
+                     hostName_.c_str(), esp_err_to_name(hostErr));
+        }
+    }
 
     // Configure static IPv4
     esp_netif_ip_info_t ipInfo;

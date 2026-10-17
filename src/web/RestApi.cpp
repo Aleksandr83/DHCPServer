@@ -28,6 +28,9 @@
 #include "../time/TimeServer.h"
 #include "../time/TimeMath.h"
 #include "../time/NtpProbe.h"
+#include "../net/MdnsResponder.h"
+#include "../net/SsdpResponder.h"
+#include "../net/SsdpMessages.h"
 
 #include <cstdio>
 #include <cerrno>
@@ -141,6 +144,8 @@ namespace web {
 ::dhcp::files::IFileManager* RestApi::s_files = nullptr;
 ::dhcp::web::IWebServer*     RestApi::s_web = nullptr;
 ::dhcp::security::CertStore* RestApi::s_certs = nullptr;
+::dhcp::net::MdnsResponder* RestApi::s_mdns = nullptr;
+::dhcp::net::SsdpResponder* RestApi::s_ssdp = nullptr;
 
 void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
                     ::dhcp::dhcp::IDhcpServer* dhcpSrv,
@@ -163,6 +168,49 @@ void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
 void RestApi::setCertificateStore(::dhcp::security::CertStore* store)
 {
     s_certs = store;
+}
+
+void RestApi::setMdnsResponder(::dhcp::net::MdnsResponder* responder)
+{
+    s_mdns = responder;
+}
+
+void RestApi::setSsdpResponder(::dhcp::net::SsdpResponder* responder)
+{
+    s_ssdp = responder;
+}
+
+bool RestApi::applyLocalNameLive()
+{
+    const auto& cfgMgr = ::dhcp::core::Config::instance();
+    const auto dhcpCfg = cfgMgr.getDhcp();
+    const bool enabled = cfgMgr.getLocalNameEnabled();
+    const string hostName = cfgMgr.getHostName();
+
+    if (s_dns) {
+        s_dns->setLocalName(enabled, hostName,
+                            dhcpCfg.serverIp, ::dhcp::core::kDefaultServerIp6);
+    }
+
+    bool mdnsOk = true;
+    if (s_mdns) {
+        if (!enabled) {
+            s_mdns->stop();
+        } else {
+            mdnsOk = s_mdns->isRunning() ? s_mdns->setHostName(hostName)
+                                         : s_mdns->start(hostName);
+        }
+    }
+
+    bool ssdpOk = true;
+    if (s_ssdp) {
+        if (!enabled) {
+            s_ssdp->stop();
+        } else if (!s_ssdp->isRunning()) {
+            ssdpOk = s_ssdp->start(dhcpCfg.serverIp);
+        }
+    }
+    return mdnsOk && ssdpOk;
 }
 
 // ─────────────────────────────────────────────────────
@@ -2106,6 +2154,147 @@ esp_err_t RestApi::handleGetCertificateDownload(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// GET /api/settings/general — the device's own host name
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetSettingsGeneral(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const auto& cfgMgr = ::dhcp::core::Config::instance();
+    string json = "{";
+    addJsonString(json, "hostname", cfgMgr.getHostName(), false);
+    addJsonString(json, "default_hostname", ::dhcp::core::kDefaultDeviceHostName, true);
+    addJsonBool(json, "local_name", cfgMgr.getLocalNameEnabled(), true);
+    // Whether this build can publish the name at all (mDNS is ESP32-P4 only);
+    // the page hides the switch where the answer is false rather than offering
+    // a switch that cannot work.
+    addJsonBool(json, "local_name_available",
+                ::dhcp::net::MdnsResponder::available(), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// POST /api/settings/general
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handlePostSettingsGeneral(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    string body = readBody(req);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    // The two fields are independent: the Host name card sends only the name,
+    // the publishing switch sends only the flag. A field that is absent keeps
+    // its stored value — an absent field must never mean "reset it".
+    const bool hasHostName = body.find("\"hostname\"") != string::npos;
+    const bool hasLocalName = body.find("\"local_name\"") != string::npos;
+
+    string hostName = cfgMgr.getHostName();
+    if (hasHostName) {
+        hostName = ::dhcp::core::trimmedDeviceHostName(jsonGetStr(body, "hostname"));
+        if (!::dhcp::core::isValidDeviceHostName(hostName)) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"A host name is 1 to 63 letters, "
+                "digits or hyphens, and neither starts nor ends with a hyphen\"}");
+            return ESP_OK;
+        }
+        // Applied before it is saved: a name the interface refuses is not a name
+        // the device should carry after the next boot either.
+        if (!s_wifi || !s_wifi->setHostName(hostName)) {
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"The network interface refused the host name\"}");
+            return ESP_OK;
+        }
+        cfgMgr.setHostName(hostName);
+    }
+
+    if (hasLocalName) {
+        const bool want = jsonGetBool(body, "local_name", cfgMgr.getLocalNameEnabled());
+        if (want && !::dhcp::net::MdnsResponder::available()) {
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"mDNS is not part of this build\"}");
+            return ESP_OK;
+        }
+        cfgMgr.setLocalNameEnabled(want);
+        if (!applyLocalNameLive() && want) {
+            // The switch could not be honoured. Go back to "off" and say so,
+            // rather than leaving the page and the device disagreeing.
+            cfgMgr.setLocalNameEnabled(false);
+            applyLocalNameLive();
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"the local name could not be published\"}");
+            return ESP_OK;
+        }
+    } else if (hasHostName) {
+        // The name changed: both halves have to follow it.
+        if (!applyLocalNameLive()) {
+            ESP_LOGW(TAG, "the local name did not take the new host name \"%s\"",
+                     hostName.c_str());
+        }
+    }
+
+    string json = "{\"status\":\"ok\",";
+    addJsonString(json, "hostname", hostName, false);
+    addJsonBool(json, "local_name", cfgMgr.getLocalNameEnabled(), true);
+    json += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "Host name \"%s\", local name %s", hostName.c_str(),
+             cfgMgr.getLocalNameEnabled() ? "on" : "off");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
+// GET /upnp/device.xml — the UPnP description SSDP points at (stage 220)
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetUpnpDevice(httpd_req* req)
+{
+    // Deliberately no checkAuth(): a UPnP/SSDP client cannot be told a password,
+    // and this document is what turns the advertisement into an entry Windows
+    // can show. It carries the device's name, its model and the firmware
+    // version — nothing the LAN cannot already see.
+    //
+    // The switch still owns it: with publishing off the device is not advertised,
+    // and the description answers 404 rather than describing a device that said
+    // it was not there.
+    const auto& cfgMgr = ::dhcp::core::Config::instance();
+    if (!cfgMgr.getLocalNameEnabled()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+        return ESP_OK;
+    }
+
+    const string xml = ::dhcp::net::ssdp::deviceXml(
+        cfgMgr.getHostName(),
+        "DHCPServer",
+        ::dhcp::core::Version::instance().toString(),
+        ::dhcp::net::SsdpResponder::deviceUuid(),
+        "/");
+
+    httpd_resp_set_type(req, "text/xml; charset=\"utf-8\"");
+    httpd_resp_sendstr(req, xml.c_str());
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/settings/export
 // Full backup of all NVS settings as JSON, including the firmware version.
 // Passwords are intentionally NOT exported (log/cache auth and web password) —
@@ -2299,6 +2488,14 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         json += "}";
     }
 
+    // ── device section (the device's own network host name) ──
+    {
+        json += ",\"device\":{";
+        addJsonString(json, "hostname", cfgMgr.getHostName(), false);
+        addJsonBool(json, "local_name", cfgMgr.getLocalNameEnabled(), true);
+        json += "}";
+    }
+
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -2321,7 +2518,7 @@ static const char* const kKnownSettingsKeys[] = {
     "format", "schema", "firmware_version",
     // ── sections ──
     "dhcp", "static_bindings", "allowed_computers", "dns", "time",
-    "local_hosts", "security", "files",
+    "local_hosts", "security", "files", "device",
     // ── dhcp ──
     "enabled", "server_ip", "start_ip", "end_ip", "subnet", "gateway",
     "lease_time", "max_lease_entries", "log_terminal", "log_rest", "log_url",
@@ -2347,6 +2544,8 @@ static const char* const kKnownSettingsKeys[] = {
     // ── security ──
     "username", "max_attempts", "lockout_period", "log_file_size", "https_enabled",
     "cert_storage", "cert_name",
+    // ── device ──
+    "hostname", "local_name",
 };
 
 /// @brief `["key","key"]` of the keys this firmware does not know, or `""`.
@@ -2425,6 +2624,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     bool importedDhcp = false, importedBind = false, importedDns = false;
     bool importedHosts = false, importedSec = false, importedTime = false;
     bool importedAllowed = false, importedFiles = false;
+    bool importedDevice = false;
     // What the file asked for and the device could not do. The answer used to be
     // a bare "ok" plus per-section flags, so a refused list read as a successful
     // restore (stage 183b).
@@ -2892,6 +3092,34 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
     }
 
+    // Device (the device's own network host name)
+    if (body.find("\"device\"") != string::npos) {
+        size_t s = body.find("\"device\"");
+        size_t open = body.find('{', s);
+        if (open != string::npos) {
+            string seg = body.substr(open);
+            const string name = ::dhcp::core::trimmedDeviceHostName(
+                jsonGetStr(seg, "hostname"));
+            if (!name.empty() && !::dhcp::core::isValidDeviceHostName(name)) {
+                warnings.push_back("device: \"" + name + "\" is not a valid host name");
+            } else if (!name.empty()) {
+                // Same order as the settings page: the interface takes the name
+                // first, and only a name it accepts is written to NVS.
+                if (s_wifi && s_wifi->setHostName(name)) {
+                    cfgMgr.setHostName(name);
+                    importedDevice = true;
+                } else {
+                    warnings.push_back("device: the network interface refused the host name");
+                }
+            }
+            if (seg.find("\"local_name\"") != string::npos) {
+                cfgMgr.setLocalNameEnabled(
+                    jsonGetBool(seg, "local_name", cfgMgr.getLocalNameEnabled()));
+                importedDevice = true;
+            }
+        }
+    }
+
     // ─── 5. Start / stop the services (best effort) ───
     // The live settings went in next to their `set…()` calls above, through the
     // same helpers the settings POST handlers use. What is left here is the
@@ -2919,6 +3147,14 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     }
     applyTimeRunning(s_time, cfgMgr.getTime());
 
+    // The device's own name (stage 219): the DNS half follows the switch at
+    // once, and mDNS is started or stopped here — after the services above,
+    // since the responder attaches to the netif the DNS half has just been
+    // reconfigured on.
+    if (importedDevice && !applyLocalNameLive()) {
+        warnings.push_back("device: the local name could not be published");
+    }
+
     // ─── 6. Build response ───
     string json = "{";
     addJsonString(json, "status", "ok", false);
@@ -2936,6 +3172,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     addJsonBool(json, "local_hosts", importedHosts, true);
     addJsonBool(json, "security", importedSec, true);
     addJsonBool(json, "files", importedFiles, true);
+    addJsonBool(json, "device", importedDevice, true);
     json += "}";
     if (!skipped.empty()) json += ",\"skipped_fields\":[" + skipped + "]";
     // The sections the file asked for but the device could not do (stage 183b):
@@ -2950,12 +3187,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
-    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d%d warnings=%u",
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d%d%d warnings=%u",
              curVer.toString().c_str(), fileVerStr.c_str(),
              versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
              importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
              importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0,
              importedAllowed ? 1 : 0, importedFiles ? 1 : 0,
+             importedDevice ? 1 : 0,
              static_cast<unsigned>(warnings.size()));
     return ESP_OK;
 }

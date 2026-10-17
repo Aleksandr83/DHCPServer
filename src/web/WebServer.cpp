@@ -451,7 +451,7 @@ esp_err_t WebServer::httpsRedirectGate(httpd_req* req)
         return err404Handler(req, HTTPD_404_NOT_FOUND);
     }
 
-    if (redirectIfInForce(req)) return ESP_OK;
+    if (!route->redirectExempt && redirectIfInForce(req)) return ESP_OK;
     return route->handler(req);
 }
 
@@ -546,6 +546,13 @@ const WebRoute WebServer::kRoutes[] = {
     // for once, after every file is on the device.
     { "/api/web/sync",                    RouteMethod::Post,  &WebServer::postWebSyncHandler },
     { "/api/test-connection",             RouteMethod::Post,  &WebServer::postTestConnectionHandler },
+    // Settings ▸ General (stage 218): the device's own host name.
+    { "/api/settings/general",            RouteMethod::Get,   &WebServer::getSettingsGeneralHandler },
+    { "/api/settings/general",            RouteMethod::Post,  &WebServer::postSettingsGeneralHandler },
+    // The UPnP description Windows fetches from the SSDP `LOCATION` (stage 220):
+    // public (a discovery client cannot be told a password) and exempt from the
+    // http→https redirect, which such a client could not survive.
+    { "/upnp/device.xml",                 RouteMethod::Get,   &WebServer::getUpnpDeviceHandler, true },
     { "/api/settings/export",             RouteMethod::Get,   &WebServer::getSettingsExportHandler },
     { "/api/settings/import",             RouteMethod::Post,  &WebServer::postSettingsImportHandler },
     { "/api/settings/reset",              RouteMethod::Post,  &WebServer::postSettingsResetHandler },
@@ -640,6 +647,7 @@ const WebRoute WebServer::kRoutes[] = {
     { "/pages/files.html",                RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_export.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_import.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/settings_general.html",     RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_device.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/jobs.html",                 RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/version.html",              RouteMethod::Get,   &WebServer::staticFileHandler },

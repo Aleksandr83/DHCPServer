@@ -1586,6 +1586,138 @@ HTTP client settings as the REST log/cache senders: preemptive Basic auth,
 
 ---
 
+## GET /api/settings/general
+
+The device's own host name — the name its network interface carries — and the
+switch that publishes it.
+
+**Response `200 OK`:**
+```json
+{
+  "hostname": "DhcpServer",
+  "default_hostname": "DhcpServer",
+  "local_name": true,
+  "local_name_available": true
+}
+```
+
+`hostname` is what the device carries now (`DhcpServer` until the operator
+changes it). `default_hostname` is the factory value the page offers, so the
+page does not keep a copy of it.
+
+`local_name` is the **publishing switch**: while it is on, the built-in DNS
+answers `<hostname>` and `<hostname>.local` with the device's IPv4 (A) and IPv6
+(AAAA) addresses, and an mDNS responder publishes `<hostname>.local`. It is on
+by default. `local_name_available` says whether this build can publish at all
+(mDNS is part of the ESP32-P4 image); the page hides the switch where it is
+`false`, so it never offers a switch that cannot work.
+
+---
+
+## POST /api/settings/general
+
+Set the name, the publishing switch, or both. **Request body:**
+`{"hostname": "my-router"}`, `{"local_name": false}`, or both fields together.
+
+The two fields are **independent**: a field that is absent keeps its stored
+value — an absent field never means "reset it". This is what lets the page send
+the name from its **Save** button and the switch on its own change, without one
+request undoing the other.
+
+The name is an **RFC 1123 label**: 1 to 63 letters, digits or hyphens, neither
+starting nor ending with a hyphen. Spaces around the value belong to the field
+and are trimmed; a space inside the value is a refusal. Nothing is saved when
+the name is refused — the answer is `400` with
+`{"status":"error","message":…}`.
+
+The device **applies the name before it saves it** (`esp_netif_set_hostname()`
+on the running interface), so the change takes effect at once and the page never
+has to say "after a reboot". A name the interface itself refuses is answered
+with `500`, and the stored value stays as it was.
+
+Turning `local_name` on starts the mDNS responder and makes the DNS answer
+immediately; turning it off stops the responder and removes the DNS answer. If
+the responder cannot start, the answer is `500` and the switch is put back to
+`off` — a page must not show "published" when nothing was published. On a build
+without mDNS the same answer says so.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "hostname": "my-router", "local_name": true }
+```
+
+`hostname` is the trimmed name the device now carries; `local_name` is the
+switch as it now stands.
+
+### What the mechanisms answer
+
+| Asked | Where it is answered | Answer |
+|-------|----------------------|--------|
+| `<hostname>` (A) | built-in DNS, for clients that use it | the device's IPv4 address |
+| `<hostname>` (AAAA) | built-in DNS | the device's IPv6 (ULA) address |
+| `<hostname>.local` (A/AAAA) | built-in DNS **and** mDNS | the same addresses |
+| `M-SEARCH` (SSDP) | the SSDP responder | `200 OK` with `LOCATION: http://<ip>/upnp/device.xml` |
+| any other name | unchanged: Local Hosts → cache → upstream | as before |
+
+The device's own name is checked **before** the Local Hosts list, so a stale
+entry cannot hide the device from itself; `.local` belongs to this name. mDNS
+answers on the local link only (multicast, port 5353) and does not change the
+unicast DNS server: the two use different ports, different transports and
+different namespaces, so enabling one does not disturb the other. A name
+collision on the LAN is resolved by the mDNS component (it renames the
+responder), and the unicast DNS keeps answering the configured name.
+
+**SSDP/UPnP** advertises the device on the multicast group `239.255.255.250:1900`:
+three `ssdp:alive` notifications (`upnp:rootdevice`, `uuid:<udn>`,
+`urn:schemas-upnp-org:device:Basic:1`) at start and every 15 minutes, the same
+three answered to `M-SEARCH`, and `ssdp:byebye` when the switch goes off. The
+UDN is derived from the factory MAC, so it survives reboots without an NVS key.
+The switch owns this half too: turning it off stops the advertisements and
+answers nothing.
+
+---
+
+## GET /upnp/device.xml
+
+The UPnP **device description** the SSDP `LOCATION` points at. This route is
+**public** — no `Authorization` header is asked for — because an SSDP/UPnP client
+has no way to be told a password, and this document is what turns the
+advertisement into an entry Windows can show. It carries the friendly name (the
+Host name setting), the model (`DHCPServer`), the firmware version, the UDN and
+`presentationURL: /` — nothing the LAN cannot already see.
+
+The route is also **exempt from the http→https redirect**: while TLS is on and
+the plain port redirects every other request, this one still answers over plain
+HTTP. A discovery client that followed a `301` to a self-signed certificate would
+otherwise fail, and the device would silently stop being discoverable. With the
+publishing switch off the route answers `404`: the device is not advertised, and
+it does not describe a device that said it was not there.
+
+**Response `200 OK`** (`text/xml`):
+```xml
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>
+    <friendlyName>DhcpServer</friendlyName>
+    <manufacturer>DHCPServer</manufacturer>
+    <modelDescription>DHCP, DNS and NTP server</modelDescription>
+    <modelName>DHCPServer</modelName>
+    <modelNumber>01.02.057.00.26.10.RU</modelNumber>
+    <UDN>uuid:…</UDN>
+    <presentationURL>/</presentationURL>
+  </device>
+</root>
+```
+
+UPnP has no "computer" device type; this device claims the generic `Basic:1`
+type. Whether Windows lists it (and under which heading) depends on that
+machine's network-discovery settings — WS-Discovery is the mechanism its
+"Network" folder uses for computers and is not part of this build.
+
+---
+
 ## GET /api/settings/export
 
 Full backup of all persisted settings as a single JSON document. Passwords are
@@ -1659,7 +1791,8 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "https_enabled": false, "cert_storage": "internal",
     "cert_name": "dhcpserver"
   },
-  "files": { "allow_own_subnet": true }
+  "files": { "allow_own_subnet": true },
+  "device": { "hostname": "DhcpServer", "local_name": true }
 }
 ```
 
@@ -1672,6 +1805,11 @@ generates one). Since stage 205 the same section also carries the authorisation
 log's two settings (`log_file`, `log_file_size`); the import applies them at once
 and, like every other size, refuses a value this firmware does not offer by keeping
 the one the device has.
+
+The `device` section carries the device's own **host name** (see
+`GET /api/settings/general`) and its **publishing switch**; the import applies
+the name to the network interface as soon as it is read, and starts or stops the
+mDNS responder together with the DNS half afterwards.
 
 ---
 
@@ -1809,7 +1947,7 @@ Import logic:
    REST log), the lease limit, the allow-list, every DNS setting (both caches, the
    autosave of each of them — the cache and the statistics file — auto-update, the
    non-A/AAAA policy, the subnet filter), the time server, the security limits, the
-   web-file access filter, and the HTTPS switch. The DHCP/DNS/SNTP servers are
+   web-file access filter, the device host name and its publishing switch, and the HTTPS switch. The DHCP/DNS/SNTP servers are
    started or stopped to match the imported `enabled` flags. Two things cannot be
    applied on the fly:
    - a change of the network parameters (`server_ip` / `subnet` / `gateway`) —
@@ -1849,7 +1987,7 @@ Import logic:
   "imported": {
     "dhcp": true, "static_bindings": true, "allowed_computers": true,
     "dns": true, "time": true, "local_hosts": true, "security": true,
-    "files": true
+    "files": true, "device": true
   },
   "skipped_fields": ["some_future_field"],
   "warnings": ["cert_storage: no certificate on sd"]

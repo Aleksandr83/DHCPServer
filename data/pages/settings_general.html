@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="settings_general">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>General — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="settings_general.title">General</h1>
+
+        <div class="card">
+            <label for="general-hostname" data-i18n="settings_general.host_name">Host name</label>
+            <input type="text" id="general-hostname" maxlength="63" placeholder="DhcpServer"
+                   autocomplete="off" spellcheck="false">
+            <p class="hint" data-i18n="settings_general.host_name_hint">The name this device answers to on the network: 1 to 63 letters, digits or hyphens. The default is DhcpServer.</p>
+
+            <button class="btn btn-primary" id="general-save" onclick="saveGeneralSettings()"
+                    data-i18n="settings_general.save" style="margin-top:0.8rem;">Save</button>
+            <p id="general-status"></p>
+        </div>
+
+        <!-- The publishing switch gets a block of its own: the first block is
+             the name and its Save button, as agreed; this one answers "should
+             the network know that name at all". Hidden on a build that has no
+             mDNS responder (the API reports local_name_available). -->
+        <div class="card" id="general-local-name-card" style="display:none;">
+            <div class="toggle-row">
+                <span data-i18n="settings_general.local_name">Publish the name in the local network</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="general-local-name" onchange="toggleLocalName()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="settings_general.local_name_hint">The device answers to its host name and to &lt;host name&gt;.local through its own DNS, and publishes &lt;host name&gt;.local over mDNS.</p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // The page never says "takes effect after a reboot": the device applies
+        // the name to its network interface while it answers this very request.
+        // The answer is the source of truth, so the field is filled from it.
+        let generalStatus = null;
+
+        function renderGeneralStatus() {
+            const el = document.getElementById('general-status');
+            if (!el) return;
+            el.textContent = generalStatus ? tr(generalStatus.key) : '';
+            el.className = generalStatus ? generalStatus.cls : '';
+        }
+
+        function setGeneralStatus(key, cls) {
+            generalStatus = key ? { key, cls } : null;
+            renderGeneralStatus();
+        }
+
+        async function loadGeneralSettings() {
+            const input = document.getElementById('general-hostname');
+            try {
+                const data = await fetchJSON('/api/settings/general');
+                if (data && typeof data.hostname === 'string') {
+                    input.value = data.hostname;
+                }
+                renderLocalName(data);
+            } catch (e) {
+                setGeneralStatus('settings_general.failed', 'status-err');
+            }
+        }
+
+        // The switch is offered only where the build can publish a name at all;
+        // the flag comes from the device rather than from a copy of the build
+        // rules in the page.
+        function renderLocalName(data) {
+            const card = document.getElementById('general-local-name-card');
+            const box = document.getElementById('general-local-name');
+            if (!card || !box) return;
+            card.style.display = (data && data.local_name_available) ? '' : 'none';
+            box.checked = !!(data && data.local_name);
+        }
+
+        async function toggleLocalName() {
+            const box = document.getElementById('general-local-name');
+            const want = box.checked;
+            box.disabled = true;
+            try {
+                const r = await postJSON('/api/settings/general', { local_name: want });
+                if (r && r.status === 'ok') {
+                    box.checked = !!r.local_name;
+                    setGeneralStatus('settings_general.local_name_saved', 'status-ok');
+                } else {
+                    // The device refused: show the position it actually carries.
+                    box.checked = !want;
+                    setGeneralStatus('settings_general.local_name_failed', 'status-err');
+                }
+            } catch (e) {
+                box.checked = !want;
+                setGeneralStatus('settings_general.local_name_failed', 'status-err');
+            } finally {
+                box.disabled = false;
+            }
+        }
+
+        async function saveGeneralSettings() {
+            const input = document.getElementById('general-hostname');
+            const btn = document.getElementById('general-save');
+            btn.disabled = true;
+            try {
+                const r = await postJSON('/api/settings/general', { hostname: input.value });
+                if (r && r.status === 'ok') {
+                    input.value = r.hostname;
+                    setGeneralStatus('settings_general.saved', 'status-ok');
+                } else {
+                    // A refused name is not a save: put the field back in step
+                    // with what the device actually carries.
+                    setGeneralStatus('settings_general.invalid', 'status-err');
+                    await loadGeneralSettings();
+                }
+            } catch (e) {
+                setGeneralStatus('settings_general.failed', 'status-err');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // A message left on screen must follow the language switch like the
+        // static labels do (the page owns its two strings as keys).
+        document.addEventListener('i18n-applied', renderGeneralStatus);
+        document.addEventListener('DOMContentLoaded', () => {
+            renderGeneralStatus();
+            loadGeneralSettings();
+        });
+    </script>
+</body>
+</html>

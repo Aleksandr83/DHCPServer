@@ -1,0 +1,4 @@
+dependencies:
+  # mDNS/DNS-SD responder (stage 219). It lives in the component registry, not
+  # in ESP-IDF itself; 1.14.0 is the current line that builds against IDF 6.x.
+  espressif/mdns: "^1.14.0"

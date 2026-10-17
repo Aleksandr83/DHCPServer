@@ -15,6 +15,11 @@ static const char* TAG = "Config";
 static const char* NVS_NAMESPACE = "dhcp";
 
 // ─── NVS key names ──────────────────────────────────
+// The device's own host name (stage 218). `hostname` is 8 characters, well
+// inside the 15 NVS allows.
+static const char* KEY_DEVICE_HOSTNAME = "hostname";
+// The single switch of the local-name publication (stage 219): 10 characters.
+static const char* KEY_DEVICE_LOCAL_NAME = "local_name";
 static const char* KEY_WIFI_SSID      = "wifi_ssid";
 static const char* KEY_WIFI_PASS      = "wifi_pass";
 static const char* KEY_DHCP_ENABLED   = "dhcp_enabled";
@@ -266,6 +271,31 @@ bool Config::resetAll()
     nvs_close(h);
     ESP_LOGW(TAG, "All settings erased (factory reset)");
     return true;
+}
+
+// ─── Device ─────────────────────────────────────────
+
+string Config::getHostName() const
+{
+    // A value written by an older or a hand-edited NVS must not reach the
+    // network interface unchecked: the setter would take it as it is.
+    return deviceHostNameOrDefault(readStr(KEY_DEVICE_HOSTNAME,
+                                          kDefaultDeviceHostName));
+}
+
+void Config::setHostName(const string& name)
+{
+    writeStr(KEY_DEVICE_HOSTNAME, trimmedDeviceHostName(name));
+}
+
+bool Config::getLocalNameEnabled() const
+{
+    return readI32(KEY_DEVICE_LOCAL_NAME, 1) != 0;   // ON by default
+}
+
+void Config::setLocalNameEnabled(bool enabled)
+{
+    writeI32(KEY_DEVICE_LOCAL_NAME, enabled ? 1 : 0);
 }
 
 // ─── WiFi ───────────────────────────────────────────

@@ -6,6 +6,7 @@
 #include "../core/ErrorLog.h"
 #include "../core/ErrorLogCore.h"
 #include "../core/JobRegistry.h"
+#include "../core/LocalName.h"
 #include "../core/Md5.h"
 #include "../core/SubnetFilter.h"
 
@@ -656,6 +657,21 @@ void DnsServer::setBlockForwardNonAA(bool enabled)
     blockForwardNonAA_ = enabled;
     ESP_LOGI(TAG, "Block forward of non-A/AAAA queries %s",
              enabled ? "enabled" : "disabled");
+}
+
+void DnsServer::setLocalName(bool enabled, const string& hostName,
+                             const string& ip4, const string& ip6)
+{
+    {
+        std::lock_guard<std::mutex> lock(localNameMutex_);
+        localNameHost_ = hostName;
+        localNameIp4_ = ip4;
+        localNameIp6_ = ip6;
+    }
+    localNameEnabled_.store(enabled, std::memory_order_relaxed);
+    ESP_LOGI(TAG, "Local name %s: %s (%s / %s)",
+             enabled ? "enabled" : "disabled", hostName.c_str(),
+             ip4.c_str(), ip6.c_str());
 }
 
 void DnsServer::applySubnetFilter()
@@ -1663,6 +1679,37 @@ void DnsServer::serverLoop()
             if (!lookupDomain.empty() && lookupDomain.back() == '.') {
                 lookupDomain.pop_back();
             }
+
+            // Step 1a: the device's own name (stage 219). Both `<hostname>` and
+            // `<hostname>.local` answer the device's own addresses, and this is
+            // checked before the user's Local Hosts: `.local` belongs to the
+            // device's name, and a stale entry must not hide the device.
+            if (!found && localNameEnabled_.load(std::memory_order_relaxed)) {
+                bool own = false;
+                string ownIp4, ownIp6;
+                {
+                    std::lock_guard<std::mutex> lock(localNameMutex_);
+                    own = core::localNameMatches(lookupDomain, localNameHost_);
+                    if (own) {
+                        ownIp4 = localNameIp4_;
+                        ownIp6 = localNameIp6_;
+                    }
+                }
+                if (own) {
+                    found = true;
+                    fromLocal = true;
+                    if (qtype == DNS_TYPE_A && !ownIp4.empty()) {
+                        resolvedIps.push_back(ownIp4);
+                    } else if (qtype == DNS_TYPE_AAAA && !ownIp6.empty()) {
+                        resolvedIps.push_back(ownIp6);
+                    }
+                    if (logTerminal_ && logger_.logLocal()) {
+                        ESP_LOGI(TAG, "DNS query: %s type=%u from %s [own name]",
+                                 domain.c_str(), qtype, clientIpStr);
+                    }
+                }
+            }
+
             auto it = localHosts_.find(lookupDomain);
             if (it != localHosts_.end() && !it->second.empty()) {
                 found = true;

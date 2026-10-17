@@ -191,6 +191,10 @@ private:
     static esp_err_t postWebFileHandler(httpd_req* req) { return RestApi::handlePostWebFile(req); }
     static esp_err_t postWebSyncHandler(httpd_req* req) { return RestApi::handlePostWebSync(req); }
     static esp_err_t postTestConnectionHandler(httpd_req* req) { return RestApi::handlePostTestConnection(req); }
+    static esp_err_t getSettingsGeneralHandler(httpd_req* req) { return RestApi::handleGetSettingsGeneral(req); }
+    static esp_err_t postSettingsGeneralHandler(httpd_req* req) { return RestApi::handlePostSettingsGeneral(req); }
+    /** @brief The UPnP device description (public, no auth — stage 220). */
+    static esp_err_t getUpnpDeviceHandler(httpd_req* req) { return RestApi::handleGetUpnpDevice(req); }
     static esp_err_t getSettingsExportHandler(httpd_req* req) { return RestApi::handleGetSettingsExport(req); }
     static esp_err_t postSettingsImportHandler(httpd_req* req) { return RestApi::handlePostSettingsImport(req); }
     static esp_err_t postSettingsResetHandler(httpd_req* req) { return RestApi::handlePostSettingsReset(req); }

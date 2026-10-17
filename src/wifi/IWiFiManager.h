@@ -62,6 +62,16 @@ public:
      */
     virtual std::string ssid() const = 0;
 
+    /**
+     * @brief Set the host name of this network interface (stage 218).
+     *
+     * Lives here because the web layer already reaches the network through this
+     * interface: Ethernet answers through @ref eth::EthWifiAdapter, and a Wi-Fi
+     * build through its own manager. Returns false when the interface refuses
+     * the name.
+     */
+    virtual bool setHostName(const std::string& name) = 0;
+
     // ─── Callbacks ─────────────────────────────────
     using Callback = std::function<void()>;
 

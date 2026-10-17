@@ -37,6 +37,8 @@
 #include "menu/TerminalMenu.h"
 #include "dhcp/DhcpServer.h"
 #include "dns/DnsServer.h"
+#include "net/MdnsResponder.h"
+#include "net/SsdpResponder.h"
 #include "storage/FatFileSystem.h"
 #include "storage/SdFileSystem.h"
 #include "time/TimeServer.h"
@@ -66,6 +68,8 @@ static dhcp::led::LedController s_ledController(
 static dhcp::dhcp::DhcpServer   s_dhcpServer;
 static dhcp::dns::DnsServer     s_dnsServer;
 static dhcp::time::TimeServer   s_timeServer;
+static dhcp::net::MdnsResponder s_mdnsResponder;
+static dhcp::net::SsdpResponder s_ssdpResponder;
 // File explorer volumes (internal FAT always; microSD on the ESP32-P4 only).
 static dhcp::files::FileManager s_fileManager;
 static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer,
@@ -204,6 +208,11 @@ extern "C" void app_main(void)
         s_ethManager.setStaticIp(dhcpCfg.serverIp, dhcpCfg.gateway, dhcpCfg.subnet);
     }
 
+    // The device's own host name (stage 218). Handed over before init(): the
+    // interface applies it the moment its netif exists, so lwIP never reports
+    // the Kconfig default in between.
+    s_ethManager.setHostName(dhcp::core::Config::instance().getHostName());
+
     // Register network callbacks BEFORE Ethernet init — otherwise the
     // ETHERNET_EVENT_CONNECTED fired during init() can be missed and the
     // DHCP/DNS/Web servers would never start.
@@ -218,6 +227,26 @@ extern "C" void app_main(void)
 
     // ─── Initialize Ethernet ────────────────────────
     s_ethManager.init();
+
+    // ─── Local name discovery (stage 219) ───────────
+    // One switch, two halves: the built-in DNS answers the device's own name
+    // (`<hostname>` and `<hostname>.local`), and mDNS publishes
+    // `<hostname>.local`. Both follow the name the interface was just given.
+    {
+        const auto& cfgMgr = dhcp::core::Config::instance();
+        const auto dhcpCfg = cfgMgr.getDhcp();
+        const bool localName = cfgMgr.getLocalNameEnabled();
+        s_dnsServer.setLocalName(localName, cfgMgr.getHostName(),
+                                 dhcpCfg.serverIp, dhcp::core::kDefaultServerIp6);
+        dhcp::web::RestApi::setMdnsResponder(&s_mdnsResponder);
+        dhcp::web::RestApi::setSsdpResponder(&s_ssdpResponder);
+        if (localName && !s_mdnsResponder.start(cfgMgr.getHostName())) {
+            ESP_LOGW(TAG, "the local name could not be published over mDNS");
+        }
+        if (localName && !s_ssdpResponder.start(dhcpCfg.serverIp)) {
+            ESP_LOGW(TAG, "the device could not be advertised over SSDP");
+        }
+    }
 
     // ─── Wire DHCP → DNS (client IP → MAC fallback for DNS REST logs) ──
     s_dnsServer.setDhcpServer(&s_dhcpServer);

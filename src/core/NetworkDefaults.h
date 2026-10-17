@@ -27,6 +27,12 @@ namespace core {
 /// The address the device gives itself when nothing else is configured.
 inline constexpr const char* kDefaultServerIp = "192.168.1.201";
 
+/// The device's IPv6 address (ULA): the same value the network managers fall
+/// back to, and the AAAA answer the built-in DNS gives for the device's own
+/// name (stage 219).
+inline constexpr const char* kDefaultServerIp6 =
+    "fd12:3456:789a:0001:021b:21ff:fe6b:8c4d";
+
 /// First address of the pool handed out to clients.
 inline constexpr const char* kDefaultPoolStart = "192.168.1.100";
 

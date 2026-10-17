@@ -48,6 +48,10 @@ public:
 #endif
     }
 
+    bool setHostName(const std::string& name) override {
+        return eth_.setHostName(name);
+    }
+
     void setOnConnected(Callback cb) override { eth_.setOnConnected(std::move(cb)); }
     void setOnDisconnected(Callback cb) override { eth_.setOnDisconnected(std::move(cb)); }
     void setOnError(Callback cb) override { eth_.setOnError(std::move(cb)); }

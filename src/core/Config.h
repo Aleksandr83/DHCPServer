@@ -3,6 +3,7 @@
 
 #include "core/NetworkDefaults.h"
 #include "core/AutosavePeriod.h"
+#include "core/DeviceHostName.h"
 #include "core/LogFileSizes.h"
 #include "core/NtpServers.h"
 #include "security/CertStore.h"
@@ -323,6 +324,25 @@ public:
      * NVS must be initialized before first call.
      */
     static Config& instance();
+
+    // ─── Device ──────────────────────────────────────
+    /// @brief The device's own network host name (Settings ▸ General).
+    /// A stored value that no longer passes @ref isValidDeviceHostName is
+    /// reported as @ref kDefaultDeviceHostName rather than pushed into the
+    /// network interface.
+    std::string getHostName() const;
+    void setHostName(const std::string& name);
+
+    /**
+     * @brief Publish the device's own name in the local network (stage 219).
+     *
+     * One switch for both halves: the built-in DNS answers `<hostname>` and
+     * `<hostname>.local` with the device's addresses, and mDNS publishes
+     * `<hostname>.local`. ON by default — the name the operator sets is meant
+     * to be usable.
+     */
+    bool getLocalNameEnabled() const;
+    void setLocalNameEnabled(bool enabled);
 
     // ─── WiFi ────────────────────────────────────────
     WifiConfig getWifi() const;

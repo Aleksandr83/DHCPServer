@@ -60,6 +60,7 @@
     "time_logging": "Logging",
     "settings": "Settings",
     "files": "Files",
+    "settings_general": "General",
     "settings_export": "Export",
     "settings_import": "Import",
     "settings_device": "Device Management",
@@ -504,6 +505,7 @@
     "sec_local_hosts": "Local hosts",
     "sec_security": "Security",
     "sec_files": "Files",
+    "sec_device": "Device",
     "applied": "Applied:",
     "warnings": "Warnings:",
     "error": "Import failed:"
@@ -634,6 +636,19 @@
     "resetting": "Resetting settings...",
     "ok_reset": "Settings reset to factory defaults. The device is rebooting... Redirecting to login.",
     "error": "Error: the operation failed."
+  },
+  "settings_general": {
+    "title": "General",
+    "host_name": "Host name",
+    "host_name_hint": "The name this device answers to on the network: 1 to 63 letters, digits or hyphens. The default is DhcpServer.",
+    "save": "Save",
+    "saved": "Host name saved.",
+    "invalid": "A host name is 1 to 63 letters, digits or hyphens, and neither starts nor ends with a hyphen",
+    "failed": "The host name could not be saved",
+    "local_name": "Publish the name in the local network",
+    "local_name_hint": "The device answers to its host name and to <host name>.local through its own DNS, and publishes <host name>.local over mDNS. Clients that use another DNS still reach it by <host name>.local on Windows 10+, macOS and Linux.",
+    "local_name_saved": "The local name setting is saved.",
+    "local_name_failed": "The local name could not be switched"
   },
   "version": {
     "title": "Firmware Version",
