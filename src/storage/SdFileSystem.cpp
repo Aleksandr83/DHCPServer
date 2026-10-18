@@ -19,7 +19,7 @@ namespace dhcp {
 namespace storage {
 
 namespace {
-const char* TAG = "SdFileSystem";
+[[maybe_unused]] const char* TAG = "SdFileSystem";
 const char* kMountPoint = "/sdcard";
 
 #if CONFIG_IDF_TARGET_ESP32P4
@@ -68,7 +68,7 @@ SdFileSystem::~SdFileSystem()
 #if !CONFIG_IDF_TARGET_ESP32P4
 
 // The classic ESP32 board has no card slot: keep the class honest but inert.
-bool SdFileSystem::tryMount(int) { return false; }
+bool SdFileSystem::tryMount(int, bool) { return false; }
 
 bool SdFileSystem::mount()
 {

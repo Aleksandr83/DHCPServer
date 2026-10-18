@@ -1,6 +1,8 @@
 #ifndef DHCP_MENU_TERMINALMENU_H
 #define DHCP_MENU_TERMINALMENU_H
 
+#include "ConsoleCommands.h"
+
 #include <string>
 #include <functional>
 
@@ -24,11 +26,18 @@ namespace menu {
  *
  * Provides commands over UART (USB serial):
  *   lan status                  — Show LAN connection status + IP
+ *   ifconfig                    — Addresses, mask, gateway and DNS
  *   passwd reset                — Reset web password to default (admin)
+ *   settings reset              — Factory reset settings and reboot
  *   version                     — Show firmware version
+ *   reboot                      — Reboot the device
  *   help                        — Show available commands
+ *
+ * The commands themselves live in @ref ConsoleCommands, which the SSH shell
+ * uses too (stage 222): this class only owns the serial side — the prompt, the
+ * banner and the `printf` sink.
  */
-class TerminalMenu {
+class TerminalMenu : public IConsoleOutput {
 public:
     /**
      * @param wifi   Reference to WiFi manager.
@@ -70,23 +79,19 @@ public:
     void print(const std::string& msg);
     void println(const std::string& msg);
 
+    /// @brief The sink the shared commands write into (this console's stdout).
+    void write(const std::string& text) override { print(text); }
+
     /**
      * @brief Process a single command line (public for main loop).
      */
     void processLine(const std::string& line);
 
 private:
-    void cmdHelp();
-    void cmdLanStatus();
-    void cmdPasswdReset();
-    void cmdSettingsReset();
-    void cmdVersion();
-
     dhcp::wifi::IWiFiManager& wifi_;
     dhcp::led::ILedController& led_;
     dhcp::web::AuthManager* auth_;
-    Hook beforeReboot_;
-    Hook factoryReset_;
+    ConsoleCommands commands_;
     std::string prompt_;
     bool running_ = false;
 };

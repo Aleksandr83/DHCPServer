@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="ssh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Server — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="ssh.title">SSH Server</h1>
+
+        <div class="card">
+            <strong data-i18n="ssh.state">Server state:</strong>
+            <span id="ssh-state" class="status-badge status-stopped">--</span>
+            <span id="ssh-sessions" style="margin-left:1rem;font-size:0.85rem;"></span>
+        </div>
+
+        <!-- The switch and the port share one card because neither means anything
+             without the other: a port with the server off is a wish, and the
+             server cannot be reached on a port nobody knows. -->
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="ssh.enable">Enable SSH server</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="ssh-enabled" onchange="markSshDirty()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <label for="ssh-port" data-i18n="ssh.port" style="margin-top:0.8rem;display:block;">Port</label>
+            <input type="number" id="ssh-port" min="1" max="65535" step="1" placeholder="22"
+                   oninput="markSshDirty()">
+            <p class="hint" data-i18n="ssh.port_hint">The port the SSH server listens on: 1 to 65535, 22 by default. A changed port is applied at once — the listener restarts on it.</p>
+
+            <div class="toggle-row" style="margin-top:0.5rem;">
+                <span data-i18n="ssh.allow_own_subnet">Allow only own subnet</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="ssh-allow-own-subnet" onchange="markSshDirty()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="ssh.allow_own_subnet_hint">Only computers of the device's own subnet may open a session; every other address is refused before authentication. The subnet is the device's own address and mask from the DHCP settings.</p>
+
+            <button class="btn btn-primary" id="ssh-save" onclick="saveSshSettings()"
+                    data-i18n="ssh.save" style="margin-top:0.8rem;">Save</button>
+            <p id="ssh-status"></p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // The page owns three fields of one object on the server, so it sends the
+        // whole object — the handler keeps an absent field, but sending only what
+        // this page shows is what keeps the screen and the device in step.
+        let sshState = null;
+        let sshData = null;
+        let sshDirty = false;
+
+        function markSshDirty() { sshDirty = true; }
+
+        function renderSshStatus() {
+            const el = document.getElementById('ssh-status');
+            if (!el) return;
+            el.textContent = sshState ? tr(sshState.key) : '';
+            el.className = sshState ? sshState.cls : '';
+        }
+
+        function setSshStatus(key, cls) {
+            sshState = key ? { key, cls } : null;
+            renderSshStatus();
+        }
+
+        // "Running" comes from the device, never from the switch position: a
+        // listener that failed to start must not look like one that started.
+        function renderSshState(data) {
+            const badge = document.getElementById('ssh-state');
+            const sessions = document.getElementById('ssh-sessions');
+            const available = !!(data && data.available);
+            const running = !!(data && data.state === 'running');
+            badge.textContent = !available ? tr('ssh.unavailable')
+                               : running ? tr('ssh.running')
+                                         : tr('ssh.stopped');
+            badge.className = 'status-badge ' + (running ? 'status-ok' : 'status-stopped');
+            sessions.textContent = (data && data.sessions > 0)
+                ? tr('ssh.sessions_active') + ': ' + data.sessions
+                : '';
+        }
+
+        async function loadSshSettings() {
+            try {
+                const data = await fetchJSON('/api/ssh/settings');
+                sshData = data;
+                document.getElementById('ssh-enabled').checked = !!data.enabled;
+                document.getElementById('ssh-port').value = data.port;
+                document.getElementById('ssh-allow-own-subnet').checked =
+                    !!data.allow_own_subnet;
+                renderSshState(data);
+                sshDirty = false;
+            } catch (e) {
+                setSshStatus('ssh.load_failed', 'status-err');
+            }
+        }
+
+        async function saveSshSettings() {
+            const btn = document.getElementById('ssh-save');
+            const port = parseInt(document.getElementById('ssh-port').value, 10);
+            if (!(port >= 1 && port <= 65535)) {
+                setSshStatus('ssh.bad_port', 'status-err');
+                return;
+            }
+            btn.disabled = true;
+            try {
+                const r = await postJSON('/api/ssh/settings', {
+                    enabled: document.getElementById('ssh-enabled').checked,
+                    port: port,
+                    allow_own_subnet: document.getElementById('ssh-allow-own-subnet').checked,
+                });
+                if (r && r.status === 'ok') {
+                    setSshStatus('ssh.saved', 'status-ok');
+                    await loadSshSettings();
+                } else {
+                    // The listener refused to start: say so and show what the
+                    // device actually runs now.
+                    setSshStatus('ssh.start_failed', 'status-err');
+                    await loadSshSettings();
+                }
+            } catch (e) {
+                setSshStatus('ssh.save_failed', 'status-err');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // A language switch re-renders the words, not the form: reloading here
+        // would throw away edits the operator has typed but not saved.
+        document.addEventListener('i18n-applied', () => {
+            renderSshStatus();
+            if (sshData) renderSshState(sshData);
+        });
+        document.addEventListener('DOMContentLoaded', loadSshSettings);
+    </script>
+</body>
+</html>

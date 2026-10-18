@@ -33,14 +33,19 @@ set(DHCPSERVER_REQUIRES
     nvs_flash
     spiffs
     app_update
-    mbedtls)
+    mbedtls
+    esp_partition
+    fatfs
+    wear_levelling)
 
 # Classic ESP32 uses Wi-Fi coexistence over the ENC28J60 (SPI Ethernet).
-# ESP32-P4 has no Wi-Fi — Ethernet uses the internal RMII EMAC, and the FAT
-# data partition is served through the FATFS + wear-levelling drivers.
+# ESP32-P4 has no Wi-Fi — Ethernet uses the internal RMII EMAC, and only the P4
+# table has the FAT data partition. The FAT driver and wear levelling are still
+# required on every target: FatFileSystem is registered on all of them and
+# compiles against those headers; on the classic ESP32 the partition simply
+# does not exist and mount() reports that.
 if(IDF_TARGET STREQUAL "esp32p4")
-    list(APPEND DHCPSERVER_REQUIRES esp_partition fatfs wear_levelling
-                                    sdmmc esp_driver_sdmmc mdns)
+    list(APPEND DHCPSERVER_REQUIRES sdmmc esp_driver_sdmmc mdns libssh)
 else()
     list(APPEND DHCPSERVER_SRC_DIRS "wifi")
     list(APPEND DHCPSERVER_REQUIRES enc28j60 esp_wifi)

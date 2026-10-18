@@ -200,9 +200,10 @@ main.container {
     color: var(--accent);
 }
 
-/* A group inside a dropdown (Settings → Security). Its toggle is styled like the
-   menu items around it and the list opens *in place* with an indent, which reads
-   the same on the desktop popup and in the mobile column layout. */
+/* A group inside a dropdown (Settings → Security, Services → Time Server). Its
+   toggle is styled like the menu items around it and the list opens *in place*
+   with an indent, which reads the same on the desktop popup and in the mobile
+   column layout. */
 .nav-submenu-toggle {
     display: block;
     width: 100%;

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ru" data-page="ssh_logging">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Logging — DHCPServer</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+    <div id="header-placeholder"></div>
+
+    <main class="container">
+        <h1 data-i18n="ssh_logging.title">SSH Logging</h1>
+
+        <!-- Two readers, two switches: the file is for the operator who arrives
+             later, the terminal for whoever is watching UART right now. -->
+        <div class="card">
+            <div class="toggle-row">
+                <span data-i18n="ssh_logging.log_file">Log to file</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="ssh-log-file" onchange="saveSshLogging()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="ssh_logging.file_hint">Sessions, refused passwords and refusals by the subnet filter go to /fat/logs/SSH.log; a full file is archived to the card as log/Archive/Ssh/&lt;dates&gt;/SSH.log.</p>
+
+            <label for="ssh-log-size" data-i18n="ssh_logging.size" style="margin-top:0.8rem;display:block;">File size</label>
+            <select id="ssh-log-size" onchange="saveSshLogging()"></select>
+            <p class="hint" data-i18n="ssh_logging.size_hint">When the file reaches this size it is archived to the card; with no card the newest ten lines are kept.</p>
+
+            <div class="toggle-row" style="margin-top:0.5rem;">
+                <span data-i18n="ssh_logging.log_terminal">Also print to the terminal</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="ssh-log-terminal" onchange="saveSshLogging()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="ssh_logging.terminal_hint">The same lines appear on the UART console. Faults of the server itself (a port that cannot be bound) always go to Errors.log, never here.</p>
+
+            <p id="ssh-log-status"></p>
+        </div>
+    </main>
+
+    <div id="footer-placeholder"></div>
+    <script src="../js/app.js"></script>
+    <script>
+        // The Logging page owns three fields of the one SSH settings object, so it
+        // reads that object first and sends it back with its own fields changed —
+        // the same shape the DNS and Time logging pages use.
+        let sshLogState = null;
+        let sshLogData = null;
+
+        function renderSshLogStatus() {
+            const el = document.getElementById('ssh-log-status');
+            if (!el) return;
+            el.textContent = sshLogState ? tr(sshLogState.key) : '';
+            el.className = sshLogState ? sshLogState.cls : '';
+        }
+
+        function setSshLogStatus(key, cls) {
+            sshLogState = key ? { key, cls } : null;
+            renderSshLogStatus();
+        }
+
+        function renderSshLogging(data) {
+            sshLogData = data;
+            document.getElementById('ssh-log-file').checked = !!data.log_file;
+            document.getElementById('ssh-log-terminal').checked = !!data.log_terminal;
+            fillLogFileSizes('ssh-log-size', data.log_file_size);
+        }
+
+        async function loadSshLogging() {
+            try {
+                renderSshLogging(await fetchJSON('/api/ssh/settings'));
+            } catch (e) {
+                setSshLogStatus('ssh_logging.load_failed', 'status-err');
+            }
+        }
+
+        async function saveSshLogging() {
+            if (!sshLogData) return;
+            const payload = {
+                ...sshLogData,
+                log_file: document.getElementById('ssh-log-file').checked,
+                log_terminal: document.getElementById('ssh-log-terminal').checked,
+                log_file_size: parseInt(document.getElementById('ssh-log-size').value, 10),
+            };
+            try {
+                const r = await postJSON('/api/ssh/settings', payload);
+                if (r && r.status === 'ok') {
+                    setSshLogStatus('ssh_logging.saved', 'status-ok');
+                    renderSshLogging(r);
+                } else {
+                    setSshLogStatus('ssh_logging.save_failed', 'status-err');
+                    await loadSshLogging();
+                }
+            } catch (e) {
+                setSshLogStatus('ssh_logging.save_failed', 'status-err');
+            }
+        }
+
+        document.addEventListener('i18n-applied', () => {
+            renderSshLogStatus();
+            if (sshLogData) fillLogFileSizes('ssh-log-size', sshLogData.log_file_size);
+        });
+        document.addEventListener('DOMContentLoaded', loadSshLogging);
+    </script>
+</body>
+</html>

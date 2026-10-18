@@ -549,6 +549,9 @@ const WebRoute WebServer::kRoutes[] = {
     // Settings ▸ General (stage 218): the device's own host name.
     { "/api/settings/general",            RouteMethod::Get,   &WebServer::getSettingsGeneralHandler },
     { "/api/settings/general",            RouteMethod::Post,  &WebServer::postSettingsGeneralHandler },
+    // The SSH server (stage 222): switch, port and the LAN-only filter.
+    { "/api/ssh/settings",                RouteMethod::Get,   &WebServer::getSshSettingsHandler },
+    { "/api/ssh/settings",                RouteMethod::Post,  &WebServer::postSshSettingsHandler },
     // The UPnP description Windows fetches from the SSDP `LOCATION` (stage 220):
     // public (a discovery client cannot be told a password) and exempt from the
     // http→https redirect, which such a client could not survive.
@@ -648,6 +651,8 @@ const WebRoute WebServer::kRoutes[] = {
     { "/pages/settings_export.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_import.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_general.html",     RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/ssh_general.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
+    { "/pages/ssh_logging.html",          RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/settings_device.html",      RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/jobs.html",                 RouteMethod::Get,   &WebServer::staticFileHandler },
     { "/pages/version.html",              RouteMethod::Get,   &WebServer::staticFileHandler },

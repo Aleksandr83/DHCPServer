@@ -1,4 +1,18 @@
 dependencies:
+  david-cermak/libssh:
+    component_hash: ae8918caecfceb8c9ffb49ceb888bbfb0502a14748450e6e77f797970720d7ce
+    dependencies:
+    - name: espressif/sock_utils
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.12.2
   espressif/mdns:
     component_hash: b5b30022c46302eab89c1d2e3b6fb5918a627563a7462f0ee284b22b9a934967
     dependencies:
@@ -9,12 +23,23 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.14.0
+  espressif/sock_utils:
+    component_hash: b2e5cafc60dfefd05720ababb9fca0dfe2830fb9d71f97e5336de36a84c591c9
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.2.2
   idf:
     source:
       type: idf
     version: 6.1.0
 direct_dependencies:
+- david-cermak/libssh
 - espressif/mdns
-manifest_hash: 08e8681fa141843b7a65f3c314eb1498d878aa8f24e0a057195f43b0b078518b
+manifest_hash: b7a0a811e585df91ead97ea00fae3054a7548f9203b1ef25a00b6aed55588a42
 target: esp32p4
 version: 3.0.0

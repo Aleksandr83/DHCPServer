@@ -20,6 +20,17 @@ static const char* NVS_NAMESPACE = "dhcp";
 static const char* KEY_DEVICE_HOSTNAME = "hostname";
 // The single switch of the local-name publication (stage 219): 10 characters.
 static const char* KEY_DEVICE_LOCAL_NAME = "local_name";
+// The SSH server (stage 222). `ssh_allow_lan` is 13 characters, `ssh_host_key`
+// 12 — both inside the 15 NVS allows. The key is device state, not a setting.
+static const char* KEY_SSH_ENABLED   = "ssh_enabled";
+static const char* KEY_SSH_PORT      = "ssh_port";
+static const char* KEY_SSH_ALLOW_LAN = "ssh_allow_lan";
+static const char* KEY_SSH_HOST_KEY  = "ssh_host_key";
+// The SSH journal's three settings (stage 223). `ssh_log_size` is 12 characters,
+// `ssh_logfile` 11 and `ssh_log_term` 12 — all inside the 15 NVS allows.
+static const char* KEY_SSH_LOG_FILE  = "ssh_logfile";
+static const char* KEY_SSH_LOG_TERM  = "ssh_log_term";
+static const char* KEY_SSH_LOG_SIZE  = "ssh_log_size";
 static const char* KEY_WIFI_SSID      = "wifi_ssid";
 static const char* KEY_WIFI_PASS      = "wifi_pass";
 static const char* KEY_DHCP_ENABLED   = "dhcp_enabled";
@@ -825,6 +836,41 @@ FileConfig Config::getFiles() const
 void Config::setFiles(const FileConfig& cfg)
 {
     writeI32(KEY_FILES_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
+}
+
+// ─── SSH server ─────────────────────────────────────
+
+SshConfig Config::getSsh() const
+{
+    SshConfig cfg;
+    cfg.enabled = readI32(KEY_SSH_ENABLED, 0) != 0;            // default OFF
+    cfg.port = sshPortOrDefault(readI32(KEY_SSH_PORT, kSshDefaultPort));
+    cfg.allowOwnSubnet = readI32(KEY_SSH_ALLOW_LAN, 1) != 0;   // default ON
+    cfg.logFile = readI32(KEY_SSH_LOG_FILE, 1) != 0;           // default ON
+    cfg.logTerminal = readI32(KEY_SSH_LOG_TERM, 0) != 0;       // default OFF
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_SSH_LOG_SIZE, 0)));
+    return cfg;
+}
+
+void Config::setSsh(const SshConfig& cfg)
+{
+    writeI32(KEY_SSH_ENABLED, cfg.enabled ? 1 : 0);
+    writeI32(KEY_SSH_PORT, static_cast<int32_t>(sshPortOrDefault(cfg.port)));
+    writeI32(KEY_SSH_ALLOW_LAN, cfg.allowOwnSubnet ? 1 : 0);
+    writeI32(KEY_SSH_LOG_FILE, cfg.logFile ? 1 : 0);
+    writeI32(KEY_SSH_LOG_TERM, cfg.logTerminal ? 1 : 0);
+    writeI32(KEY_SSH_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
+}
+
+string Config::getSshHostKey() const
+{
+    return readStr(KEY_SSH_HOST_KEY, "");
+}
+
+void Config::setSshHostKey(const string& keyBase64)
+{
+    writeStr(KEY_SSH_HOST_KEY, keyBase64);
 }
 
 } // namespace core

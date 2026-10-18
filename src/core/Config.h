@@ -6,6 +6,7 @@
 #include "core/DeviceHostName.h"
 #include "core/LogFileSizes.h"
 #include "core/NtpServers.h"
+#include "core/SshSettings.h"
 #include "security/CertStore.h"
 
 #include <string>
@@ -297,6 +298,31 @@ struct TimeConfig {
 };
 
 /**
+ * @brief SSH server configuration (stage 222).
+ *
+ * OFF by default: an appliance that opened a remote shell after a firmware
+ * update would be a surprise with a password on it. The switch, the port and the
+ * LAN-only filter are the three things the General page owns; the host key is
+ * device state, not a setting, and lives in its own accessors below.
+ */
+struct SshConfig {
+    bool enabled = false;
+    uint16_t port = core::kSshDefaultPort;
+    /// Answer only clients inside the device's own subnet (address + netmask
+    /// from the DHCP settings, like the DNS/NTP/file filters). ON by default —
+    /// a shell is the last thing that should be reachable from outside the LAN.
+    bool allowOwnSubnet = true;
+    /// Keep the sessions in `/fat/logs/SSH.log` (stage 223). ON by default: the
+    /// operator asked for a journal that exists from the first session.
+    bool logFile = true;
+    /// Echo the same sentences to the UART console.
+    bool logTerminal = false;
+    /// The cap the journal rotates at, in bytes (one of `LogFileSizes.h`'s
+    /// three). `ssh_log_size` is 12 characters, inside the 15 NVS allows.
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
+};
+
+/**
  * @brief File explorer configuration (FAT volumes on the ESP32-P4).
  *
  * The explorer can serve whole file trees, so it is LAN-only by default, like
@@ -397,6 +423,20 @@ public:
     // ─── File explorer (FAT volumes) ─────────────────
     FileConfig getFiles() const;
     void setFiles(const FileConfig& cfg);
+
+    // ─── SSH server ──────────────────────────────────
+    SshConfig getSsh() const;
+    void setSsh(const SshConfig& cfg);
+    /**
+     * @brief The host key the SSH server presents, base64 (empty = none yet).
+     *
+     * Device state rather than a setting: it is generated on the device the first
+     * time the server starts and is deliberately **not** part of the settings
+     * export — a private key is a secret, exactly like a password. A restored
+     * device makes its own key.
+     */
+    std::string getSshHostKey() const;
+    void setSshHostKey(const std::string& keyBase64);
 
     // ─── Factory reset ───────────────────────────────
     // Erases the whole "dhcp" NVS namespace. All getters then fall back to

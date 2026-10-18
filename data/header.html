@@ -24,11 +24,30 @@
                         <a href="/pages/dns_logging.html" data-i18n="nav.dns_logging">Logging</a>
                     </div>
                 </div>
+                <!-- Services is the group of the device's own servers. It starts
+                     with the time server, which used to be a top-level entry of
+                     its own; a second service goes in here as another group
+                     rather than as another top-level menu. Clicking the group
+                     expands it in place (app.js: toggleSubmenu). -->
                 <div class="nav-dropdown">
-                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.time">Time Server</button>
+                    <button class="nav-dropdown-toggle" onclick="toggleDropdown(event)" data-i18n="nav.services">Services</button>
                     <div class="nav-dropdown-menu">
-                        <a href="/pages/ntp_setup.html" data-i18n="nav.time_general">General</a>
-                        <a href="/pages/ntp_logging.html" data-i18n="nav.time_logging">Logging</a>
+                        <div class="nav-submenu">
+                            <button type="button" class="nav-submenu-toggle"
+                                    onclick="toggleSubmenu(event)" data-i18n="nav.ssh">SSH Server</button>
+                            <div class="nav-submenu-list">
+                                <a href="/pages/ssh_general.html" data-i18n="nav.ssh_general">General</a>
+                                <a href="/pages/ssh_logging.html" data-i18n="nav.ssh_logging">Logging</a>
+                            </div>
+                        </div>
+                        <div class="nav-submenu">
+                            <button type="button" class="nav-submenu-toggle"
+                                    onclick="toggleSubmenu(event)" data-i18n="nav.time">Time Server</button>
+                            <div class="nav-submenu-list">
+                                <a href="/pages/ntp_setup.html" data-i18n="nav.time_general">General</a>
+                                <a href="/pages/ntp_logging.html" data-i18n="nav.time_logging">Logging</a>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="nav-dropdown">

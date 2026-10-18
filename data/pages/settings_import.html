@@ -78,6 +78,7 @@
                     ['settings_import.sec_security', r.imported.security],
                     ['settings_import.sec_files', r.imported.files],
                     ['settings_import.sec_device', r.imported.device],
+                    ['settings_import.sec_ssh', r.imported.ssh],
                 ].filter(pair => pair[1]).map(pair => tr(pair[0]));
                 if (applied.length) {
                     lines.push(tr('settings_import.applied') + ' ' + applied.join(', '));

@@ -23,11 +23,46 @@ CONFIG_ETH_USE_ESP32_EMAC=y
 # No SPI Ethernet (ENC28J60 path is ESP32-only).
 CONFIG_ETH_USE_SPI_ETHERNET=n
 
-# CPU frequency: leave unset so ESP-IDF picks 400 MHz on silicon rev >= v1.3,
-# or 360 MHz automatically on earlier silicon. If your module cannot run
-# 400 MHz, add:  CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
-CONFIG_FW_MIN_DATETIME="2026-10-16 23:00:00"
+# Silicon revision: the Waveshare ESP32-P4-ETH ships rev **v1.3**, which belongs
+# to the "< 3.0" family. ESP-IDF 6.x builds for rev >= v3.1 by default and the
+# bootloader it produces refuses to boot on rev v1.3 ("requires chip revision in
+# range [v3.1 - v3.99]"), so the two families are opted in explicitly here.
+# Revisions below 3.0 are incompatible with the >= 3.0 ones by design; this also
+# makes 360 MHz the default CPU frequency for the target (400 MHz stays
+# selectable in menuconfig).
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# PSRAM: 32 MB stacked in the ESP32-P4 module (README, board table). It must be
+# written here, not left to the live sdkconfig: `idf.py set-target` regenerates
+# that file from these defaults and anything set only in menuconfig is silently
+# lost. With PSRAM off the main page hides its memory meter (it is shown when
+# heap_caps_get_total_size(MALLOC_CAP_SPIRAM) is above zero), the internal DNS
+# cache reports itself unavailable, and the SSH tasks fall back from PSRAM to
+# internal RAM. 16-line (hex) mode at 200 MHz is the fastest the `< 3.0`
+# silicon family allows — 250 MHz is offered only for rev >= 3.0.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_FW_MIN_DATETIME="2026-10-18 22:00:00"
 
 # HTTPS for the web interface and on-device certificate generation (stage 156).
 CONFIG_ESP_HTTPS_SERVER_ENABLE=y
 CONFIG_MBEDTLS_X509_CREATE_C=y
+
+# termios.h functions: the SSH server component (libssh) compiles a getpass()
+# helper that needs `struct termios`. IDF keeps that structure behind this
+# option, and without it the component fails to compile rather than degrade.
+CONFIG_VFS_SUPPORT_TERMIOS=y
+
+# Main task stack, raised from the IDF default of 3584 bytes. app_main is where
+# the whole bring-up runs, and since stage 222 it also starts the SSH server:
+# SshServer::start() calls ssh_bind_listen() on the caller's stack, which ends
+# up in lwIP getaddrinfo(). With the default the main task ran out of stack
+# there and the board panicked with "Stack protection fault" right after
+# "DnsServer: Local name disabled" (SP 0x4ff282e0 against a 0x4ff282e8 bound).
+# The first boot also generates the Ed25519 host key on this path, so the
+# margin covers key generation as well.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288

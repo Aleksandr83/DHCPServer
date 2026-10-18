@@ -195,6 +195,8 @@ private:
     static esp_err_t postSettingsGeneralHandler(httpd_req* req) { return RestApi::handlePostSettingsGeneral(req); }
     /** @brief The UPnP device description (public, no auth — stage 220). */
     static esp_err_t getUpnpDeviceHandler(httpd_req* req) { return RestApi::handleGetUpnpDevice(req); }
+    static esp_err_t getSshSettingsHandler(httpd_req* req) { return RestApi::handleGetSshSettings(req); }
+    static esp_err_t postSshSettingsHandler(httpd_req* req) { return RestApi::handlePostSshSettings(req); }
     static esp_err_t getSettingsExportHandler(httpd_req* req) { return RestApi::handleGetSettingsExport(req); }
     static esp_err_t postSettingsImportHandler(httpd_req* req) { return RestApi::handlePostSettingsImport(req); }
     static esp_err_t postSettingsResetHandler(httpd_req* req) { return RestApi::handlePostSettingsReset(req); }

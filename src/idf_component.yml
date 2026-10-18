@@ -2,3 +2,13 @@ dependencies:
   # mDNS/DNS-SD responder (stage 219). It lives in the component registry, not
   # in ESP-IDF itself; 1.14.0 is the current line that builds against IDF 6.x.
   espressif/mdns: "^1.14.0"
+  # SSH2 server (stage 222): upstream libssh, vendored by the component. The
+  # project is LGPL-2.1; the sources travel with the component, which is what the
+  # licence asks for. SSH exists only in the ESP32-P4 build (see SshServer.cpp),
+  # and so does the libssh requirement in CMakeLists; the legacy ESP32 target
+  # must not build it: its sdkconfig has no CONFIG_VFS_SUPPORT_TERMIOS, and
+  # without it <termios.h> carries no struct termios at all.
+  david-cermak/libssh:
+    version: "^0.12.2"
+    rules:
+      - if: "target in [esp32p4]"

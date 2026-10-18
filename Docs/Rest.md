@@ -1718,6 +1718,104 @@ machine's network-discovery settings — WS-Discovery is the mechanism its
 
 ---
 
+## GET /api/ssh/settings
+
+The SSH server — the switch, the port, the LAN-only filter and the journal's three
+settings — plus the state the listener is in **right now**.
+
+**Response `200 OK`:**
+```json
+{
+  "enabled": false,
+  "port": 22,
+  "allow_own_subnet": true,
+  "state": "stopped",
+  "sessions": 0,
+  "available": true,
+  "log_file": true,
+  "log_terminal": false,
+  "log_file_size": 65536,
+  "log_target": "/fat/logs/SSH.log"
+}
+```
+
+`enabled` is what the device **remembers**, `state` is what it **does**
+(`running` or `stopped`); the two disagree while a listener failed to start, and
+the page shows `state` rather than the switch. `sessions` counts the sessions
+running at this instant (at most two). `available` is `false` on a build without
+the SSH component — the ESP32-P4 image is the only one that links it.
+
+`log_file`, `log_terminal` and `log_file_size` are the journal's three settings
+(`SSH.log`, the UART echo, and one of the 64/128/256 KB caps), and `log_target`
+is the path the journal actually writes to — empty before the log task started,
+so the page can name the file instead of describing it from memory.
+
+---
+
+## POST /api/ssh/settings
+
+**Request body:** `{"enabled": true, "port": 2222, "allow_own_subnet": true,
+"log_file": true, "log_terminal": false, "log_file_size": 65536}` — every field is
+optional and a field that is absent keeps its stored value.
+
+The port is **1..65535**; anything else is refused with `400` and nothing is
+saved. The switch, the port and the filter are applied **at once**: the listener
+is stopped and started again on the new port, so a port never waits for a reboot.
+If the listener cannot start (the port is taken, memory is short), the answer is
+`500` with the reason and `GET` keeps reporting `state: "stopped"` — the switch
+stays where the operator put it, but the page never claims a listener that is not
+there.
+
+The journal's three fields do **not** restart the listener: the log asks its own
+switches on every sentence, and a smaller cap archives an over-full file at once.
+That is what lets the Logging page save its settings without dropping a session
+somebody is using.
+
+`allow_own_subnet` refuses every client outside the device's own subnet **before
+authentication** (`core::SubnetFilter`, the same rules the DNS, NTP and file
+server use); the subnet is the device's address and mask from the DHCP settings.
+
+**Response `200 OK`:**
+```json
+{ "status": "ok", "enabled": true, "port": 2222,
+  "allow_own_subnet": true, "state": "running" }
+```
+
+### What a session gets
+
+Login is the **web interface's credentials** (`Settings ▸ Security`), compared in
+constant time, three attempts per connection. The shell runs the **same commands
+as the UART console** (`menu::ConsoleCommands`): `help`, `lan status`,
+`ifconfig`, `version`, `passwd reset`, `settings reset`, `reboot`, `exit`. Two
+sessions may run at once; the third is refused and the log says so.
+
+The host key is an **Ed25519 key generated on the device** the first time the
+server starts and kept in NVS (`ssh_host_key`). It is device state, not a
+setting: it is deliberately absent from the settings export — a private key is a
+secret — so a restored device makes its own and clients see a new fingerprint.
+
+### The journal — `/fat/logs/SSH.log`
+
+Every session and every refusal is written here, one line each, stamped in the
+device's local time:
+
+```
+[2026-10-18 20:15:02] ssh: session opened from 192.168.1.5 as admin
+[2026-10-18 20:15:11] ssh: refused password from 192.168.1.61 (1 of 3)
+[2026-10-18 20:20:31] ssh: session closed from 192.168.1.5 after 5 min 29 s
+[2026-10-18 20:22:04] ssh: refused a session from 10.0.0.7: outside the own subnet
+[2026-10-18 20:23:10] ssh: refused a session from 192.168.1.9: 2 of 2 already open
+```
+
+A full file is archived to the card as `log/Archive/Ssh/<first>-<last>/SSH.log`;
+with no card the newest ten lines are carried into the new file. The cap is one of
+64/128/256 KB, chosen on the Logging page, and can be echoed to UART with its own
+switch. A fault of the **server** — a port that cannot be bound, a host key that is
+refused — is written to `Errors.log` instead: this file is the record of sessions,
+not of faults.
+
+---
+
 ## GET /api/settings/export
 
 Full backup of all persisted settings as a single JSON document. Passwords are
@@ -1792,7 +1890,9 @@ Full backup of all persisted settings as a single JSON document. Passwords are
     "cert_name": "dhcpserver"
   },
   "files": { "allow_own_subnet": true },
-  "device": { "hostname": "DhcpServer", "local_name": true }
+  "device": { "hostname": "DhcpServer", "local_name": true },
+  "ssh": { "enabled": false, "port": 22, "allow_own_subnet": true,
+           "log_file": true, "log_terminal": false, "log_file_size": 65536 }
 }
 ```
 
@@ -1810,6 +1910,11 @@ The `device` section carries the device's own **host name** (see
 `GET /api/settings/general`) and its **publishing switch**; the import applies
 the name to the network interface as soon as it is read, and starts or stops the
 mDNS responder together with the DNS half afterwards.
+
+The `ssh` section carries the SSH server's settings, including the journal's
+switch, terminal echo and cap. The **host key is not exported** — a private key is
+a secret, like a password — so a restored device generates its own on the next
+start, and clients see a new fingerprint.
 
 ---
 
@@ -1947,7 +2052,8 @@ Import logic:
    REST log), the lease limit, the allow-list, every DNS setting (both caches, the
    autosave of each of them — the cache and the statistics file — auto-update, the
    non-A/AAAA policy, the subnet filter), the time server, the security limits, the
-   web-file access filter, the device host name and its publishing switch, and the HTTPS switch. The DHCP/DNS/SNTP servers are
+   web-file access filter, the device host name and its publishing switch, the SSH
+   server, and the HTTPS switch. The DHCP/DNS/SNTP servers are
    started or stopped to match the imported `enabled` flags. Two things cannot be
    applied on the fly:
    - a change of the network parameters (`server_ip` / `subnet` / `gateway`) —
@@ -1987,7 +2093,7 @@ Import logic:
   "imported": {
     "dhcp": true, "static_bindings": true, "allowed_computers": true,
     "dns": true, "time": true, "local_hosts": true, "security": true,
-    "files": true, "device": true
+    "files": true, "device": true, "ssh": true
   },
   "skipped_fields": ["some_future_field"],
   "warnings": ["cert_storage: no certificate on sd"]

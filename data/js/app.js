@@ -947,9 +947,10 @@ function toggleDropdown(event) {
     if (!wasOpen) dd.classList.add('open');
 }
 
-/* Toggle a group inside an open dropdown (Settings → Security). It deliberately
-   leaves the surrounding dropdown alone: the menu it lives in has to stay open,
-   and a click on the group is not a click "outside" the menu. */
+/* Toggle a group inside an open dropdown (Settings → Security, Services →
+   Time Server). It deliberately leaves the surrounding dropdown alone: the menu
+   it lives in has to stay open, and a click on the group is not a click
+   "outside" the menu. */
 function toggleSubmenu(event) {
     event.preventDefault();
     event.stopPropagation();

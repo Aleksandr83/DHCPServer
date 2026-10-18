@@ -238,7 +238,7 @@ int main()
     const char* const kStructural[] = {
         "format", "schema", "firmware_version",
         "dhcp", "static_bindings", "allowed_computers", "dns", "time",
-        "local_hosts", "security", "files", "device",
+        "local_hosts", "security", "files", "device", "ssh",
     };
     vector<string> ignored;
     for (const string& key : exported) {

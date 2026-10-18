@@ -31,6 +31,10 @@
 #include "../net/MdnsResponder.h"
 #include "../net/SsdpResponder.h"
 #include "../net/SsdpMessages.h"
+#include "../net/SshServer.h"
+#include "../core/SshSettings.h"
+#include "../core/SshLog.h"
+#include "../core/LogFileSizes.h"
 
 #include <cstdio>
 #include <cerrno>
@@ -146,6 +150,7 @@ namespace web {
 ::dhcp::security::CertStore* RestApi::s_certs = nullptr;
 ::dhcp::net::MdnsResponder* RestApi::s_mdns = nullptr;
 ::dhcp::net::SsdpResponder* RestApi::s_ssdp = nullptr;
+::dhcp::net::SshServer* RestApi::s_ssh = nullptr;
 
 void RestApi::init(::dhcp::wifi::IWiFiManager* wifi,
                     ::dhcp::dhcp::IDhcpServer* dhcpSrv,
@@ -178,6 +183,30 @@ void RestApi::setMdnsResponder(::dhcp::net::MdnsResponder* responder)
 void RestApi::setSsdpResponder(::dhcp::net::SsdpResponder* responder)
 {
     s_ssdp = responder;
+}
+
+void RestApi::setSshServer(::dhcp::net::SshServer* server)
+{
+    s_ssh = server;
+}
+
+/**
+ * @brief Apply the SSH settings to the listener (stage 222).
+ *
+ * The listener is restarted whenever a switch is turned on or the port changes:
+ * a port that only takes effect after a reboot is a port the page lies about.
+ * @return the state the page reports, so "on" is never shown while nothing
+ *         listens.
+ */
+const char* RestApi::applySshLive()
+{
+    const auto cfg = ::dhcp::core::Config::instance().getSsh();
+    if (s_ssh == nullptr) return "unavailable";
+
+    s_ssh->stop();
+    if (!cfg.enabled) return "stopped";
+    if (!s_ssh->start(cfg.port)) return "error";
+    return "running";
 }
 
 bool RestApi::applyLocalNameLive()
@@ -2295,6 +2324,136 @@ esp_err_t RestApi::handleGetUpnpDevice(httpd_req* req)
 }
 
 // ─────────────────────────────────────────────────────
+// GET/POST /api/ssh/settings — the SSH server (stage 222)
+// ─────────────────────────────────────────────────────
+
+esp_err_t RestApi::handleGetSshSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    const auto cfg = ::dhcp::core::Config::instance().getSsh();
+    string json = "{";
+    addJsonBool(json, "enabled", cfg.enabled, false);
+    addJsonInt(json, "port", cfg.port, true);
+    addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
+    // What the device does right now, not what it remembers: the switch and the
+    // listener can disagree while a session is being refused for lack of memory.
+    const bool running = s_ssh && s_ssh->isRunning();
+    addJsonString(json, "state", running ? "running" : "stopped", true);
+    addJsonInt(json, "sessions", s_ssh ? s_ssh->activeSessions() : 0, true);
+    addJsonBool(json, "available", ::dhcp::net::SshServer::available(), true);
+    addJsonBool(json, "log_file", cfg.logFile, true);
+    addJsonBool(json, "log_terminal", cfg.logTerminal, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
+    // Where the journal actually is, so the page can name the file instead of
+    // describing it from memory.
+    addJsonString(json, "log_target", ::dhcp::core::SshLog::instance().target(), true);
+    json += "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostSshSettings(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+
+    string body = readBody(req);
+    if (body.empty()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty body");
+        return ESP_OK;
+    }
+
+    auto& cfgMgr = ::dhcp::core::Config::instance();
+    auto cfg = cfgMgr.getSsh();
+    const auto previous = cfg;
+
+    // A field that is absent keeps its stored value — an absent field must never
+    // mean "reset it" (the same rule the General page follows).
+    if (body.find("\"port\"") != string::npos) {
+        const int port = jsonGetInt(body, "port", cfg.port);
+        if (!::dhcp::core::sshPortValid(port)) {
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"A port is 1 to 65535\"}");
+            return ESP_OK;
+        }
+        cfg.port = static_cast<uint16_t>(port);
+    }
+    if (body.find("\"allow_own_subnet\"") != string::npos) {
+        cfg.allowOwnSubnet = jsonGetBool(body, "allow_own_subnet", cfg.allowOwnSubnet);
+    }
+    if (body.find("\"log_file\"") != string::npos) {
+        cfg.logFile = jsonGetBool(body, "log_file", cfg.logFile);
+    }
+    if (body.find("\"log_terminal\"") != string::npos) {
+        cfg.logTerminal = jsonGetBool(body, "log_terminal", cfg.logTerminal);
+    }
+    if (body.find("\"log_file_size\"") != string::npos) {
+        const int64_t size = jsonGetInt(body, "log_file_size", 0);
+        if (size > 0 && ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+            cfg.logFileSize = static_cast<uint32_t>(size);
+        }
+        // A size this firmware does not offer is not a size: keep the one the
+        // device has rather than take a number nobody can choose here.
+    }
+    if (body.find("\"enabled\"") != string::npos) {
+        const bool want = jsonGetBool(body, "enabled", cfg.enabled);
+        if (want && !::dhcp::net::SshServer::available()) {
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"SSH is not part of this build\"}");
+            return ESP_OK;
+        }
+        cfg.enabled = want;
+    }
+
+    cfgMgr.setSsh(cfg);
+    // The journal follows the settings without a restart: the switches are read by
+    // the log itself, and a smaller cap archives an over-full file at once.
+    auto& journal = ::dhcp::core::SshLog::instance();
+    journal.setLogFile(cfg.logFile);
+    journal.setLogTerminal(cfg.logTerminal);
+    journal.setFileLogSize(cfg.logFileSize);
+
+    // The listener is only restarted when something it cares about changed: the
+    // Logging page must not drop a session just because a switch moved.
+    const char* state = s_ssh && s_ssh->isRunning() ? "running" : "stopped";
+    if (cfg.enabled != previous.enabled || cfg.port != previous.port) {
+        state = applySshLive();
+        if (strcmp(state, "error") == 0) {
+            // The listener could not start (a port already in use, no memory): keep
+            // the settings, but say so instead of showing a green switch over nothing.
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req,
+                "{\"status\":\"error\",\"message\":\"The SSH server could not start on that port\"}");
+            return ESP_OK;
+        }
+    }
+
+    string json = "{\"status\":\"ok\",";
+    addJsonBool(json, "enabled", cfg.enabled, false);
+    addJsonInt(json, "port", cfg.port, true);
+    addJsonBool(json, "allow_own_subnet", cfg.allowOwnSubnet, true);
+    addJsonBool(json, "log_file", cfg.logFile, true);
+    addJsonBool(json, "log_terminal", cfg.logTerminal, true);
+    addJsonInt(json, "log_file_size", static_cast<int64_t>(cfg.logFileSize), true);
+    addJsonString(json, "state", state, true);
+    json += "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    ESP_LOGI(TAG, "SSH: enabled=%d port=%u lanOnly=%d log=%d/%d state=%s",
+             cfg.enabled ? 1 : 0, static_cast<unsigned>(cfg.port),
+             cfg.allowOwnSubnet ? 1 : 0, cfg.logFile ? 1 : 0,
+             cfg.logTerminal ? 1 : 0, state);
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────────────
 // GET /api/settings/export
 // Full backup of all NVS settings as JSON, including the firmware version.
 // Passwords are intentionally NOT exported (log/cache auth and web password) —
@@ -2496,6 +2655,19 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         json += "}";
     }
 
+    // ── ssh section (the SSH server, stage 222) ──
+    {
+        const auto sshCfg = cfgMgr.getSsh();
+        json += ",\"ssh\":{";
+        addJsonBool(json, "enabled", sshCfg.enabled, false);
+        addJsonInt(json, "port", sshCfg.port, true);
+        addJsonBool(json, "allow_own_subnet", sshCfg.allowOwnSubnet, true);
+        addJsonBool(json, "log_file", sshCfg.logFile, true);
+        addJsonBool(json, "log_terminal", sshCfg.logTerminal, true);
+        addJsonInt(json, "log_file_size", static_cast<int64_t>(sshCfg.logFileSize), true);
+        json += "}";
+    }
+
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -2518,7 +2690,7 @@ static const char* const kKnownSettingsKeys[] = {
     "format", "schema", "firmware_version",
     // ── sections ──
     "dhcp", "static_bindings", "allowed_computers", "dns", "time",
-    "local_hosts", "security", "files", "device",
+    "local_hosts", "security", "files", "device", "ssh",
     // ── dhcp ──
     "enabled", "server_ip", "start_ip", "end_ip", "subnet", "gateway",
     "lease_time", "max_lease_entries", "log_terminal", "log_rest", "log_url",
@@ -2546,6 +2718,8 @@ static const char* const kKnownSettingsKeys[] = {
     "cert_storage", "cert_name",
     // ── device ──
     "hostname", "local_name",
+    // ── ssh ──
+    "port", "log_file_size", "log_terminal",
 };
 
 /// @brief `["key","key"]` of the keys this firmware does not know, or `""`.
@@ -2624,7 +2798,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     bool importedDhcp = false, importedBind = false, importedDns = false;
     bool importedHosts = false, importedSec = false, importedTime = false;
     bool importedAllowed = false, importedFiles = false;
-    bool importedDevice = false;
+    bool importedDevice = false, importedSsh = false;
     // What the file asked for and the device could not do. The answer used to be
     // a bare "ok" plus per-section flags, so a refused list read as a successful
     // restore (stage 183b).
@@ -3120,6 +3294,39 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
     }
 
+    // SSH server (stage 222)
+    if (body.find("\"ssh\"") != string::npos) {
+        size_t s = body.find("\"ssh\"");
+        size_t open = body.find('{', s);
+        if (open != string::npos) {
+            string seg = body.substr(open);
+            auto cur = cfgMgr.getSsh();
+            cur.enabled = jsonGetBool(seg, "enabled", cur.enabled);
+            {
+                const int port = jsonGetInt(seg, "port", cur.port);
+                if (::dhcp::core::sshPortValid(port)) {
+                    cur.port = static_cast<uint16_t>(port);
+                } else {
+                    warnings.push_back("ssh: port " + to_string(port) + " is not 1 to 65535");
+                }
+            }
+            cur.allowOwnSubnet =
+                jsonGetBool(seg, "allow_own_subnet", cur.allowOwnSubnet);
+            cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
+            cur.logTerminal = jsonGetBool(seg, "log_terminal", cur.logTerminal);
+            {
+                // A size this firmware does not offer is not a size: the document
+                // may come from another build, so the device keeps its own.
+                const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                if (size > 0 && ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                    cur.logFileSize = static_cast<uint32_t>(size);
+                }
+            }
+            cfgMgr.setSsh(cur);
+            importedSsh = true;
+        }
+    }
+
     // ─── 5. Start / stop the services (best effort) ───
     // The live settings went in next to their `set…()` calls above, through the
     // same helpers the settings POST handlers use. What is left here is the
@@ -3154,6 +3361,21 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     if (importedDevice && !applyLocalNameLive()) {
         warnings.push_back("device: the local name could not be published");
     }
+    // The SSH half follows the services: the listener is restarted on the port
+    // the file asked for, and a switch that reads "on" only stays on when it
+    // actually started.
+    if (importedSsh) {
+        // The journal follows the imported settings before the listener is
+        // touched, so the first session it starts writes into the right file.
+        const auto sshCfg = cfgMgr.getSsh();
+        ::dhcp::core::SshLog::instance().setLogFile(sshCfg.logFile);
+        ::dhcp::core::SshLog::instance().setLogTerminal(sshCfg.logTerminal);
+        ::dhcp::core::SshLog::instance().setFileLogSize(sshCfg.logFileSize);
+        const char* sshState = applySshLive();
+        if (strcmp(sshState, "error") == 0) {
+            warnings.push_back("ssh: the SSH server could not start on that port");
+        }
+    }
 
     // ─── 6. Build response ───
     string json = "{";
@@ -3173,6 +3395,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     addJsonBool(json, "security", importedSec, true);
     addJsonBool(json, "files", importedFiles, true);
     addJsonBool(json, "device", importedDevice, true);
+    addJsonBool(json, "ssh", importedSsh, true);
     json += "}";
     if (!skipped.empty()) json += ",\"skipped_fields\":[" + skipped + "]";
     // The sections the file asked for but the device could not do (stage 183b):
@@ -3187,13 +3410,13 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
-    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d%d%d warnings=%u",
+    ESP_LOGI(TAG, "Settings import: ver=%s file=%s mismatch=%d new=%d reboot=%d imported=%d%d%d%d%d%d%d%d%d%d warnings=%u",
              curVer.toString().c_str(), fileVerStr.c_str(),
              versionMismatch ? 1 : 0, fileNewer ? 1 : 0, rebootRequired ? 1 : 0,
              importedDhcp ? 1 : 0, importedBind ? 1 : 0, importedDns ? 1 : 0,
              importedHosts ? 1 : 0, importedSec ? 1 : 0, importedTime ? 1 : 0,
              importedAllowed ? 1 : 0, importedFiles ? 1 : 0,
-             importedDevice ? 1 : 0,
+             importedDevice ? 1 : 0, importedSsh ? 1 : 0,
              static_cast<unsigned>(warnings.size()));
     return ESP_OK;
 }

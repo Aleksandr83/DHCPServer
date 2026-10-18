@@ -17,7 +17,7 @@ namespace time { class TimeServer; }
 namespace web  { class AuthManager; }
 namespace files { class IFileManager; }
 namespace security { class CertStore; }
-namespace net { class MdnsResponder; class SsdpResponder; }
+namespace net { class MdnsResponder; class SsdpResponder; class SshServer; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -88,6 +88,8 @@ public:
     static void setMdnsResponder(::dhcp::net::MdnsResponder* responder);
     /// @brief Give the REST layer the SSDP responder (stage 220), same reason.
     static void setSsdpResponder(::dhcp::net::SsdpResponder* responder);
+    /// @brief Give the REST layer the SSH server (stage 222), same reason.
+    static void setSshServer(::dhcp::net::SshServer* server);
     /** @brief State of the pair, the storage picker and the HTTPS switch. */
     static esp_err_t handleGetCertificates(httpd_req* req);
     /** @brief `generate` / `delete` / `storage` on the pair. */
@@ -117,6 +119,15 @@ public:
      */
     static esp_err_t handleGetSettingsGeneral(httpd_req* req);
     static esp_err_t handlePostSettingsGeneral(httpd_req* req);
+    /**
+     * @brief The SSH server's settings (stage 222).
+     *
+     * `GET` answers the switch, the port, the LAN-only filter and whether the
+     * listener is up right now; `POST` applies the change live — a changed port
+     * restarts the listener on the new one rather than waiting for a reboot.
+     */
+    static esp_err_t handleGetSshSettings(httpd_req* req);
+    static esp_err_t handlePostSshSettings(httpd_req* req);
     /**
      * @brief The UPnP device description (`GET /upnp/device.xml`, stage 220).
      *
@@ -260,6 +271,16 @@ private:
      */
     static bool applyLocalNameLive();
 
+    /**
+     * @brief Apply the SSH settings to the listener (stage 222).
+     *
+     * The listener is restarted whenever the switch is turned on or the port
+     * changes: a port that only takes effect after a reboot is a port the page
+     * lies about. @return the state to report (`running`, `stopped`, `error`,
+     * `unavailable`), so "on" is never shown while nothing listens.
+     */
+    static const char* applySshLive();
+
     static ::dhcp::wifi::IWiFiManager* s_wifi;
     static ::dhcp::dhcp::IDhcpServer*  s_dhcp;
     static ::dhcp::dns::DnsServer*     s_dns;
@@ -280,6 +301,8 @@ private:
     static ::dhcp::net::MdnsResponder* s_mdns;
     /// @brief The SSDP responder of this build (stage 220).
     static ::dhcp::net::SsdpResponder* s_ssdp;
+    /// @brief The SSH server of this build (stage 222).
+    static ::dhcp::net::SshServer* s_ssh;
 };
 
 } // namespace web

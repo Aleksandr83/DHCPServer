@@ -137,7 +137,6 @@ menu "Files (file explorer)"
 
     config FILES_CHECK_MAX_MB
         int "Volume check: how much data one check reads at most (MB)"
-        depends on IDF_TARGET_ESP32P4
         range 1 512
         default 64
         help

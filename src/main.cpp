@@ -30,6 +30,7 @@
 #include "core/ErrorLog.h"
 #include "core/AuthLog.h"
 #include "core/JobLog.h"
+#include "core/SshLog.h"
 #include "eth/EthManager.h"
 #include "eth/EthWifiAdapter.h"
 #include "files/FileManager.h"
@@ -39,6 +40,7 @@
 #include "dns/DnsServer.h"
 #include "net/MdnsResponder.h"
 #include "net/SsdpResponder.h"
+#include "net/SshServer.h"
 #include "storage/FatFileSystem.h"
 #include "storage/SdFileSystem.h"
 #include "time/TimeServer.h"
@@ -79,6 +81,9 @@ static dhcp::web::WebServer     s_webServer(s_netAdapter, s_dhcpServer,
 // after s_webServer (static init order = declaration order).
 static dhcp::menu::TerminalMenu s_terminalMenu(s_netAdapter, s_ledController,
                                                &s_webServer.auth());
+// The SSH server authenticates with the web login pair (stage 222), so it is
+// constructed after s_webServer for the same reason.
+static dhcp::net::SshServer     s_sshServer(s_netAdapter, &s_webServer.auth());
 
 // Forward declarations
 static void onNetworkConnected();
@@ -175,6 +180,18 @@ extern "C" void app_main(void)
         dhcp::core::AuthLog::instance().setFileLogSize(secCfg.logFileSize);
         dhcp::core::AuthLog::instance().setLogFile(secCfg.logAuth);
     }
+    // The SSH journal (stage 223): the same arrangement as the authorisation log —
+    // the task runs from boot, the switches decide whether sentences are written,
+    // and the volumes are known only here.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        dhcp::core::SshLog::instance().start(
+            "/fat", cardVolume ? cardVolume->mountPoint() : string(),
+            [] {
+                auto* card = s_fileManager.find("sd");
+                return card != nullptr && card->isMounted();
+            });
+    }
     // LAN-only access policy (device address + netmask from the DHCP settings).
     s_fileManager.applyAccessFilter();
 
@@ -245,6 +262,29 @@ extern "C" void app_main(void)
         }
         if (localName && !s_ssdpResponder.start(dhcpCfg.serverIp)) {
             ESP_LOGW(TAG, "the device could not be advertised over SSDP");
+        }
+    }
+
+    // ─── SSH server (stage 222) ─────────────────────
+    // Off unless the operator turned it on. The same lifecycle hooks as the
+    // serial console, so `reboot` over SSH keeps the statistics and the cache
+    // exactly as `reboot` over UART does.
+    {
+        dhcp::web::RestApi::setSshServer(&s_sshServer);
+        s_sshServer.setLifecycleHooks(
+            []() { s_dnsServer.saveStatsBeforeRestart(); s_dnsServer.saveCacheBeforeRestart(); },
+            []() { s_dnsServer.deleteStatsFile(); });
+
+        // The journal first: a session may start the moment the listener is up.
+        const auto sshCfg = dhcp::core::Config::instance().getSsh();
+        auto& sshLog = dhcp::core::SshLog::instance();
+        sshLog.setLogFile(sshCfg.logFile);
+        sshLog.setLogTerminal(sshCfg.logTerminal);
+        sshLog.setFileLogSize(sshCfg.logFileSize);
+
+        if (sshCfg.enabled && !s_sshServer.start(sshCfg.port)) {
+            ESP_LOGW(TAG, "the SSH server could not start on port %u",
+                     static_cast<unsigned>(sshCfg.port));
         }
     }
 
