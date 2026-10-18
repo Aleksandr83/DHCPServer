@@ -242,6 +242,9 @@ static esp_err_t postInternalCacheResetHandler(httpd_req* req) { return RestApi:
     static esp_err_t postFileCheckHandler(httpd_req* req) { return RestApi::handlePostFileCheck(req); }
     static esp_err_t postFileCheckCancelHandler(httpd_req* req) { return RestApi::handlePostFileCheckCancel(req); }
     static esp_err_t getFileCheckHandler(httpd_req* req) { return RestApi::handleGetFileCheck(req); }
+    static esp_err_t postFileRepairHandler(httpd_req* req) { return RestApi::handlePostFileRepair(req); }
+    static esp_err_t postFileRepairCancelHandler(httpd_req* req) { return RestApi::handlePostFileRepairCancel(req); }
+    static esp_err_t getFileRepairHandler(httpd_req* req) { return RestApi::handleGetFileRepair(req); }
     static esp_err_t postFileTransferHandler(httpd_req* req) { return RestApi::handlePostFileTransfer(req); }
     static esp_err_t getFileTransferHandler(httpd_req* req) { return RestApi::handleGetFileTransfer(req); }
     static esp_err_t postFileTransferCancelHandler(httpd_req* req) { return RestApi::handlePostFileTransferCancel(req); }

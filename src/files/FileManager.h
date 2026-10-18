@@ -92,6 +92,10 @@ public:
                           std::string* detail = nullptr) override;
     void checkCancel() override;
     CheckReport checkReport() override;
+    FileStatus repairStart(const std::string& volumeId,
+                           std::string* detail = nullptr) override;
+    void repairCancel() override;
+    RepairReport repairReport() override;
 
     // IFileOps — the seam the transfer engine works through. The signatures
     // match IFileManager where the operation is the same, so one override each
@@ -162,6 +166,18 @@ private:
     /** @brief Publish the finished report (locks the mutex). */
     void checkFinish(const CheckReport& report);
 
+    /** @brief Task body of the repair (deletes, walks again, repeats). */
+    static void repairTask(void* arg);
+
+    /** @brief The repair loop; runs in the task created by @ref repairStart. */
+    void repairRun(const std::string& volumeId);
+
+    /** @brief True when the operator asked the repair to stop. */
+    bool repairStopRequested();
+
+    /** @brief Publish @p report as the current repair snapshot (locks the mutex). */
+    void repairPublish(const RepairReport& report);
+
     std::vector<std::unique_ptr<storage::IFileSystem>> volumes_;
     uint32_t lastRetryMs_ = 0;
 
@@ -183,6 +199,13 @@ private:
     bool checkCancel_ = false;
     std::string checkMount_;
     CheckReport checkState_;
+
+    // Repair job: deletes what the check found, walks again, repeats. One at a
+    // time, same shape as the check job.
+    void* repairMutex_ = nullptr;
+    void* repairTask_ = nullptr;
+    bool repairCancel_ = false;
+    RepairReport repairState_;
 
     // Transfer job (one at a time; same shape as the check job).
     void* transferMutex_ = nullptr;

@@ -40,6 +40,16 @@ constexpr size_t kCheckChunkBytes = 16 * 1024;
 constexpr uint32_t kCheckTaskStackBytes = 6144;
 constexpr uint32_t kTransferTaskStackBytes = 8192;
 
+// The repair deletes a batch and walks the volume again; each walk is a task of
+// its own, so this stack holds the loop and the removal calls. The removal is
+// recursive (`removeTree`), so it gets more than the check task.
+constexpr uint32_t kRepairTaskStackBytes = 10240;
+
+// A report names at most `kCheckMaxErrors` paths, so a badly damaged volume
+// takes several passes. The limit keeps one click from walking a card for ever:
+// 20 passes cover 1280 entries, and the operator can start another repair.
+constexpr uint32_t kRepairMaxRounds = 20;
+
 // Rule 39: the mode a directory is created with (rwx for everyone, like the
 // rest of the data volume).
 constexpr mode_t kDirMode = 0777;
@@ -124,6 +134,10 @@ FileManager::FileManager()
     if (transferMutex_ == nullptr) {
         ESP_LOGE(TAG, "failed to create the transfer mutex — transfers disabled");
     }
+    repairMutex_ = xSemaphoreCreateMutex();
+    if (repairMutex_ == nullptr) {
+        ESP_LOGE(TAG, "failed to create the repair mutex — repairs disabled");
+    }
 }
 
 FileManager::~FileManager()
@@ -133,6 +147,7 @@ FileManager::~FileManager()
     // runs once, at shutdown.
     checkCancel();
     transferCancel();
+    repairCancel();
 
     // Volumes unmount themselves (they own their driver state).
     volumes_.clear();
@@ -488,18 +503,23 @@ FileStatus FileManager::format(const string& volumeId, string* detail)
     storage::IFileSystem* vol = find(volumeId);
     if (vol == nullptr) return FileStatus::NotFound;
 
-    // Only removable media: the internal FAT partition must never be wiped
-    // through the API (it holds cache.dat and is reformatted on demand by its
-    // own mount options).
-    if (vol->id() != "sd") return FileStatus::Unsupported;
-
-    // One format at a time, and not while a check walks the volume.
+    // Both volumes can be formatted. The internal FAT partition holds generated
+    // data only (`cache.dat` and the journals) and the settings live in NVS, so
+    // formatting it is the way out of a filesystem whose entries can no longer
+    // be addressed by name; a card is formatted for the same reason.
+    //
+    // One format at a time, and not while a check walks the volume or a repair
+    // removes entries from it.
     if (formatting_.load()) {
         if (detail) *detail = "a format is already running";
         return FileStatus::Busy;
     }
     if (checkReport().busy) {
         if (detail) *detail = "a volume check is running";
+        return FileStatus::Busy;
+    }
+    if (repairReport().busy) {
+        if (detail) *detail = "a repair is running";
         return FileStatus::Busy;
     }
 
@@ -1024,6 +1044,308 @@ void FileManager::checkWalk(const string& mountPoint)
              static_cast<unsigned>(report.badEntries),
              static_cast<unsigned long long>(report.bytes),
              truncated ? " (stopped at the limit)" : "");
+}
+
+// ─────────────────────────────────────────────────────
+// Repair ("Delete damaged")
+//
+// FatFs has no fsck: the only thing that can make a damaged volume usable again
+// is removing the entries a check could not read. A report names at most
+// kCheckMaxErrors paths, so this is a loop — delete a batch, walk the volume
+// again, repeat — and it runs **on the device**, so the scheduler page shows it
+// like any other long operation and can stop it. The browser only starts it and
+// polls the snapshot.
+// ─────────────────────────────────────────────────────
+
+FileStatus FileManager::repairStart(const string& volumeId, string* detail)
+{
+    storage::IFileSystem* vol = nullptr;
+    const FileStatus st = resolve(volumeId, vol);
+    if (st != FileStatus::Ok) return st;
+
+    if (!supported()) return FileStatus::Unsupported;
+
+    if (formatting_.load()) {
+        if (detail) *detail = "a format is running";
+        return FileStatus::Busy;
+    }
+
+    // The list to delete comes from a finished check of *this* volume: without
+    // it there is nothing to remove and no evidence that anything is damaged.
+    const CheckReport check = checkReport();
+    if (check.busy) {
+        if (detail) *detail = "a check is running";
+        return FileStatus::Busy;
+    }
+    if (!check.finished || check.volume != volumeId || check.badEntries == 0 ||
+        check.errors.empty()) {
+        if (detail) *detail = "run a check first";
+        return FileStatus::Conflict;
+    }
+
+    bool started = false;
+    if (repairMutex_ != nullptr) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+        if (!repairState_.busy) {
+            repairState_ = RepairReport{};
+            repairState_.busy = true;
+            repairState_.volume = volumeId;
+            repairState_.remaining = check.badEntries;
+            repairCancel_ = false;
+            started = true;
+        }
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+    }
+
+    if (!started) {
+        if (detail) *detail = "a repair is already running";
+        return FileStatus::Busy;
+    }
+
+    // The job is registered before the task starts: a repair that finished in
+    // its first millisecond must not leave a "running" row behind, and a task
+    // that never starts is still reported as failed.
+    ::dhcp::core::JobRegistry::instance().begin(
+        "file_repair", "jobs.file_repair", volumeId,
+        static_cast<uint32_t>(check.badEntries), ::dhcp::core::JobUnit::Records);
+
+    const BaseType_t res = xTaskCreate(repairTask, "file_repair", kRepairTaskStackBytes,
+                                       this, tskIDLE_PRIORITY + 1,
+                                       reinterpret_cast<TaskHandle_t*>(&repairTask_));
+    if (res != pdTRUE) {
+        repairTask_ = nullptr;
+        if (repairMutex_ != nullptr) {
+            xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+            repairState_.busy = false;
+            repairState_.finished = true;
+            xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+        }
+        ::dhcp::core::JobRegistry::instance().finish(
+            "file_repair", ::dhcp::core::JobState::Failed,
+            "could not start the repair task");
+        if (detail) *detail = "failed to start the repair task";
+        ESP_LOGE(TAG, "failed to create the repair task");
+        return FileStatus::IoError;
+    }
+
+    ESP_LOGI(TAG, "repair started: volume=%s, damaged=%u", volumeId.c_str(),
+             static_cast<unsigned>(check.badEntries));
+    return FileStatus::Ok;
+}
+
+void FileManager::repairCancel()
+{
+    if (repairMutex_ != nullptr) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+        if (repairState_.busy) {
+            repairCancel_ = true;
+            ESP_LOGI(TAG, "repair cancel requested");
+        }
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+    }
+
+    // The scheduler page asks through /api/jobs/cancel, which only records the
+    // request — the loop polls it.
+    ::dhcp::core::JobRegistry::instance().requestCancel("file_repair");
+
+    // The walk the repair is waiting for has its own stop switch.
+    checkCancel();
+}
+
+RepairReport FileManager::repairReport()
+{
+    RepairReport out;
+    if (repairMutex_ == nullptr) return out;
+
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+    out = repairState_;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+    return out;
+}
+
+bool FileManager::repairStopRequested()
+{
+    bool stop = false;
+    if (repairMutex_ != nullptr) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+        stop = repairCancel_;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+    }
+    return stop || ::dhcp::core::JobRegistry::instance().cancelRequested("file_repair");
+}
+
+void FileManager::repairPublish(const RepairReport& report)
+{
+    if (repairMutex_ == nullptr) return;
+    xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+    repairState_ = report;
+    xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+}
+
+void FileManager::repairTask(void* arg)
+{
+    auto* self = static_cast<FileManager*>(arg);
+    if (self == nullptr) {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    string volume;
+    if (self->repairMutex_ != nullptr) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(self->repairMutex_), portMAX_DELAY);
+        volume = self->repairState_.volume;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(self->repairMutex_));
+    }
+
+    self->repairRun(volume);
+
+    // The task deletes itself, so the handle must be cleared before that.
+    self->repairTask_ = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void FileManager::repairRun(const string& volumeId)
+{
+    RepairReport report;
+    if (repairMutex_ != nullptr) {
+        xSemaphoreTake(static_cast<SemaphoreHandle_t>(repairMutex_), portMAX_DELAY);
+        report = repairState_;
+        xSemaphoreGive(static_cast<SemaphoreHandle_t>(repairMutex_));
+    }
+
+    // Same list in the same order: the next pass would repeat this one exactly.
+    const auto samePaths = [](const vector<CheckError>& a, const vector<CheckError>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].path != b[i].path) return false;
+        }
+        return true;
+    };
+
+    CheckReport check = checkReport();   // the finished walk the operator ran
+    bool cancelled = false;
+    bool walkFailed = false;
+
+    // The mount point of the volume this repair works on. The paths below come
+    // from our own walk (`readdir` of this very volume), so they are inside the
+    // mount by construction — they must **not** go through the client path
+    // policy: `PathUtil` rejects control characters and the FAT-illegal set
+    // `" * < > ? | :`, and a damaged name is exactly the kind of name that
+    // contains them. Re-validating those paths made the repair a no-op.
+    storage::IFileSystem* volume = nullptr;
+    if (resolve(volumeId, volume) != FileStatus::Ok || volume == nullptr) {
+        report.busy = false;
+        report.finished = true;
+        report.error = "the volume is not mounted";
+        repairPublish(report);
+        ::dhcp::core::JobRegistry::instance().finish(
+            "file_repair", ::dhcp::core::JobState::Failed, report.error);
+        return;
+    }
+    const string mount = volume->mountPoint();
+
+    for (uint32_t round = 1; round <= kRepairMaxRounds; ++round) {
+        if (repairStopRequested()) { cancelled = true; break; }
+
+        const vector<CheckError> paths = check.errors;
+        if (paths.empty()) break;        // nothing addressable is left
+
+        report.round = round;
+        report.remaining = check.badEntries;
+        uint32_t deletedHere = 0;
+
+        for (const auto& entry : paths) {
+            if (repairStopRequested()) { cancelled = true; break; }
+
+            report.current = entry.path;
+            repairPublish(report);
+            ::dhcp::core::JobRegistry::instance().progress(
+                "file_repair", report.deleted, report.deleted + report.remaining,
+                entry.path);
+
+            string detail;
+            const string full = storage::PathUtil::join(mount, entry.path);
+            const bool removed = removeTree(full);
+            if (removed) {
+                ++report.deleted;
+                ++deletedHere;
+                if (report.remaining > 0) --report.remaining;
+            } else {
+                detail = errnoText();
+                ++report.failed;
+                if (report.refusal.empty()) {
+                    report.refusal = entry.path + ": " +
+                                     (detail.empty() ? string("removal refused") : detail);
+                }
+            }
+            repairPublish(report);
+        }
+
+        if (cancelled) break;
+        if (deletedHere == 0) break;     // FatFs refuses these entries
+
+        // Walk again: the next batch is what the volume reports now.
+        {
+            string detail;
+            const FileStatus st = checkStart(volumeId, &detail);
+            if (st != FileStatus::Ok) {
+                report.error = detail.empty() ? "could not start the check" : detail;
+                walkFailed = true;
+                break;
+            }
+        }
+        for (;;) {
+            if (repairStopRequested()) {
+                checkCancel();           // stop the walk too, it has its own switch
+                cancelled = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            const CheckReport now = checkReport();
+            if (!now.busy) {
+                check = now;
+                break;
+            }
+            // The walk's own progress, so the dialog keeps moving.
+            report.current = now.current;
+            repairPublish(report);
+        }
+        if (cancelled) break;
+
+        report.remaining = check.badEntries;
+        report.current.clear();
+        repairPublish(report);
+        ::dhcp::core::JobRegistry::instance().progress(
+            "file_repair", report.deleted, report.deleted + report.remaining, {});
+
+        if (check.cancelled) { cancelled = true; break; }
+        if (check.badEntries == 0) break;            // the volume is clean
+        if (check.errors.empty()) break;             // nothing addressable
+        if (samePaths(check.errors, paths)) break;   // no progress, stop here
+    }
+
+    report.busy = false;
+    report.finished = true;
+    report.cancelled = cancelled;
+    report.current.clear();
+    repairPublish(report);
+
+    string summary = to_string(report.deleted) + " deleted";
+    if (report.remaining > 0) summary += ", " + to_string(report.remaining) + " left";
+    if (!report.refusal.empty()) summary += " (" + report.refusal + ")";
+    ::dhcp::core::JobRegistry::instance().finish(
+        "file_repair",
+        cancelled ? ::dhcp::core::JobState::Cancelled
+                  : (walkFailed ? ::dhcp::core::JobState::Failed
+                                : ::dhcp::core::JobState::Done),
+        summary);
+
+    ESP_LOGI(TAG, "repair %s: volume=%s rounds=%u deleted=%u failed=%u left=%u",
+             cancelled ? "cancelled" : "finished", volumeId.c_str(),
+             static_cast<unsigned>(report.round),
+             static_cast<unsigned>(report.deleted),
+             static_cast<unsigned>(report.failed),
+             static_cast<unsigned>(report.remaining));
 }
 
 // ─────────────────────────────────────────────────────

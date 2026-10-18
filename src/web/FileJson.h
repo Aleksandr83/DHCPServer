@@ -141,6 +141,16 @@ public:
     static std::string check(const ::dhcp::files::CheckReport& report);
 
     /**
+     * @brief Body of `GET /api/files/repair` — a "delete the damaged entries" report.
+     *
+     * `{"busy":…,"finished":…,"cancelled":…,"volume":…,"current":…,
+     * "round":…,"deleted":…,"remaining":…,"failed":…,"refusal":…,"error":…}`
+     *
+     * @param report Snapshot of the running or last repair.
+     */
+    static std::string repair(const ::dhcp::files::RepairReport& report);
+
+    /**
      * @brief Body of `GET /api/jobs` — the long-running operations of the device.
      *
      * `{"jobs":[{"id":…,"title_key":…,"arg":…,"state":…,"done":…,

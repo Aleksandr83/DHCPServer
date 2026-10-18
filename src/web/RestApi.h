@@ -202,6 +202,10 @@ public:
     static esp_err_t handlePostFileCheck(httpd_req* req);
     static esp_err_t handlePostFileCheckCancel(httpd_req* req);
     static esp_err_t handleGetFileCheck(httpd_req* req);
+    // "Delete damaged": removes what the check found, then checks again
+    static esp_err_t handlePostFileRepair(httpd_req* req);
+    static esp_err_t handlePostFileRepairCancel(httpd_req* req);
+    static esp_err_t handleGetFileRepair(httpd_req* req);
     static esp_err_t handlePostFileTransfer(httpd_req* req);
     static esp_err_t handleGetFileTransfer(httpd_req* req);
     static esp_err_t handlePostFileTransferCancel(httpd_req* req);

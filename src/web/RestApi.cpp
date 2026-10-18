@@ -6716,6 +6716,9 @@ esp_err_t RestApi::handlePostJobCancel(httpd_req* req)
     if (id == "file_check" && s_files) {
         s_files->checkCancel();
     }
+    if (id == "file_repair" && s_files) {
+        s_files->repairCancel();
+    }
 
     // A format ends **here and now**, and that is the whole point of this branch.
     // The erase is one call into IDF and FatFS: while it runs, nothing in the
@@ -7178,6 +7181,64 @@ esp_err_t RestApi::handleGetFileCheck(httpd_req* req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req,
         ::dhcp::web::FileJson::check(s_files->checkReport()).c_str());
+    return ESP_OK;
+}
+
+/*
+ * "Delete damaged": the repair of a volume the check found damaged.
+ *
+ * Both halves are long operations of the device — the removal of a batch and
+ * the walk that follows it — so POST only starts the task and GET polls the
+ * snapshot, exactly like the check above. The repair registers in the job
+ * registry as `file_repair`, which is what puts it on the scheduler page and
+ * gives it a stop button there.
+ */
+esp_err_t RestApi::handlePostFileRepair(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    const string body = readBody(req, 512);
+    const string volume = jsonGetStr(body, "volume");
+    if (volume.empty()) {
+        return sendFileResult(req, ::dhcp::files::FileStatus::InvalidPath, "{}");
+    }
+
+    string detail;
+    const auto st = s_files->repairStart(volume, &detail);
+    if (st != ::dhcp::files::FileStatus::Ok) {
+        return sendFileResult(req, st, "{}", &detail);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"started\"}");
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handlePostFileRepairCancel(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    // Only sets a flag: the loop stops between two entries, so this answers at once.
+    s_files->repairCancel();
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
+esp_err_t RestApi::handleGetFileRepair(httpd_req* req)
+{
+    if (!checkAuth(req)) return ESP_OK;
+    if (!checkFileAccess(req)) return ESP_OK;
+    if (!s_files) return sendNoFileManager(req);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        ::dhcp::web::FileJson::repair(s_files->repairReport()).c_str());
     return ESP_OK;
 }
 

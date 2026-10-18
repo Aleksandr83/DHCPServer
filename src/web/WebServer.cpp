@@ -614,6 +614,10 @@ const WebRoute WebServer::kRoutes[] = {
     { "/api/files/check",                 RouteMethod::Post,  &WebServer::postFileCheckHandler },
     { "/api/files/check/cancel",          RouteMethod::Post,  &WebServer::postFileCheckCancelHandler },
     { "/api/files/check",                 RouteMethod::Get,   &WebServer::getFileCheckHandler },
+    // "Delete damaged" (long-running: POST starts it, GET polls the report)
+    { "/api/files/repair",                RouteMethod::Post,  &WebServer::postFileRepairHandler },
+    { "/api/files/repair/cancel",         RouteMethod::Post,  &WebServer::postFileRepairCancelHandler },
+    { "/api/files/repair",                RouteMethod::Get,   &WebServer::getFileRepairHandler },
     // Copy / move between volumes (long-running: POST starts it, GET polls)
     { "/api/files/transfer",              RouteMethod::Post,  &WebServer::postFileTransferHandler },
     { "/api/files/transfer/cancel",       RouteMethod::Post,  &WebServer::postFileTransferCancelHandler },

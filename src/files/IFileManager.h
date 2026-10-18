@@ -97,6 +97,35 @@ struct CheckReport {
 };
 
 /**
+ * @brief State of the "delete the damaged entries" operation.
+ *
+ * FatFs has no fsck, so the only repair a check can honestly offer is removing
+ * the entries it could not read. A report names at most
+ * @ref IFileManager::kCheckMaxErrors paths, and a badly damaged volume has more
+ * than that — so the operation is a loop of its own: delete a batch, walk the
+ * volume again, repeat until the walk is clean, until a batch removes nothing
+ * (FatFs refuses that entry), or until the round limit.
+ *
+ * It is a **long operation of the device**, not a sequence of requests from the
+ * browser: it registers in `core::JobRegistry` as `file_repair` (unit
+ * @ref ::dhcp::core::JobUnit::Records), the scheduler page shows it and can stop
+ * it, and the Files page only starts it and polls this snapshot.
+ */
+struct RepairReport {
+    bool busy = false;       ///< A repair is running right now
+    bool finished = false;   ///< The last repair ended
+    bool cancelled = false;  ///< Stopped because the operator asked it to
+    std::string volume;      ///< Volume id the repair works on
+    std::string current;     ///< Entry being deleted, or the path being walked
+    uint32_t round = 0;      ///< Pass number, 1-based
+    uint32_t deleted = 0;    ///< Entries removed by this repair
+    uint32_t remaining = 0;  ///< Entries the last walk still finds
+    uint32_t failed = 0;     ///< Removals FatFs refused
+    std::string refusal;     ///< The first refusal, for the summary
+    std::string error;       ///< A technical failure (a walk that could not start)
+};
+
+/**
  * @brief Facade over the mounted FAT volumes, used by the REST API and the UI.
  *
  * The manager owns the volumes (`storage::IFileSystem`) and implements the
@@ -304,6 +333,27 @@ public:
 
     /** @brief Snapshot of the running/last check (safe to call any time). */
     virtual CheckReport checkReport() = 0;
+
+    /**
+     * @brief Remove the damaged entries the last check found, walking again
+     *        after every batch until nothing is left.
+     *
+     * The operation needs a finished check with at least one bad entry for the
+     * same volume: without that list there is nothing to delete. Only one repair
+     * runs at a time (@ref FileStatus::Busy otherwise), and it refuses to start
+     * while a check or a format owns the volume.
+     *
+     * @param[in]  volumeId Volume to repair (`fat`, `sd`).
+     * @param[out] detail   Optional technical detail.
+     */
+    virtual FileStatus repairStart(const std::string& volumeId,
+                                   std::string* detail = nullptr) = 0;
+
+    /** @brief Ask a running repair to stop (returns immediately). */
+    virtual void repairCancel() = 0;
+
+    /** @brief Snapshot of the running/last repair (safe to call any time). */
+    virtual RepairReport repairReport() = 0;
 
     /**
      * @brief Names in @p req that already exist in the destination directory.

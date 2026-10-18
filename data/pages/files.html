@@ -1171,7 +1171,7 @@
            poll in mid-walk is simply progress — and the operator can stop it
            with one call. Nothing is written by the check itself: FatFs has no
            fsck, so the only honest "repair" it can offer afterwards is removing
-           the entries that cannot be read any more, or formatting the card. */
+           the entries that cannot be read any more, or formatting the volume. */
         let checkTimer = null;
         let checkLast = {};
 
@@ -1219,10 +1219,11 @@
             }
 
             // The repair offers appear only after a finished check that found
-            // something; formatting is offered for the card alone.
+            // something; formatting is offered for the card alone, and a repair
+            // that removed nothing is not offered again for the same report.
             const canRepair = !r.busy && r.finished && r.bad_entries > 0;
-            delBtn.style.display = canRepair ? '' : 'none';
-            fmtBtn.style.display = (canRepair && r.volume === 'sd') ? '' : 'none';
+            delBtn.style.display = (canRepair && !repairStuck) ? '' : 'none';
+            fmtBtn.style.display = canRepair ? '' : 'none';
         }
 
         function stopCheckPolling() {
@@ -1250,6 +1251,10 @@
 
         async function startCheck() {
             document.getElementById('files-check').style.display = 'flex';
+
+            // A fresh walk is new evidence: a repair that removed nothing before
+            // is offered again.
+            repairStuck = false;
 
             // A check may already be running (the page was reloaded): follow it
             // instead of asking for a second walk over the same card.
@@ -1299,38 +1304,150 @@
 
         /* FatFs cannot repair a filesystem, so the one "repair" that keeps the
            volume usable is removing the entries that can no longer be read (the
-           other offer is formatting the whole card). Only the paths the report
-           carried are deleted — a wholesale failure lists the first
-           `kCheckMaxErrors` entries and says so through the counter. */
-        async function deleteDamaged(volume, paths) {
-            if (paths.length === 0) return;
+           other offer is formatting the whole card). A report carries at most
+           `kCheckMaxErrors` paths, so one pass cannot clean a badly damaged
+           volume: the walk is repeated until it comes back clean, until a round
+           removes nothing (FatFs refuses those entries — either a name that
+           cannot be turned back into the same UTF-16 one, or a chain it cannot
+           follow), or until the round limit. The check itself never writes. */
+        /* FatFs cannot repair a filesystem, so the one "repair" that keeps the
+           volume usable is removing the entries that can no longer be read.
+           That is a long operation of the **device**: a report carries at most
+           `kCheckMaxErrors` paths, so it deletes a batch, walks the volume
+           again and repeats (FileManager::repairStart, job `file_repair`).
+           This page starts it once, polls its snapshot and asks it to stop —
+           the scheduler page shows the same operation and can stop it too. */
+        let repairBusy = false;
+        /* True while the confirmation is on screen: a second click on the button
+           must not open a second dialog. */
+        let repairAsking = false;
+        /* True when the last repair could not remove a single entry: another
+           press would repeat it exactly, so the button is hidden until the
+           operator runs the check again. */
+        let repairStuck = false;
 
-            const confirmed = await filesModalOpen({
-                title: tr('files.repair_delete') + ' (' + paths.length + ')?',
-                hint: tr('files.repair_hint'),
-                danger: true,
-                okLabel: tr('files.delete'),
-            });
+        /* One line of the repair operation: what it has removed and what the
+           last walk still finds. The entry being deleted (or read) is the
+           second line. */
+        function renderRepairProgress(report) {
+            const stateEl = document.getElementById('files-check-state');
+            const currentEl = document.getElementById('files-check-current');
+            const listEl = document.getElementById('files-check-errors');
+            if (stateEl) {
+                stateEl.className = 'test-conn-result';
+                stateEl.textContent = tr('files.delete_done') + ': ' + (report.deleted || 0) +
+                    '   ·   ' + tr('files.check_found') + ': ' + (report.remaining || 0);
+            }
+            if (currentEl) currentEl.textContent = report.current || '';
+            if (listEl) listEl.innerHTML = '';
+            document.getElementById('files-check-delete').style.display = 'none';
+            document.getElementById('files-check-format').style.display = 'none';
+        }
+
+        async function deleteDamaged(volume) {
+            if (repairBusy || repairAsking) return;
+
+            repairAsking = true;
+            let confirmed = false;
+            try {
+                confirmed = await filesModalOpen({
+                    // No count here: a report carries at most `kCheckMaxErrors`
+                    // paths, so the number would be the size of the first batch,
+                    // not the amount of damage. The report line above names the
+                    // real total.
+                    title: tr('files.repair_delete') + '?',
+                    hint: tr('files.repair_hint'),
+                    danger: true,
+                    okLabel: tr('files.delete'),
+                });
+            } finally {
+                repairAsking = false;
+            }
             if (!confirmed) return;
 
-            let done = 0, firstError = '';
-            for (const path of paths) {
-                const resp = await apiFetch('/api/files/delete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ volume: volume, path: path, recursive: true }),
-                });
-                if (resp.ok) done++;
-                else if (!firstError) firstError = path + ': ' + await filesError(resp);
-            }
+            repairBusy = true;
+            try {
+                let resp;
+                try {
+                    resp = await apiFetch('/api/files/repair', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ volume: volume }),
+                    });
+                } catch (e) {
+                    filesStatus(tr('files.fail') + ': ' + e, 'fail');
+                    return;
+                }
+                if (!resp.ok) {
+                    filesStatus(tr('files.fail') + ': ' + await filesError(resp), 'fail');
+                    return;
+                }
 
-            let summary = tr('files.delete_done') + ' ' + done + ' / ' + paths.length;
-            if (firstError) summary += '   ·   ' + tr('files.fail') + ': ' + firstError;
-            filesStatus(summary, firstError ? 'fail' : 'ok');
-            await loadList();
+                // Follow the operation the device is running, not a loop here:
+                // it deletes, walks and repeats on its own.
+                let report = null;
+                let misses = 0;
+                let lost = false;
+                for (;;) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    try {
+                        report = await fetchJSON('/api/files/repair');
+                        misses = 0;
+                    } catch (e) {
+                        if (++misses > 30) { lost = true; break; }
+                        continue;
+                    }
+                    renderRepairProgress(report);
+                    if (!report.busy) break;
+                }
+
+                if (report === null) {
+                    filesStatus(tr('files.fail') + ': ' + tr('files.repair_lost'), 'fail');
+                    return;
+                }
+
+                let summary = tr('files.delete_done') + ' ' + (report.deleted || 0);
+                if (report.failed > 0) {
+                    summary += '   ·   ' + tr('files.fail') + ': ' + report.failed;
+                    if (report.refusal) summary += ' (' + report.refusal + ')';
+                }
+                if (report.remaining > 0) {
+                    summary += '   ·   ' + tr('files.check_found') + ': ' + report.remaining;
+                }
+                if (report.error) summary += '   ·   ' + report.error;
+                if (lost) summary += '   ·   ' + tr('files.repair_lost');
+                else if (report.cancelled) summary += '   ·   ' + tr('files.repair_cancelled');
+                filesStatus(summary, report.remaining > 0 || report.error ? 'fail' : 'ok');
+
+                // Nothing removed means FatFs refuses these entries; a second
+                // press would do exactly the same, so the offer is withdrawn
+                // until a new check brings new evidence.
+                if (!lost && !report.cancelled) {
+                    repairStuck = report.deleted === 0 && report.remaining > 0;
+                }
+
+                // The repair walked the volume itself: show what the device
+                // reports now, so the entries still there stay on screen.
+                try {
+                    const check = await fetchJSON('/api/files/check');
+                    if (check && check.volume) renderCheck(check);
+                } catch (e) { /* the status line already carries the summary */ }
+                await loadList();
+            } finally {
+                repairBusy = false;
+            }
         }
 
         document.getElementById('files-check-close').onclick = async () => {
+            // A repair is one long operation: closing its dialog must end it,
+            // not leave it deleting behind a hidden window.
+            if (repairBusy) {
+                try {
+                    await apiFetch('/api/files/repair/cancel', { method: 'POST' });
+                } catch (e) { /* the loop stops between entries anyway */ }
+                closeCheck();
+                return;
+            }
             if (checkLast.busy) {
                 try {
                     await apiFetch('/api/files/check/cancel', { method: 'POST' });
@@ -1343,15 +1460,17 @@
         };
 
         document.getElementById('files-check-delete').onclick = () => {
-            const paths = (checkLast.errors || []).map(e => e.path);
             const volume = checkLast.volume || filesState.volume;
-            closeCheck();
-            deleteDamaged(volume, paths);
+            // One click starts the operation on the device; the dialog only
+            // follows its snapshot (and the scheduler page shows it too).
+            stopCheckPolling();
+            deleteDamaged(volume);
         };
 
         document.getElementById('files-check-format').onclick = () => {
+            const volume = checkLast.volume || filesState.volume;
             closeCheck();
-            formatVolume();
+            formatVolume(volume);
         };
 
         /* ─── Operations ─────────────────────────────────── */
@@ -1927,10 +2046,16 @@
             loadList();
         }
 
-        async function formatVolume() {
+        async function formatVolume(volume) {
+            volume = volume || filesState.volume;
+            // The two volumes lose different things: a card holds whatever the
+            // operator put on it, the internal volume holds the journals and the
+            // DNS cache (the settings live in NVS), and the sentence has to say
+            // which of them is about to go.
+            const internal = volume === 'fat';
             const first = await filesModalOpen({
                 title: tr('files.format'),
-                hint: tr('files.format_confirm1'),
+                hint: tr(internal ? 'files.format_confirm1_fat' : 'files.format_confirm1'),
                 danger: true,
                 okLabel: tr('files.ok_continue'),
             });
@@ -1946,13 +2071,13 @@
             const resp = await apiFetch('/api/files/format', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ volume: filesState.volume, confirm: true }),
+                body: JSON.stringify({ volume: volume, confirm: true }),
             });
             if (!resp.ok) {
                 filesStatus(tr('files.format_fail') + ': ' + await filesError(resp), 'fail');
                 return;
             }
-            filesStatus(tr('files.format_ok'), 'ok');
+            filesStatus(tr(internal ? 'files.format_ok_fat' : 'files.format_ok'), 'ok');
             reloadFiles();
         }
 

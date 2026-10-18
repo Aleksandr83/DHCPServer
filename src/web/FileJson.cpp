@@ -183,6 +183,23 @@ string FileJson::check(const ::dhcp::files::CheckReport& report)
     return w.toString();
 }
 
+string FileJson::repair(const ::dhcp::files::RepairReport& report)
+{
+    JsonWriter w;
+    w.boolean("busy", report.busy);
+    w.boolean("finished", report.finished);
+    w.boolean("cancelled", report.cancelled);
+    w.str("volume", report.volume);
+    w.str("current", report.current);
+    w.num("round", static_cast<int64_t>(report.round));
+    w.num("deleted", static_cast<int64_t>(report.deleted));
+    w.num("remaining", static_cast<int64_t>(report.remaining));
+    w.num("failed", static_cast<int64_t>(report.failed));
+    w.str("refusal", report.refusal);
+    w.str("error", report.error);
+    return w.toString();
+}
+
 string FileJson::jobObject(const ::dhcp::core::JobInfo& job)
 {
     JsonWriter w;

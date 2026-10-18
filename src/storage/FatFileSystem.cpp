@@ -108,9 +108,37 @@ VolumeInfo FatFileSystem::info()
 
 bool FatFileSystem::format()
 {
-    // Not offered: this is the internal flash partition, not a removable
-    // medium. (Formatting is offered for the microSD volume only.)
-    return false;
+    // The internal volume has no removable medium, but a damaged filesystem still
+    // needs a way back: FatFs here speaks the ANSI/OEM code page
+    // (`CONFIG_FATFS_API_ENCODING_ANSI_OEM`), so a directory entry whose stored
+    // name does not survive the round trip through that code page cannot be
+    // unlinked by name at all — `stat()` answers ENOENT and no delete can reach
+    // it. Formatting is the only cure. The partition holds generated data only
+    // (`cache.dat` and the journals); the settings live in NVS and are untouched.
+    if (!mounted_) {
+        error_ = "the volume is not mounted";
+        return false;
+    }
+
+    // IDF unmounts the filesystem, erases the partition and mounts it again; the
+    // wear-levelling handle it finds through our mount stays valid. A writer that
+    // holds a file across that moment fails on the detached filesystem object —
+    // it cannot write into the fresh one.
+    const esp_err_t err = esp_vfs_fat_spiflash_format_rw_wl(
+        mountPoint_.c_str(), partitionLabel_.c_str());
+    if (err != ESP_OK) {
+        error_ = string("format failed: ") + esp_err_to_name(err);
+        ESP_LOGE(TAG, "%s: format of '%s' failed (%s)", id_.c_str(),
+                 partitionLabel_.c_str(), esp_err_to_name(err));
+        // The filesystem may be left unmounted; the periodic refresh mounts it
+        // again (see FileManager::refresh).
+        mounted_ = false;
+        return false;
+    }
+
+    error_.clear();
+    ESP_LOGI(TAG, "%s formatted at %s", id_.c_str(), mountPoint_.c_str());
+    return true;
 }
 
 } // namespace storage
