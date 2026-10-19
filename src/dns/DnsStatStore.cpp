@@ -1,5 +1,6 @@
 #include "DnsStatStore.h"
 
+#include "../core/AtomicFile.h"
 #include "../core/ErrorLogCore.h"
 
 #include <cstdio>
@@ -131,21 +132,15 @@ bool DnsStatStore::save(const string& path, const DnsStatTotals& totals, string*
 {
     const string record = encode(totals);
 
-    // Straight into the file, exactly like `cache.dat` (InternalDnsCache::saveToFile).
-    //
-    // It used to be published through `<path>.tmp` + `rename`, and that does not
-    // work on this filesystem: **FatFS refuses a rename onto an existing name**, so
-    // from the second save on every attempt failed with "cannot publish the file"
-    // (the device log said so, three times in a row, and the operator's file was
-    // there the whole time). The neighbour that got it right is
-    // `FileSink::commit()`, which removes the destination before renaming — but the
-    // operator asked for the simpler symmetry with the cache instead, and the trade
-    // is written down rather than hidden: **an interrupted write can now leave a
-    // half-written record**. What protects the reader is the format itself — magic,
-    // version, payload size and checksum are checked on every load, so a torn file
-    // is refused instead of being read as plausible numbers (the same protection
-    // `cache.dat` relies on).
-    FILE* file = fopen(path.c_str(), "wb");
+    // The new version goes beside the old one and is published afterwards
+    // (`core/AtomicFile.h`). It used to be written straight into the file, because
+    // FatFS refuses a rename onto an existing name and the simpler symmetry with
+    // `cache.dat` was preferred at the time — read that as: a write interrupted by
+    // a panic could leave a half-written record. The old file is removed first and
+    // the part is renamed into place, and a part that a crash left behind is
+    // published by `load()`, so the counters survive both a crash and a reboot.
+    const string partPath = ::dhcp::core::atomicfile::partPath(path);
+    FILE* file = fopen(partPath.c_str(), "wb");
     if (file == nullptr) {
         if (why) *why = "cannot create the file";
         return false;
@@ -156,7 +151,12 @@ bool DnsStatStore::save(const string& path, const DnsStatTotals& totals, string*
     const bool closed = fclose(file) == 0;
 
     if (written != record.size() || !flushed || !closed) {
+        ::remove(partPath.c_str());
         if (why) *why = "write failed";
+        return false;
+    }
+    if (!::dhcp::core::atomicfile::publish(path)) {
+        if (why) *why = "cannot publish the file";
         return false;
     }
     return true;
@@ -259,6 +259,9 @@ RestartSaveVerify::Outcome DnsStatStore::saveWithRetry(const string& path,
 
 bool DnsStatStore::load(const string& path, DnsStatTotals& out, string* why)
 {
+    // A save that a crash interrupted: the complete new record is in `.part`.
+    ::dhcp::core::atomicfile::recover(path);
+
     FILE* file = fopen(path.c_str(), "rb");
     if (file == nullptr) {
         if (why) *why = "no statistics file";

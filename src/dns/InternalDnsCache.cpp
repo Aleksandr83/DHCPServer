@@ -2,6 +2,8 @@
 
 #include "CacheFileReader.h"
 
+#include "../core/AtomicFile.h"
+
 #include <cstring>
 #include <cctype>
 #include <cstdio>
@@ -793,10 +795,15 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
         unlock();
     }
 
-    FILE* f = fopen(path, "wb");
+    // The new version is written beside the old one, never over it: `"wb"` on the
+    // real name truncates at once, so a panic in the middle of this multi-megabyte
+    // write used to leave a file the next boot refused — the operator's cache,
+    // gone (19.10.2026). See `core/AtomicFile.h`.
+    const string partPath = ::dhcp::core::atomicfile::partPath(path);
+    FILE* f = fopen(partPath.c_str(), "wb");
     if (!f) {
         heap_caps_free(snap);
-        ESP_LOGW(TAG, "saveToFile: cannot open %s", path);
+        ESP_LOGW(TAG, "saveToFile: cannot open %s", partPath.c_str());
         return false;
     }
 
@@ -890,7 +897,15 @@ bool InternalDnsCache::saveToFile(const char* path, size_t* entriesWritten,
     const int ferr = fclose(f);
     heap_caps_free(snap);
     if (!ok || ferr != 0) {
-        ESP_LOGE(TAG, "saveToFile: write failed for %s", path);
+        // A part that failed halfway is worse than nothing: the destination still
+        // holds the previous complete version, and recovering a partial file
+        // would publish exactly the damage this protects against.
+        ::remove(partPath.c_str());
+        ESP_LOGE(TAG, "saveToFile: write failed for %s", partPath.c_str());
+        return false;
+    }
+    if (!::dhcp::core::atomicfile::publish(path)) {
+        ESP_LOGE(TAG, "saveToFile: cannot publish %s", path);
         return false;
     }
     if (entriesWritten) *entriesWritten = written;
@@ -905,6 +920,11 @@ bool InternalDnsCache::loadFromFile(const char* path, size_t* entriesLoaded,
     if (entriesLoaded) *entriesLoaded = 0;
     if (!path || !*path) return false;
     if (!arena_) return false;
+
+    // A save that a crash interrupted left a complete `.part` and no destination:
+    // publishing it now is the difference between "the cache came back" and "the
+    // cache is empty after a reboot".
+    ::dhcp::core::atomicfile::recover(path);
 
     // The file is read by the same reader a planned restart checks it with
     // (stage 169): a check that used a different parser could pass on a file

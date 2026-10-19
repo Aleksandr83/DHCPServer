@@ -31,6 +31,10 @@ enum class SshStage : uint32_t {
     TaskCreated,    ///< the session task exists and has not run yet
     KeyExchange,    ///< inside `ssh_handle_key_exchange()`
     Shell,          ///< authenticated, running the console
+    Stopping,       ///< `stop()` began: the listener is being taken down
+    StopListening,  ///< the listen socket is closed; the accept task is waking up
+    StopSessions,   ///< waiting for the open sessions to notice and close
+    StopDone        ///< the server is down; nothing of it is running any more
 };
 
 /// @brief Store the stage (RTC memory: survives a panic, not a power cycle).
@@ -38,6 +42,7 @@ void sshStageSet(SshStage stage);
 
 /// @brief The stage left by the previous run (None when it ended cleanly).
 SshStage sshStageLast();
+
 /// @brief The words a report uses for a stage.
 inline const char* sshStageText(SshStage stage)
 {
@@ -50,6 +55,10 @@ inline const char* sshStageText(SshStage stage)
     case SshStage::TaskCreated:   return "a session task created, before the key exchange";
     case SshStage::KeyExchange:   return "the key exchange";
     case SshStage::Shell:         return "the console";
+    case SshStage::Stopping:      return "stopping the server";
+    case SshStage::StopListening: return "closing the listening socket";
+    case SshStage::StopSessions:  return "waiting for the open sessions to close";
+    case SshStage::StopDone:      return "the last step of a clean stop";
     case SshStage::None:          break;
     }
     return "";

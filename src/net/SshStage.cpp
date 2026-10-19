@@ -25,7 +25,7 @@ SshStage sshStageLast()
 {
     if (s_magic != kStageMagic) return SshStage::None;
     const uint32_t value = s_stage;
-    if (value > static_cast<uint32_t>(SshStage::Shell)) return SshStage::None;
+    if (value > static_cast<uint32_t>(SshStage::StopDone)) return SshStage::None;
     return static_cast<SshStage>(value);
 }
 

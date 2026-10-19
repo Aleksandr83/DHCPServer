@@ -51,6 +51,8 @@ constexpr uint32_t kAcceptStackBytes = 12288;
 // which is exactly what every log write to the FAT does. That is why the crash
 // moved from call to call as more logging was added and never named a culprit.
 constexpr uint32_t kSessionStackBytes = 16384;
+/** How long the accept loop waits for a connection before it re-reads `running_`. */
+constexpr uint32_t kAcceptPollMs = 200;
 // The session task runs *below* the accept loop on purpose: at equal priority it
 // could preempt the loop the instant FreeRTOS starts it, and then a crash inside
 // the key exchange would be reported as a crash in the peer checks, because the
@@ -280,6 +282,15 @@ bool SshServer::start(uint16_t port)
 
     auto& errors = ::dhcp::core::ErrorLog::instance();
 
+    // A stop that could not take the accept task down leaves a bind handle owned by
+    // that task: starting again would create a second one over it and the stuck task
+    // would free the wrong object. Refusing loudly is the honest answer.
+    if (acceptTask_ != nullptr) {
+        errors.errorf(TAG, "the previous SSH accept task never stopped: the server "
+                           "stays off until the device is restarted");
+        return false;
+    }
+
     if (ssh_init() != SSH_OK) {
         ESP_LOGE(TAG, "ssh_init failed");
         errors.errorf(TAG, "ssh_init failed: the SSH server did not start");
@@ -364,31 +375,39 @@ void SshServer::stop()
 {
     if (!running_.exchange(false)) return;
 
-    // `ssh_bind_accept()` blocks; shutting the listening socket down wakes it.
-    if (bind_) {
-        const socket_t fd = ssh_bind_get_fd(static_cast<ssh_bind>(bind_));
-        if (fd >= 0) shutdown(fd, SHUT_RDWR);
-    }
-
-    // The accept task owns the bind handle and frees it on its way out.
-    for (int waited = 0; acceptTask_ != nullptr && waited < kStopWaitMs; waited += 50) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // No `shutdown()` and no freeing from here. The accept loop polls its socket
+    // with a short timeout (`kAcceptPollMs`), so it notices `running_ == false` by
+    // itself and takes its own `ssh_bind` down on its own task. The old code shut
+    // the listening socket down from *this* task and then freed the handle after a
+    // timeout if the loop had not woken — a use-after-free waiting for a client to
+    // connect, which is what turned the switch off into a panic on 19.10.2026.
+    sshStageSet(SshStage::Stopping);
+    for (int waited = 0; acceptTask_ != nullptr && waited < kStopWaitMs; waited += 20) {
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
     if (acceptTask_ != nullptr) {
-        ESP_LOGW(TAG, "the accept task did not stop in time");
-        if (bind_) {
-            ssh_bind_free(static_cast<ssh_bind>(bind_));
-            bind_ = nullptr;
-        }
-        acceptTask_ = nullptr;
+        // The loop is stuck inside libssh. Freeing the handle under it would be
+        // exactly the bug this rewrite removes, so it is left alone: `start()`
+        // refuses to run until the task is gone, and the operator is told why.
+        const string detail = "the SSH accept task did not stop; the server cannot be "
+                             "started again until the device is restarted";
+        ESP_LOGE(TAG, "%s", detail.c_str());
+        ::dhcp::core::ErrorLog::instance().errorf(TAG, "%s", detail.c_str());
+        return;
     }
+    sshStageSet(SshStage::StopListening);
 
     // Sessions notice `running_` on their next poll and close themselves.
+    sshStageSet(SshStage::StopSessions);
     for (int waited = 0; activeSessions_.load() > 0 && waited < kStopWaitMs; waited += 50) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    sshStageSet(SshStage::StopDone);
     ::dhcp::core::SshLog::instance().noteServerStop();
     ESP_LOGI(TAG, "SSH server stopped");
+    // Nothing of this server is running any more: a stage left behind would be
+    // reported by the next boot as a crash that never happened.
+    sshStageSet(SshStage::None);
 }
 
 void SshServer::refreshFilter()
@@ -411,10 +430,25 @@ void SshServer::acceptTask(void* arg)
 void SshServer::acceptLoop()
 {
     while (running_.load()) {
-        // RTC breadcrumb for the wait itself. Only while nothing is being served:
-        // this loop blocks inside `accept()` for as long as nobody connects, and
-        // writing the stage there would overwrite what a running session wrote —
-        // a crash in the key exchange would be reported as a crash in accept.
+        // Poll the listener instead of blocking inside `accept()`: this loop has to
+        // notice a stop on its own, and it must own its `ssh_bind` (freeing it from
+        // `stop()` while this task is inside libssh was the 19.10.2026 panic).
+        const socket_t listenFd = bind_ ? ssh_bind_get_fd(static_cast<ssh_bind>(bind_))
+                                        : -1;
+        if (listenFd < 0) break;
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(listenFd, &readable);
+        timeval timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = kAcceptPollMs * 1000;
+        const int ready = select(listenFd + 1, &readable, nullptr, nullptr, &timeout);
+        if (ready < 0) {                 // interrupted or the socket is gone
+            vTaskDelay(pdMS_TO_TICKS(kAcceptPollMs));
+            continue;
+        }
+        if (ready == 0) continue;        // nothing to accept: back to `running_`
+
         if (activeSessions_.load() == 0) sshStageSet(SshStage::Accepting);
         ssh_session session = ssh_new();
         if (!session) {

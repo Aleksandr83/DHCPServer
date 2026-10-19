@@ -521,13 +521,13 @@ static void test_retry_removes_the_file_and_logs_every_step()
     string why;
     check(DnsStatStore::saveWithRetry(path, totals, &why, &log) == SaveOutcome::Failed,
           "both attempts fail — and the call says so");
-    check(why == "cannot create the file",
+    check(why == "cannot publish the file",
           "the reason reported to the page is the last attempt's: " + why);
 
     log.drain(0);
     check(target.lines.size() == 3, "the log holds all three steps (failure, retry, failure)");
     check(anyLineHas(target.lines, "statistics could not be saved") &&
-          anyLineHas(target.lines, "cannot create the file"),
+          anyLineHas(target.lines, "cannot publish the file"),
           "the first failure and its reason are in the log");
     check(anyLineHas(target.lines, "retrying"),
           "so is the retry itself, the way the operator asked for it");
