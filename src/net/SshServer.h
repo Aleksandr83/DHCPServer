@@ -10,6 +10,7 @@
 namespace dhcp {
 namespace wifi { class IWiFiManager; }
 namespace web { class AuthManager; }
+namespace menu { class IConsoleOutput; }
 } // namespace dhcp
 
 namespace dhcp {
@@ -36,6 +37,16 @@ public:
     /// device is short of memory — a session that cannot be served honestly is
     /// better refused than half-served.
     static constexpr int kMaxSessions = 2;
+
+    /// @brief The size of the client's terminal, as its last request said.
+    ///
+    /// Written by the pty callbacks (which run inside libssh's task) and read by the
+    /// full-screen browser on every frame: a window resized in the middle of a
+    /// session is redrawn at the new size instead of drawing past its edge.
+    struct TerminalSize {
+        std::atomic<int> cols{80};
+        std::atomic<int> rows{24};
+    };
 
     SshServer(::dhcp::wifi::IWiFiManager& wifi, ::dhcp::web::AuthManager* auth);
     ~SshServer();
@@ -84,6 +95,10 @@ private:
 
     /// @brief The stored host key, generated and saved on first use.
     std::string hostKey();
+
+    /// @brief Run the two-pane browser until the operator leaves it.
+    void runFileBrowser(void* channel, const TerminalSize& size,
+                        ::dhcp::menu::IConsoleOutput& out);
 
     ::dhcp::wifi::IWiFiManager& wifi_;
     ::dhcp::web::AuthManager* auth_;

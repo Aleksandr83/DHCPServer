@@ -12,6 +12,10 @@
 #include "libssh/callbacks.h"
 
 #include "SshStage.h"
+#include "FileBrowser.h"
+#include "FileShell.h"
+#include "PosixFileOperations.h"
+#include "TuiKey.h"
 
 #include "../core/Credentials.h"
 #include "../core/DeviceLog.h"
@@ -98,6 +102,8 @@ struct SessionState {
     /// When the session was accepted, in ticks — the duration is measured from
     /// here, not from the first command.
     TickType_t acceptedAt = 0;
+    /// The terminal the client asked for: the full-screen browser draws inside it.
+    SshServer::TerminalSize size;
 };
 
 /// @brief The SSH channel as the console's output sink.
@@ -164,13 +170,33 @@ int onPtyRequest(ssh_session session, ssh_channel channel, const char* term,
     (void)session;
     (void)channel;
     (void)term;
-    (void)cols;
-    (void)rows;
     (void)py;
     (void)px;
-    (void)userdata;
     // The console does its own echoing and line editing, so the PTY is only a
-    // promise that a terminal is on the other side.
+    // promise that a terminal is on the other side — but its size is what a
+    // full-screen view has to draw inside, so it is kept.
+    SessionState* state = static_cast<SessionState*>(userdata);
+    if (state != nullptr) {
+        if (cols > 0) state->size.cols = cols;
+        if (rows > 0) state->size.rows = rows;
+    }
+    return SSH_OK;
+}
+
+int onWindowChange(ssh_session session, ssh_channel channel, int cols, int rows,
+                   int pxwidth, int pxheight, void* userdata)
+{
+    (void)session;
+    (void)channel;
+    (void)pxwidth;
+    (void)pxheight;
+    // SIGWINCH on the client: the new size is kept where the browser reads it, so the
+    // next frame is drawn to fit the window the operator actually has.
+    SessionState* state = static_cast<SessionState*>(userdata);
+    if (state != nullptr) {
+        if (cols > 0) state->size.cols = cols;
+        if (rows > 0) state->size.rows = rows;
+    }
     return SSH_OK;
 }
 
@@ -194,11 +220,53 @@ ssh_channel onChannelOpen(ssh_session session, void* userdata)
     ssh_callbacks_init(&state->channelCallbacks);
     state->channelCallbacks.userdata = state;
     state->channelCallbacks.channel_pty_request_function = onPtyRequest;
+    state->channelCallbacks.channel_pty_window_change_function = onWindowChange;
     state->channelCallbacks.channel_shell_request_function = onShellRequest;
     ssh_set_channel_callbacks(channel, &state->channelCallbacks);
 
     state->channel = channel;
     return channel;
+}
+
+/// @brief The first word of a typed line (`mc`, `ls`, …), or "" for a blank one.
+std::string verbOf(const std::string& line)
+{
+    size_t start = 0;
+    while (start < line.size() && line[start] == ' ') ++start;
+    size_t end = start;
+    while (end < line.size() && line[end] != ' ') ++end;
+    return line.substr(start, end - start);
+}
+
+/**
+ * @brief One typed line, routed to the shell that owns its verb.
+ *
+ * The file commands belong to the SSH shell (`FileShell`), the rest to the shared
+ * `ConsoleCommands` — so a verb is looked up once, by its first word, and only one
+ * of the two answers. `help` is the exception: it prints both lists, because a
+ * person asking for help wants to see everything the session can do.
+ *
+ * Returns false when the line asked to end the session.
+ */
+bool runConsoleLine(const string& line, ::dhcp::menu::ConsoleCommands& commands,
+                    FileShell& files)
+{
+    size_t start = 0;
+    while (start < line.size() && line[start] == ' ') ++start;
+    size_t end = start;
+    while (end < line.size() && line[end] != ' ') ++end;
+    const string verb = line.substr(start, end - start);
+
+    if (verb == "help") {
+        commands.printHelp();
+        files.printHelp();
+        return true;
+    }
+    if (FileShell::handles(verb)) {
+        files.execute(line);
+        return true;
+    }
+    return commands.processLine(line);
 }
 
 /**
@@ -567,6 +635,65 @@ void SshServer::sessionTask(void* arg)
     vTaskDelete(nullptr);
 }
 
+void SshServer::runFileBrowser(void* channelRaw, const TerminalSize& size,
+                               ::dhcp::menu::IConsoleOutput& out)
+{
+    ssh_channel channel = static_cast<ssh_channel>(channelRaw);
+    PosixFileOperations files;
+    int cols = size.cols.load();
+    int rows = size.rows.load();
+    FileBrowser browser(files, cols, rows);
+    out.write("\x1b[0m\x1b[H\x1b[2J");
+
+    bool redraw = true;
+    char buffer[kReadBufBytes];
+    while (!browser.finished() && running_.load() &&
+           ssh_channel_is_open(channel) && !ssh_channel_is_eof(channel)) {
+        // A window resized while the browser is open is drawn at the size the client
+        // last asked for, not at the size the session started with.
+        const int nowCols = size.cols.load();
+        const int nowRows = size.rows.load();
+        if (nowCols != cols || nowRows != rows) {
+            cols = nowCols;
+            rows = nowRows;
+            browser.resize(cols, rows);
+            redraw = true;
+        }
+        if (redraw) {
+            // One frame: home the cursor, then every line, each one ending what was
+            // left of the line from the previous frame. The last line carries no line
+            // break, so the frame never scrolls the screen it was drawn on.
+            const vector<string> lines = browser.renderAnsi();
+            string frame = "\x1b[H";
+            for (size_t i = 0; i < lines.size(); i++) {
+                frame += lines[i];
+                frame += "\x1b[K";
+                if (i + 1 < lines.size()) frame += "\r\n";
+            }
+            frame += "\x1b[J";
+            out.write(frame);
+            redraw = false;
+        }
+
+        const int got = ssh_channel_read(channel, buffer, sizeof(buffer), 0);
+        if (got == SSH_AGAIN || got == 0) {
+            // Silence is not a reason to redraw: the screen changes when a key
+            // arrives or when the window changes size, and nothing else.
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (got < 0) break;
+        for (const TuiKey& key : decodeTuiKeys(string(buffer, static_cast<size_t>(got)))) {
+            browser.feed(key);
+            redraw = true;
+        }
+    }
+
+    // A clean screen for the console line that follows: the shell's own echo and
+    // prompt continue from the top left corner, in the terminal's own colours.
+    out.write("\x1b[0m\x1b[H\x1b[2J");
+}
+
 void SshServer::runSession(void* sessionRaw, const string& clientIp)
 {
     // The session task owns the breadcrumb from its first instruction: from here
@@ -625,6 +752,10 @@ void SshServer::runSession(void* sessionRaw, const string& clientIp)
         ChannelOutput out(channel);
         ::dhcp::menu::ConsoleCommands commands(out, wifi_, auth_);
         commands.setLifecycleHooks(beforeReboot_, factoryReset_);
+        // The file commands are the SSH shell's own (the serial console keeps the
+        // set it had): two volumes, sandboxed paths, strict flags.
+        PosixFileOperations files;
+        FileShell fileShell(out, files);
         out.write(kBanner);
         out.write(kPrompt);
 
@@ -648,7 +779,15 @@ void SshServer::runSession(void* sessionRaw, const string& clientIp)
                         out.write(kPrompt);
                         continue;
                     }
-                    const bool keepGoing = commands.processLine(line);
+                    // `mc` is the full-screen browser: it owns the channel until it
+                    // is closed, so it is handled here and not by either command set.
+                    if (verbOf(line) == "mc") {
+                        runFileBrowser(channel, state.size, out);
+                        out.write(kPrompt);
+                        line.clear();
+                        continue;
+                    }
+                    const bool keepGoing = runConsoleLine(line, commands, fileShell);
                     line.clear();
                     if (!keepGoing) {
                         out.write("Goodbye.\r\n");

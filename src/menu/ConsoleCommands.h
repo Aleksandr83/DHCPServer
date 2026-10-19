@@ -2,6 +2,7 @@
 #define DHCP_MENU_CONSOLECOMMANDS_H
 
 #include "ConsoleCommand.h"
+#include "IConsoleOutput.h"
 
 #include <functional>
 #include <string>
@@ -13,19 +14,6 @@ namespace web { class AuthManager; }
 
 namespace dhcp {
 namespace menu {
-
-/**
- * @brief Where a console writes (stage 222).
- *
- * The serial menu writes to `printf`, the SSH shell writes into an SSH channel.
- * Both print the same text from the same code, so the sink is the only thing
- * that differs — that is the whole reason this interface exists.
- */
-class IConsoleOutput {
-public:
-    virtual ~IConsoleOutput() = default;
-    virtual void write(const std::string& text) = 0;
-};
 
 /**
  * @brief The commands the serial console and the SSH shell share.
