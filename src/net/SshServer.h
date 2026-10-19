@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+
+#include "../core/SubnetFilter.h"
 namespace dhcp {
 namespace wifi { class IWiFiManager; }
 namespace web { class AuthManager; }
@@ -56,6 +58,16 @@ public:
     void setLifecycleHooks(std::function<void()> beforeReboot,
                            std::function<void()> factoryReset);
 
+    /**
+     * @brief Re-read the own-subnet filter's settings.
+     *
+     * Called when the server starts and whenever the SSH or DHCP settings are
+     * saved. The accept loop deliberately does **not** read them per connection:
+     * that put an NVS read (a flash access) inside the task serving a client, and
+     * the 19.10.2026 panic happened exactly there.
+     */
+    void refreshFilter();
+
 private:
     /// @brief One accepted session: the socket plus what the task needs.
     struct SessionArg {
@@ -80,6 +92,7 @@ private:
     void* bind_ = nullptr;        // ssh_bind
     void* acceptTask_ = nullptr;  // TaskHandle_t
     std::string hostKey_;
+    ::dhcp::core::SubnetFilter filter_;
     std::function<void()> beforeReboot_;
     std::function<void()> factoryReset_;
 };

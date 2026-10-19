@@ -25,14 +25,16 @@
             <div class="toggle-row">
                 <span data-i18n="ssh.enable">Enable SSH server</span>
                 <label class="toggle-switch">
-                    <input type="checkbox" id="ssh-enabled" onchange="markSshDirty()">
+                    <input type="checkbox" id="ssh-enabled" onchange="toggleSshServer()">
                     <span class="toggle-slider"></span>
                 </label>
             </div>
 
-            <label for="ssh-port" data-i18n="ssh.port" style="margin-top:0.8rem;display:block;">Port</label>
-            <input type="number" id="ssh-port" min="1" max="65535" step="1" placeholder="22"
-                   oninput="markSshDirty()">
+            <div class="toggle-row" style="margin-top:0.8rem;">
+                <label for="ssh-port" data-i18n="ssh.port" style="margin:0;">Port</label>
+                <input type="number" id="ssh-port" class="input-short" min="1" max="65535"
+                       step="1" placeholder="22" oninput="markSshDirty()">
+            </div>
             <p class="hint" data-i18n="ssh.port_hint">The port the SSH server listens on: 1 to 65535, 22 by default. A changed port is applied at once — the listener restarts on it.</p>
 
             <div class="toggle-row" style="margin-top:0.5rem;">
@@ -88,6 +90,35 @@
             sessions.textContent = (data && data.sessions > 0)
                 ? tr('ssh.sessions_active') + ': ' + data.sessions
                 : '';
+        }
+
+        // The switch is the one field that applies at once: an operator who turns
+        // the server on means it, and a switch that waits for a button is a switch
+        // left in the wrong position. Only this field is sent — a port being typed
+        // is neither stored half-written nor thrown away by a reload.
+        async function toggleSshServer() {
+            const box = document.getElementById('ssh-enabled');
+            const want = box.checked;
+            box.disabled = true;
+            try {
+                const r = await postJSON('/api/ssh/settings', { enabled: want });
+                if (r && r.status === 'ok') {
+                    setSshStatus('ssh.saved', 'status-ok');
+                    // The state is the device's answer, not the switch position: a
+                    // listener that refused to start must not look like one that runs.
+                    sshData = Object.assign({ available: true, sessions: 0 },
+                                            sshData || {}, { state: r.state });
+                    renderSshState(sshData);
+                } else {
+                    box.checked = !want;
+                    setSshStatus(want ? 'ssh.start_failed' : 'ssh.save_failed', 'status-err');
+                }
+            } catch (e) {
+                box.checked = !want;
+                setSshStatus('ssh.save_failed', 'status-err');
+            } finally {
+                box.disabled = false;
+            }
         }
 
         async function loadSshSettings() {

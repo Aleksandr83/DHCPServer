@@ -29,6 +29,7 @@
 #include "core/CpuMonitor.h"
 #include "core/ErrorLog.h"
 #include "core/AuthLog.h"
+#include "core/DeviceLog.h"
 #include "core/JobLog.h"
 #include "core/SshLog.h"
 #include "eth/EthManager.h"
@@ -41,6 +42,7 @@
 #include "net/MdnsResponder.h"
 #include "net/SsdpResponder.h"
 #include "net/SshServer.h"
+#include "net/SshStage.h"
 #include "storage/FatFileSystem.h"
 #include "storage/SdFileSystem.h"
 #include "time/TimeServer.h"
@@ -90,6 +92,27 @@ static void onNetworkConnected();
 static void onNetworkDisconnected();
 static void onClockSet();
 static void updateLedByNetworkStatus();
+
+/**
+ * @brief The words `Errors.log` uses for a restart that was not a power-on.
+ *
+ * Named here rather than spelled out at the call site: the line ends up in a file
+ * an operator reads a week later, so it has to say "a panic", not "reason 4".
+ */
+static const char* resetReasonText(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_PANIC:      return "a panic (the firmware aborted)";
+    case ESP_RST_INT_WDT:    return "the interrupt watchdog";
+    case ESP_RST_TASK_WDT:   return "the task watchdog";
+    case ESP_RST_WDT:        return "a watchdog";
+    case ESP_RST_BROWNOUT:   return "a brownout (the supply dropped)";
+    case ESP_RST_SW:         return "a software restart";
+    case ESP_RST_DEEPSLEEP:  return "deep sleep";
+    case ESP_RST_EXT:        return "an external reset";
+    default:                 return "an unknown reason";
+    }
+}
 
 extern "C" void app_main(void)
 {
@@ -151,6 +174,43 @@ extern "C" void app_main(void)
                 auto* card = s_fileManager.find("sd");
                 return card != nullptr && card->isMounted();
             });
+    }
+    // A restart that was not a power-on is evidence nobody can read without a
+    // UART cable: the device comes back up, the web interface works, and a panic
+    // leaves no trace anywhere the operator can look (19.10.2026: an SSH
+    // connection reset every time and the report had no way to say whether the
+    // device had crashed). That fact belongs to the device journal, not to the
+    // error file: a planned restart is not an error. The journal is started here,
+    // right after the error log, so the first line it carries is this one.
+    {
+        auto* cardVolume = s_fileManager.find("sd");
+        auto devCfg = dhcp::core::Config::instance().getDeviceLog();
+        auto& deviceLog = dhcp::core::DeviceLog::instance();
+        deviceLog.start("/fat", cardVolume ? cardVolume->mountPoint() : string(),
+                        [] {
+                            auto* card = s_fileManager.find("sd");
+                            return card != nullptr && card->isMounted();
+                        });
+        deviceLog.setLogFile(devCfg.logFile);
+        deviceLog.setFileLogSize(devCfg.logFileSize);
+
+        const string version = dhcp::core::Version::instance().toString();
+        const esp_reset_reason_t reason = esp_reset_reason();
+        if (reason == ESP_RST_POWERON || reason == ESP_RST_UNKNOWN) {
+            deviceLog.noteBoot(version);
+        } else {
+            deviceLog.noteBootAfter(version, resetReasonText(reason));
+            // Where it died, when that was a crash: the stage lives in RTC memory
+            // and is the only thing that survives a panic (a queued journal line
+            // and a FAT write do not). Only panics and watchdogs can leave one
+            // behind — a planned restart clears it as the last session closes.
+            const auto stage = dhcp::net::sshStageLast();
+            const bool crashed = reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT ||
+                                 reason == ESP_RST_TASK_WDT || reason == ESP_RST_WDT;
+            if (crashed && stage != dhcp::net::SshStage::None) {
+                deviceLog.noteSshCrash(dhcp::net::sshStageText(stage));
+            }
+        }
     }
     // Long-running operations get their own file, next to it: one line when an
     // operation starts and one when it ends (stage 173). The registry knows
@@ -272,8 +332,15 @@ extern "C" void app_main(void)
     {
         dhcp::web::RestApi::setSshServer(&s_sshServer);
         s_sshServer.setLifecycleHooks(
-            []() { s_dnsServer.saveStatsBeforeRestart(); s_dnsServer.saveCacheBeforeRestart(); },
-            []() { s_dnsServer.deleteStatsFile(); });
+            []() {
+                dhcp::core::DeviceLog::instance().noteRestart("an SSH session");
+                s_dnsServer.saveStatsBeforeRestart();
+                s_dnsServer.saveCacheBeforeRestart();
+            },
+            []() {
+                dhcp::core::DeviceLog::instance().noteFactoryReset("an SSH session");
+                s_dnsServer.deleteStatsFile();
+            });
 
         // The journal first: a session may start the moment the listener is up.
         const auto sshCfg = dhcp::core::Config::instance().getSsh();
@@ -301,8 +368,15 @@ extern "C" void app_main(void)
     // main-page statistics (Statistica.dat) and the cache (cache.dat), a factory
     // reset deletes the statistics file.
     s_terminalMenu.setLifecycleHooks(
-        []() { s_dnsServer.saveStatsBeforeRestart(); s_dnsServer.saveCacheBeforeRestart(); },
-        []() { s_dnsServer.deleteStatsFile(); });
+        []() {
+            dhcp::core::DeviceLog::instance().noteRestart("the console");
+            s_dnsServer.saveStatsBeforeRestart();
+            s_dnsServer.saveCacheBeforeRestart();
+        },
+        []() {
+            dhcp::core::DeviceLog::instance().noteFactoryReset("the console");
+            s_dnsServer.deleteStatsFile();
+        });
     s_terminalMenu.start();
 
     ESP_LOGI(TAG, "DHCPServer initialized. Type 'help' in terminal.");

@@ -11,7 +11,10 @@
 #include "libssh/server.h"
 #include "libssh/callbacks.h"
 
+#include "SshStage.h"
+
 #include "../core/Credentials.h"
+#include "../core/DeviceLog.h"
 #include "../core/ErrorLog.h"
 #include "../core/SubnetFilter.h"
 #include "../core/SshLog.h"
@@ -32,10 +35,29 @@ using namespace std;
 static const char* TAG = "SshServer";
 
 // Rule 39: the numbers below decide how the server behaves, so they are named.
-constexpr uint32_t kAcceptStackBytes = 6144;
-constexpr uint32_t kSessionStackBytes = 14336;
+//
+// The stacks are not guesses. This port already proved how deep libssh goes: the
+// first start of the listener needed ~3.9 KB of frames in one task (`app_main` →
+// `ssh_bind_listen` → `bind_socket` → lwIP `getaddrinfo`) and overflowed a 3584-byte
+// stack. Accepting a connection and running the key exchange are deeper still —
+// mbedTLS does the curve arithmetic and the Ed25519 signature on that stack — so
+// the accept task gets 12 KB and a session 32 KB; both live in PSRAM, which is
+// what makes the size affordable (19.10.2026: a client connecting at all panicked
+// the device, and the journal said so on the next boot).
+constexpr uint32_t kAcceptStackBytes = 12288;
+// Internal RAM, like the accept task: this is the only place in the firmware that
+// used an external (PSRAM) stack, and the rule for those is unforgiving — a task
+// whose stack lives outside the chip cannot run while the flash cache is disabled,
+// which is exactly what every log write to the FAT does. That is why the crash
+// moved from call to call as more logging was added and never named a culprit.
+constexpr uint32_t kSessionStackBytes = 16384;
+// The session task runs *below* the accept loop on purpose: at equal priority it
+// could preempt the loop the instant FreeRTOS starts it, and then a crash inside
+// the key exchange would be reported as a crash in the peer checks, because the
+// loop had not written its own breadcrumb yet. One step lower makes the order
+// unambiguous: the loop always finishes its bookkeeping first.
 constexpr UBaseType_t kAcceptPriority = 4;
-constexpr UBaseType_t kSessionPriority = 4;
+constexpr UBaseType_t kSessionPriority = 3;
 constexpr int kAuthAttemptsMax = 3;
 constexpr long kSessionPollTimeoutMs = 1000;
 constexpr int kStopWaitMs = 3000;
@@ -177,6 +199,20 @@ ssh_channel onChannelOpen(ssh_session session, void* userdata)
     return channel;
 }
 
+/**
+ * @brief libssh's own words, into the device journal.
+ *
+ * The key exchange of 19.10.2026 panicked the device inside libssh, where nothing
+ * of ours runs. This callback is the library's account of what it was doing, and
+ * it is written to `Device.log` — the one file that survives a reboot.
+ */
+void libsshToJournal(int priority, const char* function, const char* buffer, void*)
+{
+    (void)priority;
+    ::dhcp::core::DeviceLog::instance().noteLibssh(function ? function : "",
+                                                   buffer ? buffer : "");
+}
+
 } // namespace
 
 bool SshServer::available()
@@ -242,29 +278,37 @@ bool SshServer::start(uint16_t port)
 {
     if (running_.load()) return true;
 
+    auto& errors = ::dhcp::core::ErrorLog::instance();
+
     if (ssh_init() != SSH_OK) {
         ESP_LOGE(TAG, "ssh_init failed");
+        errors.errorf(TAG, "ssh_init failed: the SSH server did not start");
         return false;
     }
 
     const string key = hostKey();
     if (key.empty()) {
         ESP_LOGE(TAG, "no host key: refusing to listen");
+        errors.errorf(TAG, "no host key: the SSH server did not start");
         return false;
     }
 
     ssh_bind bind = ssh_bind_new();
     if (!bind) {
         ESP_LOGE(TAG, "ssh_bind_new failed");
+        errors.errorf(TAG, "ssh_bind_new failed: the SSH server did not start");
         return false;
     }
 
     const string portText = to_string(port);
     const char* bindAddress = "0.0.0.0";
-    const char* verbosity = "0";
+    // 3 = protocol level: every key-exchange step libssh takes, which is the only
+    // account of the crash inside `ssh_handle_key_exchange()` that reaches a file.
+    const char* verbosity = "3";
     ssh_bind_options_set(bind, SSH_BIND_OPTIONS_BINDADDR, bindAddress);
     ssh_bind_options_set(bind, SSH_BIND_OPTIONS_BINDPORT_STR, portText.c_str());
     ssh_bind_options_set(bind, SSH_BIND_OPTIONS_LOG_VERBOSITY_STR, verbosity);
+    ssh_set_log_callback(libsshToJournal);
     if (ssh_bind_options_set(bind, SSH_BIND_OPTIONS_IMPORT_KEY_STR, key.c_str()) != SSH_OK) {
         const string detail = string("the host key was refused: ") + ssh_get_error(bind);
         ESP_LOGE(TAG, "%s", detail.c_str());
@@ -286,26 +330,32 @@ bool SshServer::start(uint16_t port)
     bind_ = bind;
     running_.store(true);
 
+    // The filter's settings are read here, once, on the caller's task: the accept
+    // loop must not touch NVS while a client waits on it.
+    refreshFilter();
+
     TaskHandle_t handle = nullptr;
-    BaseType_t created = xTaskCreateWithCaps(
-        &SshServer::acceptTask, "ssh_accept", kAcceptStackBytes, this,
-        kAcceptPriority, &handle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (created != pdPASS) {
-        // PSRAM is a preference, not a requirement: a stack in internal RAM is
-        // better than a server that does not run.
-        ESP_LOGW(TAG, "no PSRAM task stack; falling back to internal RAM");
-        created = xTaskCreate(&SshServer::acceptTask, "ssh_accept", kAcceptStackBytes,
-                              this, kAcceptPriority, &handle);
-    }
+    // Internal RAM on purpose: this task reads no flash now, but it is one
+    // `malloc` away from a task that does, and the external-stack rule ("no flash
+    // operation while the cache is off") is not worth a reboot to discover. 12 KB
+    // of internal RAM for the lifetime of the server is affordable.
+    BaseType_t created = xTaskCreate(&SshServer::acceptTask, "ssh_accept",
+                                     kAcceptStackBytes, this, kAcceptPriority, &handle);
     if (created != pdPASS) {
         running_.store(false);
         ssh_bind_free(bind);
         bind_ = nullptr;
         ESP_LOGE(TAG, "could not create the accept task");
+        errors.errorf(TAG, "could not create the accept task on port %u: the "
+                           "SSH server did not start",
+                      static_cast<unsigned>(port));
         return false;
     }
     acceptTask_ = handle;
 
+    // The first line an operator looks for in the journal: a server that never
+    // wrote it, and never wrote a session either, did not run at all.
+    ::dhcp::core::SshLog::instance().noteServerStart(port);
     ESP_LOGI(TAG, "listening on 0.0.0.0:%u", static_cast<unsigned>(port));
     return true;
 }
@@ -337,7 +387,20 @@ void SshServer::stop()
     for (int waited = 0; activeSessions_.load() > 0 && waited < kStopWaitMs; waited += 50) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    ::dhcp::core::SshLog::instance().noteServerStop();
     ESP_LOGI(TAG, "SSH server stopped");
+}
+
+void SshServer::refreshFilter()
+{
+    // Both settings live in NVS, and NVS is a flash access: it happens on the task
+    // that saved them (or on the one starting the server), never on the accept
+    // loop — that was the 19.10.2026 panic: the device died in this read, between
+    // `accepted` and the session task, with the client's socket open.
+    const auto& cfgMgr = ::dhcp::core::Config::instance();
+    const auto sshCfg = cfgMgr.getSsh();
+    const auto dhcpCfg = cfgMgr.getDhcp();
+    filter_.apply({ sshCfg.allowOwnSubnet, dhcpCfg.serverIp, dhcpCfg.subnet });
 }
 
 void SshServer::acceptTask(void* arg)
@@ -347,9 +410,12 @@ void SshServer::acceptTask(void* arg)
 
 void SshServer::acceptLoop()
 {
-    const auto& cfgMgr = ::dhcp::core::Config::instance();
-
     while (running_.load()) {
+        // RTC breadcrumb for the wait itself. Only while nothing is being served:
+        // this loop blocks inside `accept()` for as long as nobody connects, and
+        // writing the stage there would overwrite what a running session wrote —
+        // a crash in the key exchange would be reported as a crash in accept.
+        if (activeSessions_.load() == 0) sshStageSet(SshStage::Accepting);
         ssh_session session = ssh_new();
         if (!session) {
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -362,39 +428,46 @@ void SshServer::acceptLoop()
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
+        sshStageSet(SshStage::Accepted);
         if (!running_.load()) {
             ssh_disconnect(session);
             ssh_free(session);
             break;
         }
 
-        // The LAN filter judges the socket, not anything the client says.
+        // The peer, from the socket itself, before anything else looks at it.
+        // The line written next is the journal's first breadcrumb: a device that
+        // dies inside libssh's accept leaves nothing, one that dies in the filter
+        // or in the task creation leaves this line, and one that dies in the key
+        // exchange leaves both it and the one after the task exists.
         string clientIp;
         {
-            const auto sshCfg = cfgMgr.getSsh();
-            const auto dhcpCfg = cfgMgr.getDhcp();
-            ::dhcp::core::SubnetFilter filter;
-            filter.apply({ sshCfg.allowOwnSubnet, dhcpCfg.serverIp, dhcpCfg.subnet });
-
             sockaddr_in peer;
             memset(&peer, 0, sizeof(peer));
             socklen_t peerLen = sizeof(peer);
             const socket_t fd = ssh_get_fd(session);
-            const bool known = fd >= 0 &&
-                getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &peerLen) == 0;
-            if (known) {
+            if (fd >= 0 &&
+                getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &peerLen) == 0) {
                 char text[INET_ADDRSTRLEN] = { 0 };
                 inet_ntop(AF_INET, &peer.sin_addr, text, sizeof(text));
                 clientIp = text;
-            }
-            if (known && !filter.contains(ntohl(peer.sin_addr.s_addr))) {
-                ESP_LOGW(TAG, "refused a session from outside the own subnet");
-                ::dhcp::core::SshLog::instance().noteSubnetRefused(clientIp);
-                ssh_disconnect(session);
-                ssh_free(session);
-                continue;
+                sshStageSet(SshStage::PeerKnown);
+
+                // The LAN filter judges the socket, not anything the client says.
+                // Its settings were read when the server started or when they were
+                // saved (refreshFilter): no NVS here, on the task a client is
+                // waiting on.
+                if (!filter_.contains(ntohl(peer.sin_addr.s_addr))) {
+                    ESP_LOGW(TAG, "refused a session from outside the own subnet");
+                    ::dhcp::core::SshLog::instance().noteSubnetRefused(clientIp);
+                    ssh_disconnect(session);
+                    ssh_free(session);
+                    continue;
+                }
+                sshStageSet(SshStage::FilterChecked);
             }
         }
+        ::dhcp::core::SshLog::instance().noteSessionAccepted(clientIp);
 
         if (activeSessions_.load() >= kMaxSessions) {
             ESP_LOGW(TAG, "refused a session: %d of %d already running",
@@ -415,22 +488,33 @@ void SshServer::acceptLoop()
 
         activeSessions_++;
         TaskHandle_t handle = nullptr;
-        BaseType_t created = xTaskCreateWithCaps(
+        sshStageSet(SshStage::TaskCreating);
+        const BaseType_t created = xTaskCreate(
             &SshServer::sessionTask, "ssh_session", kSessionStackBytes, sessionArg,
-            kSessionPriority, &handle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (created != pdPASS) {
-            ESP_LOGW(TAG, "no PSRAM for a session stack; trying internal RAM");
-            created = xTaskCreate(&SshServer::sessionTask, "ssh_session",
-                                  kSessionStackBytes, sessionArg,
-                                  kSessionPriority, &handle);
-        }
+            kSessionPriority, &handle);
         if (created != pdPASS) {
             ESP_LOGW(TAG, "could not start a session task");
+            // A connection that dies here never reaches a journal line of its own:
+            // the client only sees "connection reset", so the journal has to say
+            // what happened, and Errors.log has to carry the resource side.
+            ::dhcp::core::SshLog::instance().noteSessionFault(
+                clientIp, "no memory for a session task");
+            ::dhcp::core::ErrorLog::instance().errorf(
+                TAG, "no memory for a session task: the connection from %s was "
+                     "dropped",
+                clientIp.empty() ? "(unknown address)" : clientIp.c_str());
             activeSessions_--;
             delete sessionArg;
             ssh_disconnect(session);
             ssh_free(session);
+            continue;
         }
+
+        // The second breadcrumb: a session task exists and the client is served by
+        // it from here on — and it cannot have run yet, because it sits one
+        // priority step below this loop.
+        ::dhcp::core::SshLog::instance().noteSessionStarted(clientIp);
+        sshStageSet(SshStage::TaskCreated);
     }
 
     if (bind_) {
@@ -451,6 +535,10 @@ void SshServer::sessionTask(void* arg)
 
 void SshServer::runSession(void* sessionRaw, const string& clientIp)
 {
+    // The session task owns the breadcrumb from its first instruction: from here
+    // until the console opens, a crash is reported as "the key exchange".
+    sshStageSet(SshStage::KeyExchange);
+
     ssh_session session = static_cast<ssh_session>(sessionRaw);
     SessionState state;
     state.session = session;
@@ -460,7 +548,11 @@ void SshServer::runSession(void* sessionRaw, const string& clientIp)
 
     do {
         if (ssh_handle_key_exchange(session) != SSH_OK) {
-            ESP_LOGW(TAG, "key exchange failed: %s", ssh_get_error(session));
+            const string reason = ssh_get_error(session);
+            ESP_LOGW(TAG, "key exchange failed: %s", reason.c_str());
+            // The line this report was missing: the client said "Connection reset",
+            // the journal was empty, and the reason existed only on the UART.
+            ::dhcp::core::SshLog::instance().noteSessionFault(clientIp, reason);
             break;
         }
 
@@ -490,6 +582,7 @@ void SshServer::runSession(void* sessionRaw, const string& clientIp)
 
         // ─── The console itself: the same commands as the serial menu ───
         ssh_channel channel = state.channel;
+        sshStageSet(SshStage::Shell);
         // A session is a session once somebody is in it: the line is written after
         // the password, not when the socket was accepted, so a port scan does not
         // fill the journal with openings nobody made.
@@ -557,6 +650,9 @@ void SshServer::runSession(void* sessionRaw, const string& clientIp)
     ssh_disconnect(session);
     ssh_free(session);
     activeSessions_--;
+    // The last session out clears the breadcrumb: a stage left behind would be
+    // reported by the next boot as a crash that never happened.
+    if (activeSessions_.load() == 0) sshStageSet(SshStage::None);
     ESP_LOGI(TAG, "session closed (%d still active)", activeSessions_.load());
 }
 
@@ -591,6 +687,8 @@ bool SshServer::start(uint16_t)
 }
 
 void SshServer::stop() {}
+
+void SshServer::refreshFilter() {}
 
 std::string SshServer::hostKey()
 {

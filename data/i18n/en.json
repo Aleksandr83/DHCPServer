@@ -9,6 +9,7 @@
     "dhcp_status": "DHCP server:",
     "dns_status": "DNS server:",
     "ntp_status": "NTP server:",
+    "ssh_status": "SSH server:",
     "cpu_load": "CPU Load:",
     "free_ram": "Memory:",
     "storage": "Storage:",
@@ -657,7 +658,12 @@
     "local_name": "Publish the name in the local network",
     "local_name_hint": "The device answers to its host name and to <host name>.local through its own DNS, and publishes <host name>.local over mDNS. Clients that use another DNS still reach it by <host name>.local on Windows 10+, macOS and Linux.",
     "local_name_saved": "The local name setting is saved.",
-    "local_name_failed": "The local name could not be switched"
+    "local_name_failed": "The local name could not be switched",
+    "device_log": "Write the device events to Device.log",
+    "device_log_hint": "The journal keeps the device’s own events: the start with the firmware version, why the previous run ended (a panic, a watchdog, a plain restart), a restart asked for from the interface or the console, an imported backup and a factory reset. It is /fat/logs/Device.log; a full file is archived to the card as log/Archive/Device/<dates>/Device.log.",
+    "device_log_size": "File size",
+    "device_log_saved": "Device journal settings saved.",
+    "device_log_failed": "The device journal settings could not be saved"
   },
   "ssh": {
     "title": "SSH Server",
@@ -681,11 +687,11 @@
   "ssh_logging": {
     "title": "SSH Logging",
     "log_file": "Log to file",
-    "file_hint": "Sessions, refused passwords and refusals by the subnet filter go to /fat/logs/SSH.log; a full file is archived to the card as log/Archive/Ssh/<dates>/SSH.log.",
+    "file_hint": "The server starting (with its port) and stopping, sessions, refused passwords, refusals by the subnet filter and a session that died before the password go to /fat/logs/SSH.log; a full file is archived to the card as log/Archive/Ssh/<dates>/SSH.log.",
     "size": "File size",
     "size_hint": "When the file reaches this size it is archived to the card; with no card the newest ten lines are kept.",
     "log_terminal": "Also print to the terminal",
-    "terminal_hint": "The same lines appear on the UART console. Faults of the server itself (a port that cannot be bound) always go to Errors.log, never here.",
+    "terminal_hint": "The same lines appear on the UART console. A server that cannot start at all (a port that cannot be bound) is reported in Errors.log; a session that dies before the password is in both places.",
     "saved": "SSH logging saved.",
     "save_failed": "The SSH logging settings could not be saved",
     "load_failed": "The SSH logging settings could not be read from the device"

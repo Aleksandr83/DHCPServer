@@ -20,7 +20,13 @@ namespace core {
  *     `Auth.log` uses, so a reader of both files learns one shape rather than two;
  *   * **a refusal that never reached a password** — the subnet filter, and the
  *     session limit; these are the ones that would otherwise be invisible, since
- *     a refused connection leaves no trace in the console.
+ *     a refused connection leaves no trace in the console;
+ *   * **the server's own start and stop**, with the port — the first thing an
+ *     operator looks for when nothing else was written;
+ *   * **a session that died before the password** — a failed key exchange or a
+ *     session task that could not be started, with the reason libssh gave.
+ *     Until 19.10.2026 these went to the UART only, so a connection reset by the
+ *     server left an empty journal and no way to tell why.
  *
  * The text is built without its timestamp — `ErrorLogCore` adds that — which is
  * what lets a host test check the sentences.
@@ -88,6 +94,65 @@ inline std::string sshSessionLimitText(const std::string& clientIp, uint32_t lim
 {
     return "refused a session from " + clientIp + ": " + std::to_string(limit) +
            " of " + std::to_string(limit) + " already open";
+}
+
+/// @brief `server started on port 22`.
+inline std::string sshServerStartText(uint16_t port)
+{
+    return "server started on port " + std::to_string(port);
+}
+
+/// @brief `server stopped`.
+inline std::string sshServerStopText()
+{
+    return "server stopped";
+}
+
+/**
+ * @brief `session from 192.168.1.5 accepted`.
+ *
+ * The breadcrumb before the password: a session task is running and the key
+ * exchange is about to start. If the device dies in that window — a stack
+ * overflow inside libssh, which is what the 19.10.2026 panic turned out to be —
+ * this is the last line in the journal, and the line alone tells the reader that
+ * the accept task got as far as starting a session.
+ */
+inline std::string sshSessionAcceptedText(const std::string& clientIp)
+{
+    const std::string who =
+        clientIp.empty() ? std::string("(unknown address)") : clientIp;
+    return "session from " + who + " accepted";
+}
+
+/**
+ * @brief `session from 192.168.1.5 started`.
+ *
+ * The second breadcrumb: a task of its own is running for this client, so the
+ * next thing that happens is the key exchange, and a crash from there on leaves
+ * this line as the journal's last.
+ */
+inline std::string sshSessionStartedText(const std::string& clientIp)
+{
+    const std::string who =
+        clientIp.empty() ? std::string("(unknown address)") : clientIp;
+    return "session from " + who + " started";
+}
+
+/**
+ * @brief `session from 192.168.1.5 failed before the password: <reason>`.
+ *
+ * The line that was missing while a connection died at the key exchange: the
+ * operator saw `Connection reset` and an empty journal, because everything that
+ * can go wrong between `accept()` and the banner was written to the UART only.
+ * The reason is libssh's own sentence, so the file carries what the terminal
+ * would have said.
+ */
+inline std::string sshSessionFaultText(const std::string& clientIp,
+                                       const std::string& reason)
+{
+    const std::string who =
+        clientIp.empty() ? std::string("(unknown address)") : clientIp;
+    return "session from " + who + " failed before the password: " + reason;
 }
 
 } // namespace core

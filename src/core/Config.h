@@ -337,6 +337,20 @@ struct FileConfig {
 };
 
 /**
+ * @brief Device events configuration (on **Settings ▸ General** for now).
+ *
+ * The journal itself is described in `core/DeviceLog.h`; what an operator can
+ * change here is whether it is written and how big it may grow — the same two
+ * things every other file log offers. No terminal echo: the boot lines are on the
+ * UART already.
+ */
+struct DeviceLogConfig {
+    bool logFile = true;
+    /// The cap the file rotates at, in bytes (one of `LogFileSizes.h`'s three).
+    uint32_t logFileSize = static_cast<uint32_t>(core::kLogFileDefaultMaxBytes);
+};
+
+/**
  * @brief Configuration manager using NVS.
  *
  * All settings are persisted in NVS under the "dhcp" namespace.
@@ -427,6 +441,10 @@ public:
     // ─── SSH server ──────────────────────────────────
     SshConfig getSsh() const;
     void setSsh(const SshConfig& cfg);
+
+    // ─── Device events journal ───────────────────────
+    DeviceLogConfig getDeviceLog() const;
+    void setDeviceLog(const DeviceLogConfig& cfg);
     /**
      * @brief The host key the SSH server presents, base64 (empty = none yet).
      *

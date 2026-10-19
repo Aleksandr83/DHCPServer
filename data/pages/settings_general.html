@@ -37,6 +37,27 @@
             </div>
             <p class="hint" data-i18n="settings_general.local_name_hint">The device answers to its host name and to &lt;host name&gt;.local through its own DNS, and publishes &lt;host name&gt;.local over mDNS.</p>
         </div>
+
+        <!-- The device events journal: what this box itself did — started with
+             which version, why the previous run ended, when a restart was asked
+             for. Its switch and its cap live here for now (the operator asked for
+             that), and moving them to the Device page later costs this one card. -->
+        <div class="card" id="general-device-log-card">
+            <div class="toggle-row">
+                <span data-i18n="settings_general.device_log">Write the device events to Device.log</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="general-device-log" onchange="toggleDeviceLog()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <p class="hint" data-i18n="settings_general.device_log_hint">The journal keeps the device's own events: the start with the firmware version, why the previous run ended (a panic, a watchdog, a plain restart), a restart asked for from the interface or the console, an imported backup and a factory reset. It is /fat/logs/Device.log; a full file is archived to the card as log/Archive/Device/&lt;dates&gt;/Device.log.</p>
+
+            <div class="toggle-row" style="margin-top:0.6rem;">
+                <span data-i18n="settings_general.device_log_size">File size</span>
+                <select id="general-device-log-size" style="width:6.5rem;"
+                        onchange="saveDeviceLogSize()"></select>
+            </div>
+        </div>
     </main>
 
     <div id="footer-placeholder"></div>
@@ -67,6 +88,7 @@
                     input.value = data.hostname;
                 }
                 renderLocalName(data);
+                renderDeviceLog(data);
             } catch (e) {
                 setGeneralStatus('settings_general.failed', 'status-err');
             }
@@ -102,6 +124,56 @@
                 setGeneralStatus('settings_general.local_name_failed', 'status-err');
             } finally {
                 box.disabled = false;
+            }
+        }
+
+        // The journal's switch and cap are their own card with its own votes: the
+        // page sends only the field that moved, exactly like the local-name
+        // switch above, and the device answers with what it now carries.
+        function renderDeviceLog(data) {
+            const box = document.getElementById('general-device-log');
+            if (!box) return;
+            box.checked = !!(data && data.device_log);
+            fillLogFileSizes('general-device-log-size', data && data.device_log_size);
+        }
+
+        async function toggleDeviceLog() {
+            const box = document.getElementById('general-device-log');
+            const want = box.checked;
+            box.disabled = true;
+            try {
+                const r = await postJSON('/api/settings/general', { device_log: want });
+                if (r && r.status === 'ok') {
+                    box.checked = !!r.device_log;
+                    setGeneralStatus('settings_general.device_log_saved', 'status-ok');
+                } else {
+                    box.checked = !want;
+                    setGeneralStatus('settings_general.device_log_failed', 'status-err');
+                }
+            } catch (e) {
+                box.checked = !want;
+                setGeneralStatus('settings_general.device_log_failed', 'status-err');
+            } finally {
+                box.disabled = false;
+            }
+        }
+
+        async function saveDeviceLogSize() {
+            const select = document.getElementById('general-device-log-size');
+            const size = parseInt(select.value, 10);
+            select.disabled = true;
+            try {
+                const r = await postJSON('/api/settings/general', { device_log_size: size });
+                if (r && r.status === 'ok') {
+                    setGeneralStatus('settings_general.device_log_saved', 'status-ok');
+                    fillLogFileSizes('general-device-log-size', r.device_log_size);
+                } else {
+                    setGeneralStatus('settings_general.device_log_failed', 'status-err');
+                }
+            } catch (e) {
+                setGeneralStatus('settings_general.device_log_failed', 'status-err');
+            } finally {
+                select.disabled = false;
             }
         }
 

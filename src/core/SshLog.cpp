@@ -163,5 +163,30 @@ void SshLog::noteSessionLimit(const string& clientIp, uint32_t limit)
     submit(LogLevel::Warn, sshSessionLimitText(clientIp, limit));
 }
 
+void SshLog::noteServerStart(uint16_t port)
+{
+    submit(LogLevel::Info, sshServerStartText(port));
+}
+
+void SshLog::noteServerStop()
+{
+    submit(LogLevel::Info, sshServerStopText());
+}
+
+void SshLog::noteSessionAccepted(const string& clientIp)
+{
+    submit(LogLevel::Info, sshSessionAcceptedText(clientIp));
+}
+
+void SshLog::noteSessionStarted(const string& clientIp)
+{
+    submit(LogLevel::Info, sshSessionStartedText(clientIp));
+}
+
+void SshLog::noteSessionFault(const string& clientIp, const string& reason)
+{
+    submit(LogLevel::Warn, sshSessionFaultText(clientIp, reason));
+}
+
 } // namespace core
 } // namespace dhcp

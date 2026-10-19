@@ -1147,6 +1147,21 @@ async function updateStatus() {
             ntpEl.textContent = data.ntp_running ? tr('status.running') : tr('status.stopped');
             ntpEl.className = 'status-value ' + (data.ntp_running ? 'status-ok' : 'status-err');
         }
+        // SSH sits right under NTP: both are services an operator switches on for
+        // himself. A build without an SSH server says so by the row's absence —
+        // `ssh_available` is false there (and missing on firmware that predates
+        // the field), so a device that never had SSH cannot show a red line for it.
+        const sshEl = document.getElementById('ssh-status');
+        if (sshEl) {
+            const sshRow = document.getElementById('ssh-status-row');
+            const available = data.ssh_available === true;
+            if (sshRow) sshRow.style.display = available ? '' : 'none';
+            if (available) {
+                const running = !!data.ssh_running;
+                sshEl.textContent = running ? tr('status.running') : tr('status.stopped');
+                sshEl.className = 'status-value ' + (running ? 'status-ok' : 'status-err');
+            }
+        }
         // CPU per-core bars
         const pct0 = data.cpu_load0 != null ? data.cpu_load0 : 0;
         const pct1 = data.cpu_load1 != null ? data.cpu_load1 : 0;

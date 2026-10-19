@@ -10,6 +10,7 @@
 #include "CacheViewJson.h"
 #include "../core/ErrorLog.h"
 #include "../core/AuthLog.h"
+#include "../core/DeviceLog.h"
 #include "../core/Version.h"
 #include "../core/Config.h"
 #include "../core/TimeDefaults.h"
@@ -779,6 +780,13 @@ esp_err_t RestApi::handleGetStatus(httpd_req* req)
                 s_dns ? s_dns->isRunning() : false, true);
     addJsonBool(json, "ntp_running",
                 s_time ? s_time->isRunning() : false, true);
+    // The SSH server is off by default and on the classic ESP32 it is not part
+    // of the build at all, so the row on the home page needs both facts: what the
+    // listener does right now, and whether this firmware has one to show.
+    addJsonBool(json, "ssh_running",
+                s_ssh ? s_ssh->isRunning() : false, true);
+    addJsonBool(json, "ssh_available",
+                ::dhcp::net::SshServer::available(), true);
     // Device uptime since boot. The home page shows it next to its own title,
     // and that row has to stay readable while the time service is switched off,
     // so the raw `esp_timer` count is read here instead of asking `s_time` —
@@ -1074,6 +1082,7 @@ esp_err_t RestApi::handlePostDhcpSettings(httpd_req* req)
     if (s_dns) s_dns->applySubnetFilter();
     if (s_time) s_time->applyAccessFilter();
     if (s_files) s_files->applyAccessFilter();
+    if (s_ssh) s_ssh->refreshFilter();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
@@ -2200,6 +2209,15 @@ esp_err_t RestApi::handleGetSettingsGeneral(httpd_req* req)
     // a switch that cannot work.
     addJsonBool(json, "local_name_available",
                 ::dhcp::net::MdnsResponder::available(), true);
+    // The device events journal (its switch and its cap): on this page for now,
+    // because that is where the operator asked for them, while the Device page is
+    // still undecided.
+    {
+        const auto devCfg = cfgMgr.getDeviceLog();
+        addJsonBool(json, "device_log", devCfg.logFile, true);
+        addJsonInt(json, "device_log_size",
+                   static_cast<int64_t>(devCfg.logFileSize), true);
+    }
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -2280,9 +2298,31 @@ esp_err_t RestApi::handlePostSettingsGeneral(httpd_req* req)
         }
     }
 
+    // The device events journal: its own switch and cap, independent of the two
+    // fields above (the page sends them from its own card).
+    if (body.find("\"device_log\"") != string::npos ||
+        body.find("\"device_log_size\"") != string::npos) {
+        auto devCfg = cfgMgr.getDeviceLog();
+        devCfg.logFile = jsonGetBool(body, "device_log", devCfg.logFile);
+        if (body.find("\"device_log_size\"") != string::npos) {
+            devCfg.logFileSize = static_cast<uint32_t>(
+                ::dhcp::core::logFileSizeOrDefault(
+                    jsonGetInt(body, "device_log_size", 0)));
+        }
+        cfgMgr.setDeviceLog(devCfg);
+        // Live: the journal writes a line per event, so a switch that waited for
+        // a reboot would lose the events it was turned on for.
+        ::dhcp::core::DeviceLog::instance().setLogFile(devCfg.logFile);
+        ::dhcp::core::DeviceLog::instance().setFileLogSize(devCfg.logFileSize);
+    }
+
     string json = "{\"status\":\"ok\",";
     addJsonString(json, "hostname", hostName, false);
     addJsonBool(json, "local_name", cfgMgr.getLocalNameEnabled(), true);
+    const auto devLogCfg = cfgMgr.getDeviceLog();
+    addJsonBool(json, "device_log", devLogCfg.logFile, true);
+    addJsonInt(json, "device_log_size",
+               static_cast<int64_t>(devLogCfg.logFileSize), true);
     json += "}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json.c_str());
@@ -2412,6 +2452,9 @@ esp_err_t RestApi::handlePostSshSettings(httpd_req* req)
     }
 
     cfgMgr.setSsh(cfg);
+    // The server's filter follows the settings without a restart (the listener is
+    // only restarted when the switch or the port moved).
+    if (s_ssh) s_ssh->refreshFilter();
     // The journal follows the settings without a restart: the switches are read by
     // the log itself, and a smaller cap archives an over-full file at once.
     auto& journal = ::dhcp::core::SshLog::instance();
@@ -2668,6 +2711,15 @@ esp_err_t RestApi::handleGetSettingsExport(httpd_req* req)
         json += "}";
     }
 
+    // ── device_log section (the device events journal) ──
+    {
+        const auto devCfg = cfgMgr.getDeviceLog();
+        json += ",\"device_log\":{";
+        addJsonBool(json, "log_file", devCfg.logFile, false);
+        addJsonInt(json, "log_file_size", static_cast<int64_t>(devCfg.logFileSize), true);
+        json += "}";
+    }
+
     json += "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -2690,7 +2742,7 @@ static const char* const kKnownSettingsKeys[] = {
     "format", "schema", "firmware_version",
     // ── sections ──
     "dhcp", "static_bindings", "allowed_computers", "dns", "time",
-    "local_hosts", "security", "files", "device", "ssh",
+    "local_hosts", "security", "files", "device", "ssh", "device_log",
     // ── dhcp ──
     "enabled", "server_ip", "start_ip", "end_ip", "subnet", "gateway",
     "lease_time", "max_lease_entries", "log_terminal", "log_rest", "log_url",
@@ -2718,6 +2770,8 @@ static const char* const kKnownSettingsKeys[] = {
     "cert_storage", "cert_name",
     // ── device ──
     "hostname", "local_name",
+    // ── device events journal ──
+    "device_log", "device_log_size",
     // ── ssh ──
     "port", "log_file_size", "log_terminal",
 };
@@ -2798,7 +2852,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     bool importedDhcp = false, importedBind = false, importedDns = false;
     bool importedHosts = false, importedSec = false, importedTime = false;
     bool importedAllowed = false, importedFiles = false;
-    bool importedDevice = false, importedSsh = false;
+    bool importedDevice = false, importedSsh = false, importedDeviceLog = false;
     // What the file asked for and the device could not do. The answer used to be
     // a bare "ok" plus per-section flags, so a refused list read as a successful
     // restore (stage 183b).
@@ -2854,6 +2908,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 }
                 cfgMgr.setDhcp(cur);
                 applyDhcpSettingsLive(s_dhcp, cur);
+                if (s_ssh) s_ssh->refreshFilter();
                 importedDhcp = true;
             }
         }
@@ -3294,6 +3349,32 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
         }
     }
 
+    // The device events journal (its switch and its size, on Settings ▸ General)
+    {
+        size_t s = body.find("\"device_log\"");
+        size_t open = s == string::npos ? string::npos : body.find('{', s);
+        if (open != string::npos) {
+            string seg = body.substr(open);
+            auto cur = cfgMgr.getDeviceLog();
+            cur.logFile = jsonGetBool(seg, "log_file", cur.logFile);
+            {
+                // A size this firmware does not offer is not a size (the same
+                // rule as every other log in this file).
+                const int64_t size = jsonGetInt(seg, "log_file_size", 0);
+                if (size > 0 && ::dhcp::core::logFileSizeValid(static_cast<size_t>(size))) {
+                    cur.logFileSize = static_cast<uint32_t>(size);
+                }
+            }
+            cfgMgr.setDeviceLog(cur);
+            // Applied now, not at the next boot: the journal writes a line per
+            // event, so a switch that waits for a restart would lose the events
+            // the operator turned it on for.
+            ::dhcp::core::DeviceLog::instance().setLogFile(cur.logFile);
+            ::dhcp::core::DeviceLog::instance().setFileLogSize(cur.logFileSize);
+            importedDeviceLog = true;
+        }
+    }
+
     // SSH server (stage 222)
     if (body.find("\"ssh\"") != string::npos) {
         size_t s = body.find("\"ssh\"");
@@ -3323,6 +3404,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
                 }
             }
             cfgMgr.setSsh(cur);
+            if (s_ssh) s_ssh->refreshFilter();
             importedSsh = true;
         }
     }
@@ -3378,6 +3460,11 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     }
 
     // ─── 6. Build response ───
+    // A restored backup is a device event: the settings on this box changed, and
+    // nothing else in the journal would say so. Written before the response, so a
+    // device that reboots on the way out still has the line.
+    ::dhcp::core::DeviceLog::instance().noteSettingsImported();
+
     string json = "{";
     addJsonString(json, "status", "ok", false);
     addJsonString(json, "firmware_version", curVer.toString(), true);
@@ -3396,6 +3483,7 @@ esp_err_t RestApi::handlePostSettingsImport(httpd_req* req)
     addJsonBool(json, "files", importedFiles, true);
     addJsonBool(json, "device", importedDevice, true);
     addJsonBool(json, "ssh", importedSsh, true);
+    addJsonBool(json, "device_log", importedDeviceLog, true);
     json += "}";
     if (!skipped.empty()) json += ",\"skipped_fields\":[" + skipped + "]";
     // The sections the file asked for but the device could not do (stage 183b):
@@ -3442,6 +3530,7 @@ esp_err_t RestApi::handlePostSettingsReset(httpd_req* req)
     if (s_dns) s_dns->deleteStatsFile();
 
     ESP_LOGW(TAG, "Factory reset requested from web UI — rebooting...");
+    ::dhcp::core::DeviceLog::instance().noteFactoryReset("the web interface");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req,
         "{\"status\":\"ok\",\"message\":\"Settings reset to factory defaults. Rebooting...\",\"reboot\":true}");
@@ -3470,6 +3559,7 @@ esp_err_t RestApi::handlePostDeviceReboot(httpd_req* req)
     const bool alreadySaved = jsonGetBool(body, "saved", false);
 
     ESP_LOGW(TAG, "Reboot requested from web UI (pre-saved=%d)", alreadySaved ? 1 : 0);
+    ::dhcp::core::DeviceLog::instance().noteRestart("the web interface");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req,
         "{\"status\":\"ok\",\"message\":\"Device is rebooting...\",\"reboot\":true}");

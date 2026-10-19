@@ -405,6 +405,28 @@ input:focus, select:focus, textarea:focus {
     border-color: var(--accent);
 }
 
+/* A number field whose content is a few digits (a port, a count): as wide as
+   those digits, the spinner and the padding, and no wider. The base `input`
+   rule stretches every field to the card, which turns a `1..65535` box into a
+   line as long as the page and makes a five-digit number look lost in it.
+   The digits are aligned to the right edge, next to the spinner: a number is
+   read up to its last digit, and that is the edge it should end at. */
+.input-short {
+    width: 6.5rem;
+    padding-right: 0.25rem;
+    text-align: right;
+}
+
+/* The gap between the last digit and the up/down arrows, and the whole of the
+   room they get: Chromium draws the arrows inside the field and lays them out
+   after the text, so their own left margin is what separates them from the last
+   digit. The field keeps only a hair of right padding (0.25rem), which is what
+   lets the digits reach the edge in a browser whose arrows appear only on
+   hover. */
+.input-short::-webkit-inner-spin-button {
+    margin-left: 0.5rem;
+}
+
 /* ─── Buttons ──────────────────────────────────────── */
 
 .btn {

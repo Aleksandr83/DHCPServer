@@ -38,6 +38,13 @@
                 <span class="status-label" data-i18n="app.ntp_status">NTP server:</span>
                 <span id="ntp-status" class="status-value">--</span>
             </div>
+            <!-- The SSH row hides itself where the firmware has no SSH server at
+                 all (the classic ESP32 build); a device that has one shows what
+                 the listener does, off or not. -->
+            <div class="status-row" id="ssh-status-row" style="display:none;">
+                <span class="status-label" data-i18n="app.ssh_status">SSH server:</span>
+                <span id="ssh-status" class="status-value">--</span>
+            </div>
             <div class="status-row">
                 <span class="status-label" data-i18n="app.cpu_load">CPU Load:</span>
                 <div class="status-value cpu-meter">

@@ -94,6 +94,48 @@ int test_the_other_refusals()
     return 0;
 }
 
+/**
+ * The server's own lifecycle: the two lines an operator looks for first when a
+ * connection is refused and nothing else was written.
+ */
+int test_the_server_lifecycle()
+{
+    TEST_ASSERT_STREQ(sshServerStartText(22), "server started on port 22");
+    TEST_ASSERT_STREQ(sshServerStartText(2222), "server started on port 2222");
+    TEST_ASSERT_STREQ(sshServerStopText(), "server stopped");
+    return 0;
+}
+
+/**
+ * The breadcrumb that survives a crash in the key exchange: it has to be written
+ * before the session task starts doing anything, and it has to name the peer.
+ */
+int test_the_session_breadcrumb()
+{
+    TEST_ASSERT_STREQ(sshSessionAcceptedText("192.168.1.5"),
+                      "session from 192.168.1.5 accepted");
+    TEST_ASSERT_STREQ(sshSessionAcceptedText(""), "session from (unknown address) accepted");
+    TEST_ASSERT_STREQ(sshSessionStartedText("192.168.1.5"),
+                      "session from 192.168.1.5 started");
+    TEST_ASSERT_STREQ(sshSessionStartedText(""), "session from (unknown address) started");
+    return 0;
+}
+
+/**
+ * A session that died before the password: the one case that used to leave no
+ * trace at all — a failed key exchange or a refused session task.
+ */
+int test_a_session_that_died_early()
+{
+    TEST_ASSERT_STREQ(sshSessionFaultText("192.168.1.5", "no usable host key"),
+                      "session from 192.168.1.5 failed before the password: "
+                      "no usable host key");
+    TEST_ASSERT_STREQ(sshSessionFaultText("", "no memory for a session task"),
+                      "session from (unknown address) failed before the password: "
+                      "no memory for a session task");
+    return 0;
+}
+
 } // namespace
 
 extern "C" {
@@ -107,6 +149,9 @@ void app_main()
     failures += test_the_session_closing();
     failures += test_the_refused_password();
     failures += test_the_other_refusals();
+    failures += test_the_server_lifecycle();
+    failures += test_the_session_breadcrumb();
+    failures += test_a_session_that_died_early();
 
     if (failures == 0) {
         printf("All SshLogFormat tests PASSED!\n");

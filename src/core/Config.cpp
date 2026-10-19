@@ -31,6 +31,10 @@ static const char* KEY_SSH_HOST_KEY  = "ssh_host_key";
 static const char* KEY_SSH_LOG_FILE  = "ssh_logfile";
 static const char* KEY_SSH_LOG_TERM  = "ssh_log_term";
 static const char* KEY_SSH_LOG_SIZE  = "ssh_log_size";
+// The device events journal. `devlog_file` is 11 characters and `devlog_size` 11,
+// both inside the 15 NVS allows.
+static const char* KEY_DEV_LOG_FILE  = "devlog_file";
+static const char* KEY_DEV_LOG_SIZE  = "devlog_size";
 static const char* KEY_WIFI_SSID      = "wifi_ssid";
 static const char* KEY_WIFI_PASS      = "wifi_pass";
 static const char* KEY_DHCP_ENABLED   = "dhcp_enabled";
@@ -871,6 +875,21 @@ string Config::getSshHostKey() const
 void Config::setSshHostKey(const string& keyBase64)
 {
     writeStr(KEY_SSH_HOST_KEY, keyBase64);
+}
+
+DeviceLogConfig Config::getDeviceLog() const
+{
+    DeviceLogConfig cfg;
+    cfg.logFile = readI32(KEY_DEV_LOG_FILE, 1) != 0;           // default ON
+    cfg.logFileSize = static_cast<uint32_t>(
+        core::logFileSizeOrDefault(readI32(KEY_DEV_LOG_SIZE, 0)));
+    return cfg;
+}
+
+void Config::setDeviceLog(const DeviceLogConfig& cfg)
+{
+    writeI32(KEY_DEV_LOG_FILE, cfg.logFile ? 1 : 0);
+    writeI32(KEY_DEV_LOG_SIZE, static_cast<int32_t>(cfg.logFileSize));
 }
 
 } // namespace core

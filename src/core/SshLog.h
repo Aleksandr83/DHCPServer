@@ -35,7 +35,10 @@ namespace core {
  *
  * A fault of the **server** (a listener that would not start, a port taken) is not
  * written here: it belongs to `Errors.log`, where the operator looks when
- * something is wrong. This file is a record of sessions, not of faults.
+ * something is wrong. This file is a record of sessions, not of faults. The one
+ * thing it does say about the server itself is when it started (with the port) and
+ * when it stopped — without those two lines a journal that never saw a session is
+ * indistinguishable from a server that never ran.
  */
 class SshLog {
 public:
@@ -90,6 +93,30 @@ public:
 
     /// @brief `refused a session from 192.168.1.9: 2 of 2 already open`.
     void noteSessionLimit(const std::string& clientIp, uint32_t limit);
+
+    /// @brief `server started on port 22`.
+    void noteServerStart(uint16_t port);
+
+    /// @brief `server stopped`.
+    void noteServerStop();
+
+    /// @brief `session from 192.168.1.5 accepted` — the breadcrumb written as soon
+    ///        as the socket has a peer, before the filter and the task are made.
+    void noteSessionAccepted(const std::string& clientIp);
+
+    /// @brief `session from 192.168.1.5 started` — a session task is running, and
+    ///        the key exchange is the next thing that happens.
+    void noteSessionStarted(const std::string& clientIp);
+
+    /**
+     * @brief `session from 192.168.1.5 failed before the password: <reason>`.
+     *
+     * Everything that can go wrong between `accept()` and the banner — a failed
+     * key exchange, a session task that could not be started — used to be a UART
+     * line only, so a server that reset every connection left an empty journal
+     * and no way to tell why without a cable.
+     */
+    void noteSessionFault(const std::string& clientIp, const std::string& reason);
 
 private:
     SshLog() = default;
